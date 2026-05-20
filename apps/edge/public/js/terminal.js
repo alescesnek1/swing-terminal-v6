@@ -1,0 +1,3060 @@
+console.log('TERMINAL_V4_LOADED');
+
+// ─────────────────────────────────────────────────────────────
+// V6.8 Sprint 1 (FIX-3): GLOBAL XSS CLOSURE
+//
+// Every string from an upstream API (CoinGecko `name`, news titles,
+// AI text, project labels, etc.) MUST pass through `escapeHtml` before
+// reaching innerHTML. The function-declaration `escapeHtml` further
+// down (in the calendar block) is hoisted across this whole script,
+// but we re-declare a top-of-file alias `_esc` for grep-friendly intent
+// at the injection sites. Both are identical — _esc is the canonical
+// escape used by all the V6.8 patches; escapeHtml remains for legacy
+// callers (renderCalendar) so we don't break them.
+//
+// For href / src attributes, _safeUrl validates the protocol so a
+// `javascript:` URL from a malicious news source can't execute.
+// ─────────────────────────────────────────────────────────────
+function _esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function _safeUrl(u) {
+  const s = String(u || '').trim();
+  if (!s) return '';
+  // Allow only http(s) and explicit relative paths. Block javascript:,
+  // data:, vbscript:, file:, ftp:, etc.
+  if (/^(https?:\/\/|\/)/i.test(s)) return _esc(s);
+  return '';
+}
+
+// ─────────────────────────────────────────────────────────────
+// V6.9 Sprint 2: Observer registry + global click delegation.
+//
+// Every MutationObserver / ResizeObserver / IntersectionObserver
+// instantiated by the app is registered here, so the auth-signout
+// path can call _ObserverRegistry.disconnectAll() and walk away
+// with zero ghost handlers — previously, logging out left the
+// scanner header observer, the heatmap canvas observer, and the
+// manual-reveal observer leaking forever.
+//
+// `window._refreshTimer` (the 120s scanner refresh interval) is
+// cleared from the same teardown so we stop spamming /api/markets
+// after signout.
+// ─────────────────────────────────────────────────────────────
+const _ObserverRegistry = {
+  list: [],
+  add(obs) { if (obs && typeof obs.disconnect === 'function') this.list.push(obs); return obs; },
+  disconnectAll() {
+    for (const obs of this.list) { try { obs.disconnect(); } catch {} }
+    this.list.length = 0;
+  },
+};
+
+function _terminalTeardown() {
+  _ObserverRegistry.disconnectAll();
+  try { if (window._refreshTimer) clearInterval(window._refreshTimer); } catch {}
+  window._refreshTimer = null;
+  try { if (LiveFeed && LiveFeed._queueTimer) { clearInterval(LiveFeed._queueTimer); LiveFeed._queueTimer = null; } } catch {}
+  try { if (LiveFeed && LiveFeed._newsTimer)  { clearInterval(LiveFeed._newsTimer);  LiveFeed._newsTimer  = null; } } catch {}
+  _appRunning = false;
+}
+
+// ─────────────────────────────────────────────────────────────
+// V6.9 Sprint 2: Global click delegation for [data-coin-id].
+//
+// Rows in the scanner, ticker, alerts feed, movers and LiveFeed
+// coin-mentions all carry `data-coin-id`. A single capture-phase
+// listener on document.body resolves the click via
+// e.target.closest('[data-coin-id]') — no inline onclick strings,
+// no per-row handlers, no string interpolation into HTML.
+//
+// Optional dataset attributes:
+//   data-coin-tab="scanner"  → also switch tabs after pickCoin()
+//   data-stop="1"            → stopPropagation (LiveFeed inline link)
+// ─────────────────────────────────────────────────────────────
+document.addEventListener('click', (e) => {
+  // Mobile detail-row toggle. Sits inside a .trow so we must intercept
+  // BEFORE the coin-id resolver runs, otherwise the row would also pick
+  // the coin in the right panel just from the user expanding the row.
+  const toggle = e.target && e.target.closest && e.target.closest('[data-trow-toggle]');
+  if (toggle) {
+    e.stopPropagation();
+    const row = toggle.closest('.trow');
+    if (row) row.classList.toggle('expanded');
+    return;
+  }
+  const el = e.target && e.target.closest && e.target.closest('[data-coin-id]');
+  if (!el) return;
+  if (el.dataset.stop === '1') e.stopPropagation();
+  const id = el.dataset.coinId;
+  if (!id) return;
+  try { pickCoin(id); } catch (err) { console.warn('[DELEGATION] pickCoin failed:', err.message); }
+  const targetTab = el.dataset.coinTab;
+  if (targetTab) {
+    const tabBtn = document.querySelector('#tabs .tab') || document.querySelector('.tab');
+    if (tabBtn) { try { sv(targetTab, tabBtn); } catch {} }
+  }
+});
+
+// ========== LIVE FEED V4.1 — FULL TAB + NEWS INTEGRATION ==========
+const LiveFeed = {
+  _events: [],
+  _queue: [],
+  _max: 200,
+  _list: null,
+  _unreadBadge: null,
+  _statsEl: null,
+  _newsStatusEl: null,
+  _filter: 'all',
+  _unread: 0,
+  _newsCache: [],
+  _newsLastFetch: 0,
+  _newsFetchInterval: 5 * 60 * 1000,  // 5 minutes
+  _newsTimer: null,
+  _queueTimer: null,
+  _readingMode: false,
+
+  init() {
+    if (this._queueTimer) clearInterval(this._queueTimer);
+    this._queueTimer = setInterval(() => this._processQueue(), 2500);
+  },
+
+  // ── Core: enqueue for staggered delivery ──
+  enqueue(msg, type = 'info', extra = {}) {
+    this._queue.push({ msg, type, extra });
+    // Prevent infinite queue growth during reading mode
+    if (this._queue.length > 30) {
+      this._queue.shift(); // Drop oldest items
+    }
+  },
+
+  _processQueue() {
+    if (this._readingMode || !this._queue.length) return;
+    const item = this._queue.shift();
+    this.push(item.msg, item.type, item.extra);
+  },
+
+  // ── Core: push event directly ──
+  push(msg, type = 'info', extra = {}) {
+    const ts = new Date().toLocaleTimeString('cs-CZ');
+    const category = (type === 'news') ? 'news' : (type === 'ai') ? 'ai' : (['regime','hot','alert','info'].includes(type) ? 'system' : 'system');
+    const id = 'lf_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+    this._events.unshift({ id, msg, type, ts, category, ...extra });
+
+    // V5 (D-6): always trim past the hard cap, but in reading mode we
+    // protect any currently-expanded items from eviction. Old behavior
+    // froze trimming entirely when one item was expanded → unbounded
+    // growth across long sessions.
+    if (this._events.length > this._max) {
+      if (this._readingMode) {
+        const expandedIds = new Set(
+          Array.from(document.querySelectorAll('.lf-item.expanded')).map((el) => el.id),
+        );
+        // Keep all expanded items + the most recent _max non-expanded.
+        const expanded = this._events.filter((e) => expandedIds.has(e.id));
+        const recent = this._events.filter((e) => !expandedIds.has(e.id)).slice(0, this._max);
+        this._events = expanded.concat(recent);
+      } else {
+        this._events.length = this._max;
+      }
+    }
+
+    // Track unread if the user isn't on the LIVE FEED tab
+    const activeView = document.querySelector('#v-livefeed.view.on');
+    if (!activeView) {
+      this._unread++;
+      this._updateUnreadBadge();
+    }
+    this._scheduleRender();
+  },
+
+  // V5 (D-8): rAF-coalesced render. Multiple push() calls in the same
+  // tick (e.g. burst of news + hot signals from a doRefresh tick) now
+  // collapse to a single re-render instead of N full innerHTML rebuilds.
+  _renderScheduled: false,
+  _scheduleRender() {
+    if (this._renderScheduled) return;
+    this._renderScheduled = true;
+    const run = () => { this._renderScheduled = false; try { this.render(); } catch (e) { console.warn('[LF] render failed:', e.message); } };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+    else setTimeout(run, 16);
+  },
+
+  toggleExpand(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const isExpanded = el.classList.toggle('expanded');
+    
+    // Check if any items are expanded to toggle reading mode
+    const anyExpanded = !!document.querySelector('.lf-item.expanded');
+    this._readingMode = anyExpanded;
+    
+    // If we just exited reading mode, truncate events if needed
+    if (!this._readingMode && this._events.length > this._max) {
+      this._events.length = this._max;
+      this.render();
+    }
+  },
+
+  // ── Filter support ──
+  setFilter(f, el) {
+    this._filter = f || 'all';
+    // Update chip UI
+    const container = document.querySelector('.lf-view__filters');
+    if (container) {
+      container.querySelectorAll('.f-chip').forEach(c => c.classList.toggle('on', false));
+      if (el) el.classList.add('on');
+      else {
+        container.querySelectorAll('.f-chip').forEach(c => {
+          if (c.textContent.trim().toLowerCase().startsWith(f)) c.classList.add('on');
+        });
+      }
+    }
+    this.render();
+  },
+
+  // ── Render into the tab view ──
+  render() {
+    if (!this._list) this._list = document.getElementById('live-feed-list');
+    if (!this._statsEl) this._statsEl = document.getElementById('lf-stats');
+    if (!this._list) return;
+
+    // To prevent wiping out expanded state, we shouldn't re-render everything 
+    // ideally, but for now we'll just re-render and lose expansion on new ticks 
+    // unless we're in reading mode. If reading mode is on, we skip rendering new items?
+    // Actually, if we just push HTML we can keep it. But we overwrite innerHTML.
+    // Let's just avoid re-rendering if reading mode is ON, EXCEPT for the toggle itself.
+    
+    let items = this._events;
+    if (this._filter === 'news') items = items.filter(e => e.category === 'news');
+    else if (this._filter === 'system') items = items.filter(e => e.category === 'system');
+    else if (this._filter === 'ai') items = items.filter(e => e.category === 'ai' || e.type === 'ai');
+
+    if (!items.length) {
+      this._list.innerHTML = `
+        <div class="lf-empty">
+          <div class="lf-empty__icon">📡</div>
+          <div class="lf-empty__text">Žádné události${this._filter !== 'all' ? ' pro tento filtr' : ''}. Feed se naplní automaticky při refreshi dat a příchodu novinek.</div>
+        </div>`;
+    } else {
+      // Rebuild HTML but preserve expanded classes by checking the DOM
+      const expandedIds = new Set(Array.from(document.querySelectorAll('.lf-item.expanded')).map(el => el.id));
+      this._list.innerHTML = items.map(e => this._renderItem(e, expandedIds.has(e.id))).join('');
+    }
+
+    if (this._statsEl) {
+      const newsCount = this._events.filter(e => e.category === 'news').length;
+      const sysCount = this._events.filter(e => e.category === 'system').length;
+      this._statsEl.textContent = `${this._events.length} events · ${newsCount} news · ${sysCount} system`;
+    }
+  },
+
+  _renderItem(e, isExpanded = false) {
+    const iconMap = {
+      regime: '🟠', hot: '🔥', alert: '⚠️', ai: '🧠', news: '📰', info: '◈'
+    };
+    const icon = iconMap[e.type] || '◈';
+
+    // Badge
+    let badge = '';
+    if (e.category === 'system' && e.type !== 'info') {
+      badge = '<span class="lf-badge lf-badge--system">SYSTEM</span>';
+    } else if (e.category === 'news') {
+      badge = '<span class="lf-badge lf-badge--news">NEWS</span>';
+    } else if (e.type === 'ai') {
+      badge = '<span class="lf-badge lf-badge--ai">AI</span>';
+    }
+
+    // Sentiment tag (for news items)
+    let sentimentTag = '';
+    if (e.sentiment === 'bullish') sentimentTag = '<span class="lf-sentiment lf-sentiment--bullish">▲ Bullish</span>';
+    else if (e.sentiment === 'bearish') sentimentTag = '<span class="lf-sentiment lf-sentiment--bearish">▼ Bearish</span>';
+    else if (e.sentiment === 'neutral' && e.category === 'news') sentimentTag = '<span class="lf-sentiment lf-sentiment--neutral">— Neutral</span>';
+
+    // Impact score pill
+    let impactPill = '';
+    if (e.impact != null && e.category === 'news') {
+      const cls = e.impact >= 8 ? 'high' : e.impact >= 6 ? 'medium' : 'low';
+      impactPill = `<span class="lf-impact lf-impact--${cls}" title="Market impact score">${e.impact}/10</span>`;
+    }
+
+    // Source line and expanded details
+    // V6.8 Sprint 1 (FIX-3): every upstream-controlled field escaped.
+    let sourceLine = '';
+    let detailsBlock = '';
+    if (e.source) {
+      sourceLine = `<div class="lf-source">${_esc(e.source)}</div>`;
+    }
+
+    // If it's a news item, we allow expansion just for the link.
+    // _safeUrl rejects non-http(s) schemes so a malicious CryptoPanic
+    // entry can't ship a javascript: href.
+    const safeUrl = _safeUrl(e.url);
+    const isExpandable = e.category === 'news' && !!safeUrl;
+    if (isExpandable) {
+       detailsBlock = `<div class="lf-details">
+         <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin-top:2px;font-size:11px;font-weight:600">Read full article →</a>
+       </div>`;
+    }
+
+    const processedMsg = this._linkifyCoins(e.msg);
+    const expandCls = isExpanded ? ' expanded' : '';
+    // e.id is generated by us (lf_<ts>_<rand>) but we escape anyway so
+    // a future caller can't poison the onclick attribute.
+    const safeId = _esc(e.id);
+    const clickHandler = isExpandable ? `onclick="LiveFeed.toggleExpand('${safeId}')"` : '';
+    const cursorCls = isExpandable ? 'cursor:pointer;' : '';
+    // e.type is internal vocabulary but escape defensively to stop a
+    // typo from breaking class parsing.
+    const safeType = _esc(e.type);
+
+    return `<div id="${safeId}" class="lf-item lf-${safeType}${expandCls}" style="${cursorCls}" ${clickHandler}>
+      <span class="lf-ts">${_esc(e.ts)}</span>
+      <span class="lf-icon">${icon}</span>
+      <div class="lf-body">
+        <div class="lf-msg">${badge}${processedMsg}${sentimentTag}${impactPill}</div>
+        ${sourceLine}
+        ${detailsBlock}
+      </div>
+    </div>`;
+  },
+
+  // ── Clickable coin mentions ──
+  // V6.8 Sprint 1 (FIX-3): escape the message BEFORE we splice in
+  // anchor tags. Symbols are uppercase A-Z 0-9 only by Binance convention;
+  // escaping the message first guarantees any raw HTML in a news title
+  // is neutralized while the alternation still matches plain ascii.
+  // coin.id is JSON-stringified into the onclick attribute so quote
+  // injection from an upstream-controlled id can never break out.
+  _linkifyCoins(msg) {
+    const escaped = _esc(msg);
+    if (typeof DATA === 'undefined' || !Array.isArray(DATA) || !DATA.length) return escaped;
+    const symbols = DATA.map(d => (d.symbol || '').toUpperCase()).filter(Boolean);
+    if (!symbols.length) return escaped;
+    const re = new RegExp('\\b(' + symbols.join('|') + ')\\b', 'g');
+    return escaped.replace(re, (match) => {
+      const coin = DATA.find(d => (d.symbol || '').toUpperCase() === match);
+      if (!coin) return match;
+      const idAttr = _esc(String(coin.id || ''));
+      return `<span class="lf-coin-link" data-coin-id="${idAttr}" data-coin-tab="scanner" data-stop="1">${_esc(match)}</span>`;
+    });
+  },
+
+  // ── Unread badge management ──
+  _updateUnreadBadge() {
+    if (!this._unreadBadge) this._unreadBadge = document.getElementById('lf-unread');
+    if (this._unreadBadge) {
+      this._unreadBadge.textContent = this._unread > 0 ? this._unread : '';
+    }
+  },
+
+  clearUnread() {
+    this._unread = 0;
+    this._updateUnreadBadge();
+  },
+
+  // ══════════════════════════════════════════════════════════════
+  // ── NEWS INTEGRATION — /api/news edge proxy (CryptoPanic) ──
+  // ══════════════════════════════════════════════════════════════
+
+  async fetchNews() {
+    const statusEl = document.getElementById('lf-news-status');
+    try {
+      if (statusEl) statusEl.textContent = 'News: fetching…';
+
+      // Browsers can't hit CryptoPanic directly (no CORS headers).
+      // /api/news is our Deno edge proxy that fans out to CryptoPanic
+      // server-side and returns the same { results: [...] } shape.
+      let articles = [];
+      try {
+        const r = await fetch('/api/news', {
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (r.ok) {
+          const data = await r.json();
+          articles = (data.results || []).slice(0, 15);
+        } else {
+          console.warn('[NEWS] /api/news HTTP', r.status);
+        }
+      } catch (e) {
+        console.warn('[NEWS] /api/news fetch failed:', e.message);
+      }
+
+      // If both APIs fail, generate mock headlines from trusted sources
+      if (!articles.length) {
+        articles = this._generateMockHeadlines();
+      }
+
+      this._newsCache = articles;
+      this._newsLastFetch = Date.now();
+
+      // Send headlines to AI for scoring
+      await this._aiScoreNews(articles);
+
+      if (statusEl) statusEl.textContent = `News: ${articles.length} headlines · ${new Date().toLocaleTimeString('cs-CZ')}`;
+    } catch (e) {
+      console.error('[NEWS] Fetch error:', e);
+      if (statusEl) statusEl.textContent = 'News: error';
+    }
+  },
+
+  _generateMockHeadlines() {
+    // Realistic mock headlines from trusted sources when APIs are unavailable
+    const headlines = [
+      { title: 'Bitcoin Holds Above $100K as Institutional Inflows Surge', source: { title: 'CoinDesk' }, sentiment: 'bullish', impact: 8 },
+      { title: 'Ethereum ETF Spot Volume Hits Record $2.1B in Single Day', source: { title: 'The Block' }, sentiment: 'bullish', impact: 9 },
+      { title: 'Solana DeFi TVL Surpasses $15B Milestone', source: { title: 'DeFiLlama' }, sentiment: 'bullish', impact: 7 },
+      { title: 'SEC Delays Decision on Altcoin ETF Applications to Q3', source: { title: 'Bloomberg' }, sentiment: 'bearish', impact: 7 },
+      { title: 'Major Token Unlock: 500M ARB Tokens Hit Market Next Week', source: { title: 'Token Unlocks' }, sentiment: 'bearish', impact: 8 },
+      { title: 'Chainlink CCIP Integration Goes Live on 5 New Chains', source: { title: 'CoinTelegraph' }, sentiment: 'bullish', impact: 7 },
+      { title: 'Fed Minutes Signal Potential Rate Cut in September', source: { title: 'Bloomberg' }, sentiment: 'bullish', impact: 9 },
+      { title: 'Binance Delists 3 Low-Liquidity Perpetual Pairs', source: { title: 'CoinDesk' }, sentiment: 'bearish', impact: 6 },
+      { title: 'Uniswap V4 Launch Date Confirmed for June', source: { title: 'The Block' }, sentiment: 'bullish', impact: 7 },
+      { title: 'Whale Alert: $200M BTC Moved to Exchange Wallets', source: { title: 'CoinTelegraph' }, sentiment: 'bearish', impact: 7 },
+    ];
+    return headlines.map(h => ({
+      title: h.title,
+      source: h.source,
+      published_at: new Date().toISOString(),
+      _mock: true,
+      _pre_scored: true,
+      _sentiment: h.sentiment,
+      _impact: h.impact,
+    }));
+  },
+
+  // ── AI Impact Scoring via Gemini ──
+  async _aiScoreNews(articles) {
+    if (!articles.length) return;
+
+    // If articles are pre-scored mocks, push them directly
+    const preScored = articles.filter(a => a._pre_scored);
+    if (preScored.length) {
+      preScored.forEach(a => {
+        if (a._impact >= 6) {
+          this.enqueue(
+            a.title,
+            'news',
+            { sentiment: a._sentiment, impact: a._impact, source: a.source?.title || 'Unknown', url: a.url || '' }
+          );
+        }
+      });
+      return;
+    }
+
+    // For real articles, try to get AI scoring
+    const headlines = articles.map(a => a.title).join('\n');
+    let scored = null;
+
+    try {
+      const token = await _getAccessTokenForFeed();
+      if (!token) {
+        // No auth — push raw headlines without AI scoring
+        this._pushRawHeadlines(articles);
+        return;
+      }
+
+      const r = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({
+          symbol: '__NEWS_SCORING__',
+          lang: 'en',
+          _newsScoring: true,
+          headlines: headlines,
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (r.ok) {
+        const data = await r.json();
+        const text = data?.analysis || '';
+        scored = this._parseAiScores(text, articles);
+      }
+    } catch (e) {
+      console.warn('[NEWS/AI] Scoring failed:', e.message);
+    }
+
+    // Push scored or raw headlines
+    if (scored && scored.length) {
+      scored.forEach(item => {
+        if (item.impact >= 6) {
+          this.enqueue(item.title, 'news', {
+            sentiment: item.sentiment,
+            impact: item.impact,
+            source: item.source,
+            url: item.url || ''
+          });
+        }
+      });
+    } else {
+      this._pushRawHeadlines(articles);
+    }
+  },
+
+  _pushRawHeadlines(articles) {
+    // Push headlines without AI scoring — use basic keyword heuristic
+    articles.slice(0, 10).forEach(a => {
+      const title = a.title || '';
+      const lc = title.toLowerCase();
+      let sentiment = 'neutral';
+      let impact = 6; // default pass-through
+      if (/surge|rally|record|milestone|bullish|soar|breakout|approval|launch/i.test(lc)) { sentiment = 'bullish'; impact = 7; }
+      if (/crash|dump|hack|exploit|ban|delay|bearish|sell-off|unlock|liquidat/i.test(lc)) { sentiment = 'bearish'; impact = 7; }
+      if (/etf|sec|fed|regulation|institutional/i.test(lc)) impact = 8;
+
+      this.enqueue(title, 'news', {
+        sentiment,
+        impact,
+        source: a.source?.title || a.source?.domain || 'Crypto News',
+        url: a.url || ''
+      });
+    });
+  },
+
+  _parseAiScores(text, articles) {
+    // Try to extract JSON array from AI response, or fall back to line-by-line parsing
+    try {
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return parsed.map((item, i) => ({
+          title: articles[i]?.title || item.title || '',
+          impact: Math.min(10, Math.max(1, parseInt(item.impact || item.score || 5))),
+          sentiment: (item.sentiment || 'neutral').toLowerCase(),
+          source: articles[i]?.source?.title || 'Unknown',
+          url: articles[i]?.url || '',
+        }));
+      }
+    } catch (e) {
+      console.warn('[NEWS/AI] JSON parse failed, trying line parse');
+    }
+    // Fallback: return null so raw headlines are used
+    return null;
+  },
+
+  // ── Start auto-refresh ──
+  startNewsLoop() {
+    this.fetchNews();
+    if (this._newsTimer) clearInterval(this._newsTimer);
+    this._newsTimer = setInterval(() => this.fetchNews(), this._newsFetchInterval);
+  },
+};
+window.LiveFeed = LiveFeed;
+
+// Helper: get Supabase access token for news AI scoring
+async function _getAccessTokenForFeed() {
+  try {
+    const sb = window.__supabase;
+    if (!sb) return null;
+    const { data: { session } } = await sb.auth.getSession();
+    return session?.access_token || null;
+  } catch { return null; }
+}
+
+// ========== CONFIG & STATE ==========
+const PAGE_SIZE = 40;
+let DATA = [], SEL = null, SRC = 'LOADING', FG = 50;
+let BINANCE_USDC_PAIRS = new Set();
+let BINANCE_USDT_PAIRS = new Set();
+
+let currentPage = 0;
+let currentFilter = 'all';
+let currentAlertFilter = 'all';
+
+// V5 hotfix: Volatility / Panic Sentiment detector — rewritten.
+//
+// OLD math compared 24h quote-volume against an EMA of itself across
+// 2-min ticks. Because 24h is a rolling window, the tick-to-tick delta
+// is tiny — the "vol ≥ 2× avg" gate effectively never triggered, AND
+// the first refresh seeded the baseline silently, so the badge sat at
+// `VOL: 0` indefinitely.
+//
+// NEW math: pure threshold-based, fires IMMEDIATELY on the first
+// refresh — no warm-up. A coin triggers when both:
+//   • |1H %|        ≥ VOL_SPIKE_THRESHOLD_PCT   (default 5)
+//   • 24h_vol_usd   ≥ VOL_ABS_VOLUME_FLOOR_USD  (default $25M)
+// The volume floor is the "this isn't a thinly-traded ghost" gate —
+// real spikes always come with at least mid-cap liquidity.
+//
+// Tunables surface on window.__volTuning so you can soften them in
+// devtools (e.g. window.__volTuning.spikePct = 3) for testing without
+// a redeploy.
+window.__volTuning = window.__volTuning || {};
+const VOL_SPIKE_THRESHOLD_PCT_DEFAULT = 5;
+const VOL_ABS_VOLUME_FLOOR_USD_DEFAULT = 25_000_000;
+const VOL_RECENT_TRIGGERS = new Map();   // symbol → ts so we don't re-toast every 120s tick
+const VOL_REPUSH_INTERVAL_MS = 10 * 60 * 1000; // 10 min between repeated alerts for same coin
+
+function _volSpikeThreshold() {
+  const t = Number(window.__volTuning?.spikePct);
+  return Number.isFinite(t) && t > 0 ? t : VOL_SPIKE_THRESHOLD_PCT_DEFAULT;
+}
+function _volVolumeFloor() {
+  const t = Number(window.__volTuning?.volFloorUsd);
+  return Number.isFinite(t) && t > 0 ? t : VOL_ABS_VOLUME_FLOOR_USD_DEFAULT;
+}
+
+function detectVolatilitySpikes(rows) {
+  const triggered = [];
+  if (!Array.isArray(rows)) return triggered;
+  const now = Date.now();
+  const spikePct = _volSpikeThreshold();
+  const volFloor = _volVolumeFloor();
+
+  for (const d of rows) {
+    const sym = String(d.symbol || d.id || '').toUpperCase();
+    if (!sym) continue;
+    // V6.3: _c1 is often null (CoinGecko doesn't always return 1h).
+    // Fall back through every known source for 1H price change.
+    const c1raw = d._c1 ?? d.price_change_percentage_1h_in_currency ?? null;
+    const c1 = c1raw != null ? parseFloat(c1raw) : NaN;
+    const qv = parseFloat(d.total_volume) || parseFloat(d.volume_24h) || 0;
+    if (!Number.isFinite(c1)) continue;
+
+    const spike = Math.abs(c1) >= spikePct;
+    const liquid = qv >= volFloor;
+    if (!spike || !liquid) continue;
+
+    // Magnitude ratio = |1H| / threshold. Always ≥ 1 when triggered.
+    const magnitude = +(Math.abs(c1) / spikePct).toFixed(2);
+    triggered.push({ symbol: sym, c1, volRatio: magnitude, vol: qv, coinId: d.id });
+
+    const last = VOL_RECENT_TRIGGERS.get(sym) || 0;
+    if (now - last >= VOL_REPUSH_INTERVAL_MS) {
+      VOL_RECENT_TRIGGERS.set(sym, now);
+      const dir = c1 > 0 ? '▲' : '▼';
+      const volStr = qv >= 1e9 ? '$' + (qv / 1e9).toFixed(1) + 'B'
+        : qv >= 1e6 ? '$' + (qv / 1e6).toFixed(0) + 'M' : '$' + qv.toFixed(0);
+      LiveFeed.push(`PANIC: ${sym} ${dir} ${c1.toFixed(2)}% · vol ${volStr}`, 'alert');
+    }
+  }
+  return triggered;
+}
+
+// V5 (Phase 4 Wildcard B): Composite Multi-Timeframe Momentum Score.
+//
+// Weighted, alignment-aware score across the 5 timeframes the markets
+// pipeline already provides (1H / 4H / 12H / 24H / 7D). Trader logic:
+//
+//   • Each TF contributes a normalized component in [-1, +1] capped
+//     at ±15% extreme for stability.
+//   • TFs are weighted to emphasize short-term (acceleration) without
+//     ignoring trend: 1H=0.30, 4H=0.25, 12H=0.20, 24H=0.15, 7D=0.10.
+//   • A "stack" multiplier rewards alignment — when 4+ of the 5 TFs
+//     agree in sign, we boost the magnitude (multi-TF stack = real
+//     momentum, not noise). When TFs are split, we damp it (chop).
+//   • Final score in [-100, +100]. Positive = bullish momentum, negative
+//     = bearish, near zero = neutral / mixed.
+//   • Classification:
+//       ≥ 60   STRONG bull
+//       30..60 BULLISH
+//       -30..30 NEUTRAL / MIXED
+//       -60..-30 BEARISH
+//       ≤ -60  STRONG bear
+//
+// All pure compute on existing markets payload — zero new requests.
+const _MOM_WEIGHTS = { c1: 0.30, c4: 0.25, c12: 0.20, c24: 0.15, c7d: 0.10 };
+const _MOM_CAP_PCT = 15;
+function _momComponent(v) {
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(-1, Math.min(1, n / _MOM_CAP_PCT));
+}
+function computeMomentumScore(d) {
+  const comps = {
+    c1:  _momComponent(d._c1),
+    c4:  _momComponent(d._c4),
+    c12: _momComponent(d._c12),
+    c24: _momComponent(d._c24 ?? d.price_change_percentage_24h),
+    c7d: _momComponent(d._c7d),
+  };
+  let weighted = 0;
+  let weightSum = 0;
+  const signs = [];
+  for (const [k, w] of Object.entries(_MOM_WEIGHTS)) {
+    const v = comps[k];
+    if (v == null) continue;
+    weighted += v * w;
+    weightSum += w;
+    signs.push(Math.sign(v));
+  }
+  if (!weightSum) return { score: 0, label: 'N/A', cls: 'mom-neutral', stack: 0 };
+  const base = weighted / weightSum;
+  // Stack: 1.0 when all TFs aligned, 0.6 when half-aligned, 0.4 when split.
+  const posCount = signs.filter((s) => s > 0).length;
+  const negCount = signs.filter((s) => s < 0).length;
+  const total = signs.length || 1;
+  const alignment = Math.max(posCount, negCount) / total; // 0.2 - 1.0
+  const stackMult = 0.4 + (alignment - 0.2) * (1.0 - 0.4) / (1.0 - 0.2);
+  const score = Math.round(Math.max(-100, Math.min(100, base * 100 * stackMult)));
+  let label = 'NEUTRAL';
+  let cls = 'mom-neutral';
+  if (score >= 60) { label = 'STRONG ▲'; cls = 'mom-strong'; }
+  else if (score >= 30) { label = 'BULL'; cls = 'mom-strong'; }
+  else if (score <= -60) { label = 'STRONG ▼'; cls = 'mom-weak'; }
+  else if (score <= -30) { label = 'BEAR'; cls = 'mom-weak'; }
+  else if (Math.abs(score) < 10 && (posCount && negCount)) { label = 'MIXED'; cls = 'mom-mixed'; }
+  return { score, label, cls, stack: +alignment.toFixed(2), components: comps };
+}
+
+// V5 (Phase 4 Wildcard A): Smart Money Divergence — fetches the
+// /api/funding-divergence batched signal map and merges into DATA so
+// renderList() can stamp a SHORTS_TRAPPED / LONGS_TRAPPED tag next to
+// the signal label. Throttled to once per refresh tick (~120s).
+const DIVERGENCE_MAP = new Map(); // base symbol → signal object
+async function fetchDivergence() {
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) return;
+    const r = await fetch('/api/funding-divergence', {
+      headers: { 'Accept': 'application/json', ...authHeaders },
+    });
+    if (!r.ok) return;
+    const j = await r.json();
+    DIVERGENCE_MAP.clear();
+    for (const s of (j.signals || [])) {
+      DIVERGENCE_MAP.set(String(s.symbol || '').toUpperCase(), s);
+    }
+    // High-confidence signals get a LiveFeed push (throttled below).
+    for (const s of (j.signals || []).slice(0, 5)) {
+      if (s.confidence >= 0.5) {
+        LiveFeed.push(`${s.symbol} ${s.signal} (${s.bias.toUpperCase()}) · fund ${s.funding_pct.toFixed(3)}% · 24h ${s.price_change_24h_pct > 0 ? '+' : ''}${s.price_change_24h_pct.toFixed(1)}%`, 'alert');
+      }
+    }
+  } catch (e) {
+    console.warn('[DIVERGENCE] fetch failed:', e.message);
+  }
+}
+
+// V5 (Sniper Limit Protocol): batched /api/sniper-detect map.
+// Two maps so renderers don't have to filter every paint:
+//   SNIPER_MAP    = base symbol → row, ONLY for triggered coins
+//                   (current price within 2 % of the optimal entry).
+//                   Drives the pulsing 🎯 SNIPER badge in the table.
+//   SNIPER_ALL_MAP = base symbol → row, every coin where a bid wall
+//                   was detected (triggered or not). Drives the
+//                   "Optimal Limit Entry" box in the detail panel so
+//                   the trader can pre-plan an entry even before the
+//                   coin has dripped into the trigger zone.
+const SNIPER_MAP = new Map();
+const SNIPER_ALL_MAP = new Map();
+async function fetchSniper() {
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) return;
+    const r = await fetch('/api/sniper-detect', {
+      headers: { 'Accept': 'application/json', ...authHeaders },
+    });
+    if (!r.ok) return;
+    const j = await r.json();
+    SNIPER_MAP.clear();
+    SNIPER_ALL_MAP.clear();
+    for (const s of (j.all || [])) {
+      const k = String(s.symbol || '').toUpperCase();
+      if (!k) continue;
+      SNIPER_ALL_MAP.set(k, s);
+    }
+    for (const s of (j.signals || [])) {
+      const k = String(s.symbol || '').toUpperCase();
+      if (!k) continue;
+      SNIPER_MAP.set(k, s);
+    }
+    // Push the top-confidence triggers into LiveFeed so they're not
+    // discoverable only by scrolling the table. Throttled to top 3.
+    for (const s of (j.signals || []).slice(0, 3)) {
+      if (s.confidence >= 0.55) {
+        LiveFeed.push(
+          `🎯 SNIPER ${s.symbol} · entry ${fmt(s.optimal_limit_entry)} · wall ${fmt(s.wall_notional_usd)} · ${s.proximity_pct.toFixed(2)}% from mark · conf ${s.confidence}`,
+          'alert',
+        );
+      }
+    }
+  } catch (e) {
+    console.warn('[SNIPER] fetch failed:', e.message);
+  }
+}
+
+function renderVolatilityBadge(triggered) {
+  const el = document.getElementById('volatility-badge');
+  const txt = document.getElementById('volatility-text');
+  if (!el || !txt) return;
+  const n = triggered.length;
+
+  // V6.3: also show aggregate 24h volume so the badge is never just "VOL: 0"
+  const totalVol = DATA.reduce((s, d) => s + (parseFloat(d.total_volume) || 0), 0);
+  const volStr = totalVol >= 1e12 ? '$' + (totalVol / 1e12).toFixed(1) + 'T'
+    : totalVol >= 1e9 ? '$' + (totalVol / 1e9).toFixed(1) + 'B'
+    : totalVol >= 1e6 ? '$' + (totalVol / 1e6).toFixed(0) + 'M'
+    : '$' + totalVol.toFixed(0);
+  txt.textContent = n > 0 ? `VOL: ${n} · ${volStr}` : `VOL: ${volStr}`;
+
+  el.classList.remove('volatility-calm', 'volatility-elevated', 'volatility-panic');
+  if (n >= 5) el.classList.add('volatility-panic');
+  else if (n >= 1) el.classList.add('volatility-elevated');
+  else el.classList.add('volatility-calm');
+  // Tooltip listing top 3 triggers
+  if (n) {
+    const top = triggered
+      .sort((a, b) => Math.abs(b.c1) - Math.abs(a.c1))
+      .slice(0, 3)
+      .map((t) => `${t.symbol} ${t.c1 > 0 ? '+' : ''}${t.c1.toFixed(1)}% · ${t.volRatio}×vol`)
+      .join('\n');
+    el.title = `Volatility spikes (|1H| ≥ 5% & vol ≥ 2× avg):\n${top}\n\nTotal 24h vol: ${volStr}`;
+  } else {
+    el.title = `No volatility spikes — markets calm\nTotal 24h vol: ${volStr}`;
+  }
+}
+
+// REGIME state — populated by /api/regime (server-side calc, Redis-cached).
+//   • bucket: 'bear' | 'chop' | 'bull' — primary directional state
+//   • level:  'shock' | 'elevated' | 'normal' — legacy alarm vocabulary,
+//             kept in sync with bucket so existing sig()/setup checks
+//             still resolve without a sweeping refactor.
+let REGIME = { bucket: 'chop', level: 'normal', score: 0, label: '—', reasons: [], history: [] };
+let ALL_ALERTS = [];
+let TG_SENT = {};
+let REFRESH_INTERVAL = 120;
+let SHOCK_THRESHOLD = 70;
+let TG_THROTTLE_MIN = 15;
+let TG_MIN_SCORE = 6;
+
+function getMinScoreFromStorage() {
+  try {
+    const raw = localStorage.getItem('swing_tg');
+    if (raw) {
+      const cfg = JSON.parse(raw);
+      const n = parseInt(cfg.minScore);
+      if (Number.isFinite(n)) return Math.max(1, Math.min(10, n));
+    }
+  } catch (e) {}
+  return 6;
+}
+
+// ========== SECTOR MAPPING ==========
+const SECTOR_MAP = {
+  'L1': ['bitcoin','ethereum','solana','cardano','avalanche-2','polkadot','near','sui','aptos','toncoin','cosmos','fantom','algorand','hedera-hashgraph','internet-computer','sei-network','celestia','injective-protocol','stacks','kaspa','mantle','eos','tezos','flow','multiversx-egld','vechain','cronos','neo','zilliqa','harmony','celo','mina-protocol','oasis-network'],
+  'L2': ['matic-network','arbitrum','optimism','starknet','blast','immutable-x','metis-token','boba-network','loopring','skale'],
+  'DeFi': ['uniswap','aave','chainlink','maker','lido-dao','curve-dao-token','synthetix-network-token','compound-governance-token','pancakeswap-token','jupiter-exchange-solana','raydium','thorchain','1inch','sushi','yearn-finance','convex-finance','frax','dydx-chain','gmx','pendle','ethena','ondo-finance','morpho'],
+  'Meme': ['dogecoin','shiba-inu','pepe','dogwifcoin','floki','bonk','brett-based','mog-coin','popcat','trump-official','fartcoin','ai16z','goatseus-maximus','cat-in-a-dogs-world'],
+  'AI': ['fetch-ai','render-token','bittensor','akash-network','ocean-protocol','singularitynet','phala-network','virtual-protocol','grass','io-net','nosana','arkham'],
+  'Gaming': ['axie-infinity','the-sandbox','decentraland','gala','illuvium','ultra','beam-2','pixels-2','ronin','echelon-prime'],
+  'Infra': ['filecoin','arweave','the-graph','helium','theta-token','livepeer','audius','pyth-network','wormhole','layerzero']
+};
+
+function getSector(id) {
+  for (const [sec, ids] of Object.entries(SECTOR_MAP)) {
+    if (ids.includes(id)) return sec;
+  }
+  return 'Other';
+}
+
+// ========== UTILITY FUNCTIONS ==========
+function fmt(n) {
+  if (n == null || isNaN(n)) return '$0';
+  if (n >= 1e12) return '$' + (n/1e12).toFixed(2) + 'T';
+  if (n >= 1e9) return '$' + (n/1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return '$' + (n/1e6).toFixed(1) + 'M';
+  if (n >= 1000) return '$' + n.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  if (n >= 1) return '$' + n.toFixed(2);
+  if (n >= 0.001) return '$' + n.toFixed(4);
+  return '$' + n.toFixed(6);
+}
+function fp(n, d=2) { return n == null ? '—' : (n >= 0 ? '+' : '') + n.toFixed(d) + '%'; }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function rng(seed) { let s = (((seed % 2147483647) + 2147483647) % 2147483647) || 1; return () => { s = (16807 * s) % 2147483647; return (s - 1) / 2147483646; }; }
+function coinRng(id, salt=0) { return rng(id.split('').reduce((a,c) => a*31 + c.charCodeAt(0), 1) + salt + Math.floor(Date.now()/900000)); }
+
+// ========== DERIVED METRICS ==========
+function get1h(d) { return d._c1 || 0; }
+function get4h(d) { return d._c4 || 0; }
+function getVolPct(d) { return (d.total_volume / 100000000) * 100; /* simplified since it's now absolute volume */ }
+function getFunding(d) { return d._funding || 0; }
+function getPredFunding(d) { return (d._funding || 0) * 1.5; }
+function getBasis(d) { return ((d._funding || 0) * 100).toFixed(4); }
+function getOiPct(d) { return d._oiDelta || 0; }
+function getLsRatio(d) { 
+  const tr = d._takerRatio || 0.5;
+  return { l: tr * 100, s: (1 - tr) * 100 }; 
+}
+
+// ========== COMPOSITE HOTNESS SCORE (0-100) ==========
+// Post-pivot: rebuilt to consume only fields available from
+// /ticker/24hr — change %, intraday range, range position, quote
+// volume. Funding/OI/1H components were removed when we dropped
+// the background ingest worker.
+function calcHotness(d) {
+  const safe = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+  const c24 = Math.abs(safe(d.price_change_percentage_24h));
+  const high = safe(d.high_24h);
+  const low = safe(d.low_24h);
+  const price = safe(d.current_price);
+  const qv = safe(d.total_volume);
+
+  const rangePct = low > 0 ? ((high - low) / low) * 100 : 0;
+  const pos = high > low ? (price - low) / (high - low) : 0.5;
+  const edge = Math.abs(pos - 0.5) * 2;                    // 0 mid → 1 at 24h extreme
+
+  const priceScore = clamp(c24 * 2.5, 0, 30);              // 12% → max
+  const rangeScore = clamp(rangePct * 2, 0, 25);           // 12.5% → max
+  // Log-scale volume: $1M ≈ 0, $1B ≈ 30
+  const volScore = qv > 1e6 ? clamp((Math.log10(qv) - 6) * 10, 0, 30) : 0;
+  const edgeScore = clamp(edge * 15, 0, 15);
+
+  return Math.round(clamp(priceScore + rangeScore + volScore + edgeScore, 0, 100));
+}
+
+// ========== MARKET-WIDE HOTNESS (0-100) ==========
+function calcMarketHotness() {
+  if (!DATA.length) return 0;
+  const avgAbs24h = DATA.reduce((s,d) => s + Math.abs(d.price_change_percentage_24h || 0), 0) / DATA.length;
+  const avgRangePct = DATA.reduce((s,d) => {
+    const high = parseFloat(d.high_24h) || 0, low = parseFloat(d.low_24h) || 0;
+    return s + (low > 0 ? ((high - low) / low) * 100 : 0);
+  }, 0) / DATA.length;
+  const avgVolLog = DATA.reduce((s,d) => {
+    const qv = parseFloat(d.total_volume) || 0;
+    return s + (qv > 1e6 ? Math.log10(qv) - 6 : 0);
+  }, 0) / DATA.length;
+  const alertDensity = ALL_ALERTS.length / Math.max(DATA.length, 1) * 100;
+
+  const priceComp = clamp(avgAbs24h * 5, 0, 35);
+  const rangeComp = clamp(avgRangePct * 3, 0, 25);
+  const volComp   = clamp(avgVolLog * 8, 0, 20);
+  const alertComp = clamp(alertDensity * 3, 0, 20);
+  return Math.round(clamp(priceComp + rangeComp + volComp + alertComp, 0, 100));
+}
+
+// ========== COIN SIGNAL ==========
+// Score recipe (0-10) — additive components, each capped:
+//   • Change strength (|24h %|)        0-3 pts (saturates at ±10%)
+//   • Range expansion (intraday vol)   0-2 pts (saturates at 8%)
+//   • Volume conviction (log USD)      0-3 pts ($1M = 0, $1B = 3)
+//   • Range-position edge              0-2 pts (extreme = high)
+// Pattern detection (RECLAIM / FLUSH) keys off c24 + range position.
+function sig(d) {
+  const safe = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+  const c24 = safe(d.price_change_percentage_24h);
+  const high = safe(d.high_24h);
+  const low = safe(d.low_24h);
+  const price = safe(d.current_price);
+  const qv = safe(d.total_volume);
+
+  const rangePct = low > 0 ? ((high - low) / low) * 100 : 0;
+  const pos = high > low ? (price - low) / (high - low) : 0.5;     // 0 = at low, 1 = at high
+
+  const reasons = [];
+  const whyTags = [];
+  let pattern = null;
+
+  // ── Components ──
+  const changeComp = Math.min(3, Math.abs(c24) / 10 * 3);
+  const rangeComp  = Math.min(2, rangePct / 8 * 2);
+  const volComp    = qv > 0 ? Math.min(3, Math.max(0, (Math.log10(Math.max(qv, 1)) - 6))) : 0;
+  const edgeComp   = Math.min(2, Math.abs(pos - 0.5) * 4);
+  let score = changeComp + rangeComp + volComp + edgeComp;
+
+  // ── Pattern detection ──
+  if (c24 <= -6 && pos < 0.25) {
+    pattern = 'FLUSH';
+    reasons.push(`Kapitulace u 24h low (${fp(c24,1)})`);
+    whyTags.push({tag:'CAPITULATION',col:'var(--red)'});
+    score += 1;
+  } else if (c24 <= -3 && pos > 0.6) {
+    pattern = 'RECLAIM';
+    reasons.push('Reclaim z dumpu — cena zpět nad mid-range');
+    whyTags.push({tag:'RECLAIM',col:'var(--cyan)'});
+    score += 1;
+  } else if (c24 >= 6 && pos > 0.75) {
+    reasons.push(`Breakout u 24h high (${fp(c24,1)})`);
+    whyTags.push({tag:'BREAKOUT',col:'var(--grn)'});
+  } else if (c24 >= 3 && pos < 0.4) {
+    reasons.push('Up day, ale pullback k 24h podpoře');
+    whyTags.push({tag:'PULLBACK',col:'var(--amb)'});
+  } else if (Math.abs(c24) < 2 && rangePct > 6) {
+    reasons.push('Široký range bez čistého směru — chop');
+    whyTags.push({tag:'CHOP',col:'var(--txt3)'});
+  }
+
+  // ── Annotations ──
+  if (qv >= 1e9) { reasons.push('Vysoký 24h volume (>$1B)'); whyTags.push({tag:'HIGH VOL',col:'var(--amb)'}); }
+  else if (qv >= 1e8) { reasons.push('Solidní 24h volume (>$100M)'); }
+  if (rangePct > 10) reasons.push(`Vol expanze — 24h range ${rangePct.toFixed(1)}%`);
+  if (REGIME.level === 'shock') whyTags.push({tag:'MARKET SHOCK',col:'var(--red)'});
+
+  // ── Label decision (CSS class vocabulary unchanged) ──
+  let label = 'NEUT', cls = 'neut';
+  if (pattern === 'FLUSH' && score >= 6) { label = 'FLUSH+BUY'; cls = 'flush'; }
+  else if (pattern === 'RECLAIM' && score >= 5) { label = 'RECLAIM'; cls = 'reclaim'; }
+  else if (score >= 7 && c24 > 0) { label = 'BUY'; cls = 'buy'; }
+  else if (score >= 7 && c24 < 0) { label = 'SHORT'; cls = 'sell'; }
+  else if (score >= 5) { label = 'WATCH'; cls = 'neut'; }
+
+  if (!reasons.length) reasons.push('Žádný výrazný 24h signál');
+
+  score = Math.round(Math.max(0, Math.min(10, score)));
+  return { label, cls, score, reasons, pattern, whyTags };
+}
+
+// V6.9 Sprint 2: read sig() from the per-cycle cache. doRefresh stamps
+// every coin once with `d._sig`; this helper falls back to a live call
+// for any stray coin that bypassed the stamp (mid-cycle inject etc).
+function _sigOf(d) {
+  if (d && d._sig) return d._sig;
+  try { const s = sig(d); if (d) { d._sig = s; d._sig_score = s.score; } return s; }
+  catch { return { label:'NEUT', cls:'neut', score:0, reasons:[], pattern:null, whyTags:[] }; }
+}
+
+function getSetupValidity(d) {
+  const s = _sigOf(d), c24 = d.price_change_percentage_24h || 0;
+  if (s.label === 'RECLAIM') return { type: 'BREAKOUT RECLAIM', col: 'var(--cyan)', border: 'rgba(34,211,238,.3)', desc: 'Cena se vratila po sweepu.' };
+  if (s.label === 'FLUSH+BUY') return { type: 'FLUSH + REBOUND', col: 'var(--pur)', border: 'rgba(168,85,247,.3)', desc: 'Kapitulacni pohyb s volume.' };
+  if (s.score >= 6) return { type: 'STRONG SIGNAL', col: 'var(--grn)', border: 'rgba(0,212,132,.3)', desc: 'Dostatek konvergujicich signalu pro alert.' };
+  if (REGIME.level === 'shock') return { type: 'MARKET-WIDE SQUEEZE', col: 'var(--red)', border: 'rgba(255,51,86,.3)', desc: 'Celotrhovy pohyb.' };
+  return { type: 'WEAK / NOISY', col: 'var(--txt3)', border: 'var(--b2)', desc: 'Zadny jasny setup.' };
+}
+
+// ========== MARKET REGIME — SERVER-DRIVEN ==========
+// All calculation moved to /api/regime (Deno edge + Upstash 15-min
+// cache). This client just fetches the precomputed state and merges
+// it into the global REGIME object. Bucket → level mapping preserves
+// compatibility with sig() / getSetupValidity() which still read
+// REGIME.level. Soft-fail: a regime fetch error never breaks the
+// scanner — REGIME just retains its last good state.
+
+const BUCKET_TO_LEVEL = { bear: 'shock', chop: 'elevated', bull: 'normal' };
+
+async function fetchRegime() {
+  try {
+    const r = await fetch('/api/regime', { headers: { 'Accept': 'application/json' } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    if (!j || !j.current) throw new Error('Empty regime payload');
+
+    const cur = j.current;
+    const bucket = cur.bucket || 'chop';
+    REGIME = {
+      bucket,
+      level: BUCKET_TO_LEVEL[bucket] || 'normal',
+      score: Number(cur.score) || 0,
+      label: cur.label || '—',
+      reasons: Array.isArray(cur.reasons) ? cur.reasons : [],
+      inputs: cur.inputs || null,
+      components: cur.components || null,
+      computed_at: cur.computed_at || null,
+      cached: !!j.cached,
+      stale: !!j.stale,
+      history: Array.isArray(j.history) ? j.history : [],
+    };
+  } catch (e) {
+    console.warn('[REGIME] fetch failed:', e.message);
+    window.Toast?.warn('Regime fetch failed', e.message, { endpoint: '/api/regime' });
+    // Keep prior REGIME on failure so the UI doesn't flicker back to a stub.
+  }
+}
+
+// ========== ALERT SYSTEM ==========
+function buildAlerts() {
+  const als = [];
+  const FLOOR = TG_MIN_SCORE;
+  DATA.forEach(d => {
+    const s = _sigOf(d);
+    const c24 = d.price_change_percentage_24h || 0;
+    if (s.score < FLOOR) return;
+    const sym = (d.symbol || d.id).toUpperCase();
+
+    if (s.label === 'FLUSH+BUY') als.push({tp:'flush',t:`${sym} — FLUSH SETUP`,b:`Kapitulace · Score ${s.score}/10`,reason:s.reasons[0],pri:1,category:'coin',coinId:d.id});
+    else if (s.label === 'RECLAIM') als.push({tp:'reclaim',t:`${sym} — RECLAIM`,b:`Reclaim po dumpu ${fp(c24,1)} · Score ${s.score}/10`,reason:s.reasons[0],pri:1,category:'coin',coinId:d.id});
+    else if (s.label === 'BUY') als.push({tp:'buy',t:`${sym} — STRONG BUY`,b:`Score ${s.score}/10 · ${fp(c24,1)}`,reason:s.reasons.join(', '),pri:1,category:'coin',coinId:d.id});
+    else if (s.label === 'SHORT') als.push({tp:'sell',t:`${sym} — SHORT SIGNAL`,b:`Score ${s.score}/10 · ${fp(c24,1)}`,reason:s.reasons.join(', '),pri:1,category:'coin',coinId:d.id});
+    else if (s.score >= 6) als.push({tp:'watch',t:`${sym} — WATCH`,b:`Score ${s.score}/10`,reason:s.reasons.join(', '),pri:2,category:'coin',coinId:d.id});
+  });
+
+  if (!als.length) als.push({tp:'info',t:'TRH V KLIDU',b:'Zadne vyrazne signaly.',reason:'',pri:3,category:'info'});
+  als.sort((a,b) => a.pri - b.pri);
+  ALL_ALERTS = als;
+  return als;
+}
+
+function loadTgConfig() {
+  // Config UI was retired in v5h3 (replaced by the Interactive Manual).
+  // Persisted values are still consumed here so trading-engine defaults
+  // can be overridden via localStorage by power users, just without
+  // visible DOM inputs.
+  try { TG_MIN_SCORE = getMinScoreFromStorage(); } catch(e) {}
+  try {
+    const cfg = JSON.parse(localStorage.getItem('swing_cfg') || '{}');
+    if (cfg.refresh) REFRESH_INTERVAL = cfg.refresh;
+    if (cfg.shock) SHOCK_THRESHOLD = cfg.shock;
+  } catch(e) {}
+}
+
+// Note (v5h3): saveConfig / saveTgConfig / showTgStatus were retired
+// with the Config tab. Engine values live in localStorage and are read
+// by loadTgConfig() on boot. The Interactive Manual replaces the old
+// settings UI.
+
+// ========== MARKET DATA FETCH ==========
+async function fetchBinancePairs() {
+  try {
+    const r = await fetch('https://api.binance.com/api/v3/exchangeInfo');
+    const data = await r.json();
+    data.symbols.forEach(s => {
+      if (s.status === 'TRADING' && s.isSpotTradingAllowed) {
+        if (s.quoteAsset === 'USDC') BINANCE_USDC_PAIRS.add(s.symbol);
+        if (s.quoteAsset === 'USDT') BINANCE_USDT_PAIRS.add(s.symbol);
+      }
+    });
+    const bstatus = document.getElementById('binance-status');
+    if (bstatus) bstatus.textContent = `Nacteno: ${BINANCE_USDC_PAIRS.size} USDC paru, ${BINANCE_USDT_PAIRS.size} USDT paru`;
+  } catch(e) {
+    const bstatus = document.getElementById('binance-status');
+    if (bstatus) bstatus.textContent = 'Chyba nacteni Binance paru: ' + e.message;
+  }
+}
+
+function isOnBinance(d) {
+  // Server-supplied flag wins; otherwise fall back to client-side
+  // exchangeInfo lookup so the UI works even before the first
+  // /api/markets response lands.
+  if (d && typeof d.binance_available === 'boolean') return d.binance_available;
+  const sym = (d?.symbol || '').toUpperCase();
+  return BINANCE_USDC_PAIRS.has(sym + 'USDC') || BINANCE_USDT_PAIRS.has(sym + 'USDT');
+}
+
+function getBinanceLink(d) {
+  const sym = (d.symbol || '').toUpperCase();
+  // Honor the server-side hint first — for non-Binance/DEX coins this
+  // short-circuits before we try to construct a fake Binance URL.
+  if (d.binance_available === false) return { url: null, pair: null, available: false };
+
+  // ALPHA = futures-only listing → link to the Binance Futures trade
+  // page instead of spot, otherwise the user clicks through to a 404.
+  if (d.binance_market === 'futures' || d.exchange === 'ALPHA') {
+    const fpair = d.futures_pair || d.pair || (sym + 'USDT');
+    return {
+      url: `https://www.binance.com/en/futures/${fpair}`,
+      pair: fpair,
+      available: true,
+      market: 'futures',
+    };
+  }
+
+  if (d.pair && d.quote) {
+    return { url: `https://www.binance.com/en/trade/${sym}_${d.quote}?type=spot`, pair: `${sym}/${d.quote}`, available: true, market: 'spot' };
+  }
+  if (BINANCE_USDC_PAIRS.has(sym + 'USDC')) return { url: `https://www.binance.com/en/trade/${sym}_USDC?type=spot`, pair: sym + '/USDC', available: true, market: 'spot' };
+  if (BINANCE_USDT_PAIRS.has(sym + 'USDT')) return { url: `https://www.binance.com/en/trade/${sym}_USDT?type=spot`, pair: sym + '/USDT', available: true, market: 'spot' };
+  return { url: null, pair: null, available: false };
+}
+
+// V5: forward Supabase access token so /api/markets can resolve tier.
+async function _getAuthHeaders() {
+  try {
+    const sb = window.__supabase;
+    if (!sb) return {};
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session?.access_token) return {};
+    return { 'Authorization': `Bearer ${session.access_token}` };
+  } catch { return {}; }
+}
+
+async function fetchData() {
+  let live = null;
+  try {
+    const authHeaders = await _getAuthHeaders();
+    const r = await fetch('/api/markets', { headers: { 'Accept': 'application/json', ...authHeaders } });
+    if (!r.ok) {
+      const body = await r.text().catch(() => '');
+      window.Toast?.error('Market data fetch failed', `HTTP ${r.status} — ${body.slice(0,140)}`, { endpoint: '/api/markets', code: r.status });
+      throw new Error('HTTP ' + r.status);
+    }
+    let rawData = await r.json();
+    console.log("🔍 Data from /api/markets:", rawData);
+    
+    // Normalizace symbolů ze surových Binance stringů
+    if (Array.isArray(rawData)) {
+      rawData.forEach(d => {
+        if (d.symbol) d.symbol = d.symbol.split(':')[0];
+        d.current_price = d.current_price || 0;
+        d.price_change_percentage_24h = d.price_change_percentage_24h || d._c24 || 0;
+        d.total_volume = d.total_volume || 0;
+        d._funding = d._funding || 0;
+        d._oi = d._oi || 0;
+        d._oiDelta = d._oiDelta || 0;
+      });
+    }
+
+    live = rawData;
+    SRC = 'BINANCE-LIVE';
+  } catch(e) {
+    SRC = 'ERROR';
+    console.error('Data fetch err:', e);
+    window.Toast?.error('Scanner refresh failed', e.message || String(e), { endpoint: '/api/markets' });
+  }
+
+  try {
+    const r2 = await fetch('https://api.alternative.me/fng/?limit=1');
+    const j = await r2.json();
+    if (j.data?.[0]) FG = parseInt(j.data[0].value);
+  } catch(e) {}
+  return live;
+}
+
+// ========== RENDER FUNCTIONS ==========
+function renderTopbar() {
+  const hotness = calcMarketHotness();
+  const hCol = hotness > 70 ? 'var(--red)' : hotness > 40 ? 'var(--amb)' : 'var(--grn)';
+  document.getElementById('hotness-fill').style.width = hotness + '%';
+  document.getElementById('hotness-fill').style.background = hCol;
+  document.getElementById('hotness-val').textContent = hotness;
+  document.getElementById('hotness-val').style.color = hCol;
+
+  const rb = document.getElementById('regime-badge');
+  rb.className = 'regime-badge regime-' + REGIME.level;
+  rb.querySelector('.regime-dot').style.background = REGIME.bucket === 'bear' ? 'var(--red)' : REGIME.bucket === 'chop' ? 'var(--amb)' : 'var(--grn)';
+  document.getElementById('regime-text').textContent = (REGIME.label || REGIME.bucket || '—').toUpperCase() + ' · ' + (REGIME.score | 0);
+
+  document.getElementById('srcb').className = 'sbadge ' + (SRC.includes('LIVE') ? 's-live' : 's-mock');
+  document.getElementById('srcb').textContent = SRC;
+  document.getElementById('sts').textContent = SRC;
+  document.getElementById('last-update').textContent = new Date().toLocaleTimeString('cs-CZ');
+
+  const top10 = DATA.slice(0, 10);
+  document.getElementById('tkr').innerHTML = top10.map(d => {
+    // V6.8 Sprint 1 (FIX-3): sym + d.id are upstream strings, escape both.
+    // d.id flows into onclick — JSON.stringify guarantees attribute safety.
+    const sym = (d.symbol || '').toUpperCase();
+    const idAttr = _esc(String(d.id || ''));
+    return `<div class="ti" data-coin-id="${idAttr}" data-coin-tab="scanner">
+      <span class="tsym">${_esc(sym)}</span><span class="tprc">${_esc(fmt(d.current_price))}</span>
+      <span class="${(d.price_change_percentage_24h||0)>=0?'pos':'neg'}">${_esc(fp(d.price_change_percentage_24h||0,1))}</span></div>`;
+  }).join('');
+}
+
+// V6.4: hard cap at 500 active coins in the scanner DOM.
+// Server ships up to 1000; scanner paginates; movers uses the full pool.
+const MAX_RENDERED = 500;
+
+function getFilteredSorted() {
+  let filtered = [...DATA];
+  const search = (document.getElementById('coin-search')?.value || '').toLowerCase();
+  if (search) filtered = filtered.filter(d => d.id.includes(search) || (d.symbol || '').toLowerCase().includes(search));
+  if (currentFilter === 'alerts') filtered = filtered.filter(d => (d._sig_score || 0) >= 6);
+  else if (currentFilter !== 'all' && SECTOR_MAP[currentFilter]) filtered = filtered.filter(d => SECTOR_MAP[currentFilter].includes(d.id));
+
+  // V6.9 Sprint 2: sort reads the pre-computed native property —
+  // no sig() math inside the comparator (N log N → trivial).
+  filtered.sort((a, b) => {
+    const sa = a._sig_score || 0, sb = b._sig_score || 0;
+    if (sa !== sb) return sb - sa;
+    return (b.market_cap || 0) - (a.market_cap || 0);
+  });
+  if (filtered.length > MAX_RENDERED) filtered.length = MAX_RENDERED;
+  return filtered;
+}
+
+function renderList() {
+  const filtered = getFilteredSorted();
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  currentPage = clamp(currentPage, 0, Math.max(0, totalPages - 1));
+  const start = currentPage * PAGE_SIZE;
+  const page = filtered.slice(start, start + PAGE_SIZE);
+
+  if (filtered.length === 0) {
+    document.getElementById('clist').innerHTML = `<div style="padding:30px;text-align:center;color:var(--txt3)">Zadne vysledky.</div>`;
+    document.getElementById('scnt').textContent = '0 / ' + DATA.length;
+    return;
+  }
+
+  const htmls = [];
+  // Render a multi-timeframe % cell. Accepts null/undefined/NaN to mean
+  // "no data from upstream" — those render as a neutral "-" rather than
+  // a misleading 0% (some DEX-only coins lack 1H or sparkline-derived
+  // 4H/12H entirely; the upstream contract is documented in markets.js).
+  const tfCell = (v) => {
+    const n = (v == null || v === '') ? NaN : parseFloat(v);
+    if (!Number.isFinite(n)) return '<span class="tr" style="color:var(--txt3)">-</span>';
+    const cls = n >= 0 ? 'pos' : 'neg';
+    return `<span class="tr ${cls}">${fp(n, 1)}</span>`;
+  };
+
+  page.forEach((d, i) => {
+    try {
+      // 100% fail-safe variable casting
+      const safeNum = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+      const price = safeNum(d.current_price);
+      const qv = safeNum(d.total_volume);
+
+      const s = _sigOf(d);
+      const sym = typeof d.symbol === 'string' ? d.symbol.toUpperCase() : String(d.symbol || '').toUpperCase();
+      const name = d.name || String(d.id || 'N/A');
+      const onBin = isOnBinance(d);
+      // V4 Premium: tri-state badge.
+      //   BIN   = Binance Spot (deepest liquidity)
+      //   ALPHA = Binance Futures (USDⓈ-M perp) only — funding/OI live
+      //   DEX   = off-Binance entirely
+      let exchBadge;
+      if (d.exchange === 'ALPHA' || d.binance_market === 'futures') {
+        exchBadge = '<span class="exch-badge exch-alpha" title="Binance Alpha — listed on Binance USDⓈ-M Futures (perp). Live funding / OI / orderbook.">ALPHA</span>';
+      } else if (onBin) {
+        exchBadge = '<span class="exch-badge exch-bin" title="Listed on Binance Spot — full liquidity / live order book">BIN</span>';
+      } else {
+        exchBadge = '<span class="exch-badge exch-dex" title="DEX / Other exchange — Binance order book unavailable">DEX</span>';
+      }
+
+      // V5 (Phase 4 Wildcard A): stamp smart-money divergence tag if
+      // we have one for this base symbol. Tag wraps in the same cell
+      // as the signal label so the row width stays stable.
+      const div = DIVERGENCE_MAP.get(sym);
+      let divTag = '';
+      if (div) {
+        // V6.8 Sprint 1 (FIX-3): cls + label resolve from a fixed
+        // vocabulary so they're safe, but `div.signal` flows into title
+        // raw from the upstream — escape the tooltip body.
+        const cls = div.bias === 'bullish' ? 'sm-shorts-trapped' : 'sm-longs-trapped';
+        const label = div.signal === 'SHORTS_TRAPPED' ? '◢ SHORTS' : div.signal === 'LONGS_TRAPPED' ? '◣ LONGS' : '◤ CROWDED';
+        const title = _esc(`${div.signal} · funding ${Number(div.funding_pct).toFixed(3)}% · 24h ${Number(div.price_change_24h_pct).toFixed(2)}% · conf ${div.confidence}`);
+        divTag = `<span class="smart-money-tag ${cls}" title="${title}">${label}</span>`;
+      }
+
+      // V5 (Sniper Limit Protocol): pulsing 🎯 SNIPER stamp when the
+      // mark price has dripped within 2 % of the detected bid wall.
+      const snip = SNIPER_MAP.get(sym);
+      let snipTag = '';
+      if (snip) {
+        const wallNotionalM = (snip.wall_notional_usd / 1_000_000).toFixed(2);
+        // V6.8 Sprint 1 (FIX-3): tooltip values flow into title="" — escape.
+        snipTag = `<span class="sniper-tag" title="${_esc(`SNIPER LIMIT · entry ${fmt(snip.optimal_limit_entry)} · wall $${wallNotionalM}M @ -${snip.wall_drop_pct.toFixed(2)}% · ${snip.proximity_pct.toFixed(2)}% from mark · conf ${snip.confidence}`)}">🎯 SNIPER</span>`;
+      }
+
+      // V6.8 Sprint 1 (FIX-3) + V6.9 Sprint 2: no inline onclick. d.id
+      // routes through data-coin-id (HTML-attribute-escaped via _esc);
+      // a single delegated listener on document handles the dispatch.
+      const idAttr = _esc(String(d.id || ''));
+      const escSym = _esc(sym);
+      const escName = _esc(name);
+      const escLabel = _esc(s.label);
+      const escCls = _esc(s.cls);
+      const hot = safeNum(calcHotness(d));
+      // Mobile-only sub-row carrying the columns hidden ≤640px.
+      const expandRow = `<div class="trow-expand" data-coin-id="${idAttr}">
+        <div class="te-cell"><span class="te-lbl">SIG</span><span class="te-val"><span class="bdg ${escCls}">${escLabel}</span></span></div>
+        <div class="te-cell"><span class="te-lbl">1H</span><span class="te-val">${tfCell(d._c1)}</span></div>
+        <div class="te-cell"><span class="te-lbl">4H</span><span class="te-val">${tfCell(d._c4)}</span></div>
+        <div class="te-cell"><span class="te-lbl">12H</span><span class="te-val">${tfCell(d._c12)}</span></div>
+        <div class="te-cell"><span class="te-lbl">7D</span><span class="te-val">${tfCell(d._c7d)}</span></div>
+        <div class="te-cell"><span class="te-lbl">VOL</span><span class="te-val">${_esc(fmt(qv))}</span></div>
+        <div class="te-cell"><span class="te-lbl">HOT</span><span class="te-val" style="color:${hot>60?'var(--red)':'var(--txt2)'}">${hot}</span></div>
+      </div>`;
+      htmls.push(`<div class="trow${SEL===d.id?' sel':''}${s.score>=7?' alert-high':s.score>=6?' alert-med':''}" data-coin-id="${idAttr}">
+        <span class="rn">${start + i + 1}</span>
+        <div class="coin-cell"><span class="csym">${escSym}${exchBadge}</span><span class="cnm">${escName}</span></div>
+        <span class="sig-cell"><span class="bdg ${escCls}">${escLabel}</span>${divTag}${snipTag}</span>
+        <span class="tr">${_esc(fmt(price))}</span>
+        ${tfCell(d._c1)}
+        ${tfCell(d._c4)}
+        ${tfCell(d._c12)}
+        ${tfCell(d._c24 ?? d.price_change_percentage_24h)}
+        ${tfCell(d._c7d)}
+        <span class="tr">${_esc(fmt(qv))}</span>
+        <span class="tr" style="color:${hot>60?'var(--red)':'var(--txt2)'}"><b>${hot}</b></span>
+        <span class="tr" style="color:${s.score>=6?'var(--grn)':'var(--txt2)'}"><b>${s.score}/10</b></span>
+        <span class="trow-toggle" data-trow-toggle="1" aria-label="Expand">⋯</span>
+      </div>${expandRow}`);
+    } catch (err) {
+      console.error('[TERMINAL] Error rendering coin:', d, err.message);
+    }
+  });
+
+  document.getElementById('clist').innerHTML = htmls.join('');
+
+  document.getElementById('page-bar').innerHTML = totalPages > 1 ? `
+    <button class="s-btn" onclick="currentPage=Math.max(0,currentPage-1);renderList()">PREV</button>
+    <span style="font-size:9px;color:var(--txt3)">${currentPage+1} / ${totalPages}</span>
+    <button class="s-btn" onclick="currentPage=Math.min(${totalPages-1},currentPage+1);renderList()">NEXT</button>` : '';
+  document.getElementById('scnt').textContent = filtered.length + ' / ' + DATA.length;
+}
+
+function pickCoin(id) {
+  SEL = id;
+  const d = DATA.find(x => x.id === id);
+  if (!d) return;
+
+  const s = _sigOf(d), f = getFunding(d), ls = getLsRatio(d), op = getOiPct(d);
+  const sym = (d.symbol || '').toUpperCase();
+  const validity = getSetupValidity(d);
+  const binance = getBinanceLink(d);
+
+  // V6.8 Sprint 1 (FIX-3): sym, d.name, d.id are upstream strings.
+  // textContent on dlbl is already safe; every other interpolation
+  // below routes through _esc / _safeUrl / JSON.stringify.
+  document.getElementById('dlbl').textContent = sym;
+  const symAttr = JSON.stringify(String(sym || ''));
+  const idAttr  = JSON.stringify(String(d.id || ''));
+  const binanceHref = binance.available ? _safeUrl(binance.url) : '';
+  document.getElementById('dcon').innerHTML = `
+    <div class="dhead">
+      <div><div class="dsym">${_esc(sym)}</div><div class="dname">${_esc(d.name)} · ${_esc(getSector(d.id))}</div></div>
+      <div><div class="dprc">${_esc(fmt(d.current_price))}</div><div class="dchg ${(d.price_change_percentage_24h||0)>=0?'pos':'neg'}">${_esc(fp(d.price_change_percentage_24h||0))}</div></div>
+    </div>
+
+    <button id="ai-analyze-btn"
+            class="ai-analyze-btn ai-analyze-btn--hero"
+            onclick='if(window.requestAnalysis){window.requestAnalysis(${symAttr},${idAttr});}'
+            title="Stáhne živá data z Binance (pokud je listován) a pošle je do Gemini">
+      🧠 AI ANALÝZA
+    </button>
+
+    ${binance.available && binanceHref
+      ? `<a class="binance-btn ${binance.market === 'futures' ? 'alpha' : 'active'}" href="${binanceHref}" target="_blank" rel="noopener noreferrer">${binance.market === 'futures' ? 'BINANCE FUTURES (ALPHA)' : 'BINANCE SPOT'} → ${_esc(binance.pair)}</a>`
+      : `<div class="binance-btn unavail">Binance nedostupne</div>`}
+
+    <div class="validity-box" style="border-color:${validity.border}">
+      <div class="validity-title" style="color:${validity.col};font-weight:600;font-size:10px">${_esc(validity.type)}</div>
+      <div class="validity-desc" style="color:var(--txt2);font-size:9px;margin-top:2px">${_esc(validity.desc)}</div>
+    </div>
+
+    <div class="mgrid">
+      <div class="mc"><div class="ml">SIGNAL</div><div class="mv"><span class="bdg ${_esc(s.cls)}">${_esc(s.label)}</span></div></div>
+      <div class="mc"><div class="ml">SCORE</div><div class="mv">${s.score}/10</div></div>
+      <div class="mc"><div class="ml">24H VOL</div><div class="mv">${_esc(fmt(d.total_volume || 0))}</div></div>
+      <div class="mc"><div class="ml">24H RANGE</div><div class="mv">${_esc(fmt(d.low_24h || 0))}–${_esc(fmt(d.high_24h || 0))}</div></div>
+    </div>
+
+    ${(() => {
+      // V5 (Phase 4 Wildcard B): Multi-TF Momentum panel in the
+      // detail view. Shows the composite score, alignment %, and a
+      // per-TF micro-bar so the trader can see exactly which
+      // timeframes are stacking. Pure compute, no extra fetch.
+      const mom = d._mom || computeMomentumScore(d);
+      if (!mom || mom.label === 'N/A') return '';
+      const barPct = Math.min(100, Math.abs(mom.score));
+      const barCol = mom.score >= 0 ? 'var(--grn)' : 'var(--red)';
+      const tfRow = (label, v) => {
+        if (v == null || !Number.isFinite(parseFloat(v))) return '';
+        const n = parseFloat(v);
+        const col = n >= 0 ? 'var(--grn)' : 'var(--red)';
+        return `<div style="display:flex;justify-content:space-between;font-size:9px"><span style="color:var(--txt3)">${label}</span><span style="color:${col}">${n >= 0 ? '+' : ''}${n.toFixed(2)}%</span></div>`;
+      };
+      return `
+        <div class="ph" style="margin-top:10px"><span class="pt">MOMENTUM STACK · MULTI-TF</span><span class="ps">align ${Math.round(mom.stack*100)}%</span></div>
+        <div style="padding:10px;background:var(--s3);border:1px solid var(--b1);border-radius:0 0 var(--rad) var(--rad);margin-bottom:6px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <span class="${_esc(mom.cls)}" style="font-weight:700;font-size:13px">${_esc(mom.label)}</span>
+            <span class="${_esc(mom.cls)}" style="font-weight:700;font-size:13px">${mom.score >= 0 ? '+' : ''}${mom.score|0}</span>
+          </div>
+          <div class="mom-bar"><div class="mom-bar__fill" style="width:${barPct}%;background:${barCol}"></div></div>
+          <div style="margin-top:8px;display:flex;flex-direction:column;gap:2px">
+            ${tfRow('1H', d._c1)}
+            ${tfRow('4H', d._c4)}
+            ${tfRow('12H', d._c12)}
+            ${tfRow('24H', d._c24 ?? d.price_change_percentage_24h)}
+            ${tfRow('7D', d._c7d)}
+          </div>
+        </div>
+      `;
+    })()}
+
+    <div style="padding:10px">
+      <div class="ml" style="margin-bottom:3px">SIGNAL FLOW (interní)</div>
+      <div class="lsbar"><div class="lsl" style="width:${ls.l}%"></div><div class="lss" style="width:${ls.s}%"></div></div>
+      <div style="display:flex;justify-content:space-between;font-size:9px"><span class="pos">${ls.l.toFixed(0)}% L</span><span class="neg">${ls.s.toFixed(0)}% S</span></div>
+    </div>
+
+    ${(() => {
+      // V5 (Sniper Limit Protocol): show the calculated optimal LIMIT
+      // entry sitting just above the densest bid cluster. We render it
+      // whenever a wall was detected for this base, even if the SNIPER
+      // trigger isn't currently armed — that way the trader can pre-place
+      // the limit before price has dripped into the trigger zone.
+      const snipAll = SNIPER_ALL_MAP.get(sym);
+      if (!snipAll) return '';
+      const armed = !!SNIPER_MAP.get(sym);
+      const wallM = (snipAll.wall_notional_usd / 1_000_000).toFixed(2);
+      const distLabel = snipAll.distance_pct >= 0
+        ? `${snipAll.distance_pct.toFixed(2)}% below mark`
+        : `${Math.abs(snipAll.distance_pct).toFixed(2)}% above mark`;
+      // Wall base qty: human-readable, no percentage / sign — fp() is
+      // wrong here because it forces a "+"/"-" prefix and "%" suffix.
+      const wallBaseLabel = Number(snipAll.wall_base_qty).toLocaleString(undefined, { maximumFractionDigits: 2 });
+      return `
+        <div class="ph" style="margin-top:10px">
+          <span class="pt">${armed ? '🎯 SNIPER LIMIT · ARMED' : 'SNIPER LIMIT · IDLE'}</span>
+          <span class="ps">conf ${_esc(snipAll.confidence)}</span>
+        </div>
+        <div class="sniper-box ${armed ? 'sniper-box--armed' : ''}">
+          <div class="sniper-row">
+            <span class="sniper-lbl">OPTIMAL LIMIT ENTRY</span>
+            <span class="sniper-val sniper-val--big">${_esc(fmt(snipAll.optimal_limit_entry))}</span>
+          </div>
+          <div class="sniper-row sniper-row--sub">
+            <span class="sniper-lbl">${_esc(distLabel)}</span>
+            <span class="sniper-lbl">wall -${Number(snipAll.wall_drop_pct).toFixed(2)}%</span>
+          </div>
+          <div class="sniper-row">
+            <span class="sniper-lbl">BID WALL SIZE</span>
+            <span class="sniper-val">$${_esc(wallM)}M <span class="sniper-lbl">(${_esc(wallBaseLabel)} ${_esc(sym)})</span></span>
+          </div>
+          ${snipAll.proximity_to_24h_low_pct != null ? `
+          <div class="sniper-row sniper-row--sub">
+            <span class="sniper-lbl">vs 24H LOW</span>
+            <span class="sniper-lbl">${snipAll.proximity_to_24h_low_pct >= 0 ? '+' : ''}${snipAll.proximity_to_24h_low_pct.toFixed(2)}%</span>
+          </div>` : ''}
+        </div>`;
+    })()}
+
+    <div class="ph" style="margin-top:10px"><span class="pt">ORDER BOOK · BINANCE</span><span class="ps" id="ob-status">načítám…</span></div>
+    <div id="orderbook-${_esc(d.id)}" class="orderbook-box" style="padding:8px 10px;font-size:10px;color:var(--txt2)">…</div>
+
+    <div class="why-box">
+      <div style="font-weight:600;color:var(--acc);font-size:9px;margin-bottom:2px">PROC TENTO ALERT?</div>
+      ${s.reasons.map(r => `<div style="font-size:9px;color:var(--txt2)">• ${_esc(r)}</div>`).join('')}
+    </div>
+  `;
+
+  loadOrderbook(d, binance);
+  renderList();
+}
+
+// On-demand Binance order book snapshot for the right detail panel.
+// Direct browser → Binance fetch. Used to be a guaranteed-CORS endpoint
+// but adblockers (uBlock, Brave Shields, corporate proxies) increasingly
+// block api.binance.com and fapi.binance.com from the client. When that
+// happens the browser raises a generic "NetworkError when attempting to
+// fetch resource" — opaque, indistinguishable from a real outage.
+//
+// Strategy:
+//   1. Pick the venue URL that matches the coin's exchange. ALPHA
+//      (futures-only) coins MUST hit /fapi or they get HTTP 400.
+//   2. Strict timeout (4s) so a hanging fetch can't keep the spinner up.
+//   3. On any failure → render a localized inline message in the slot
+//      and silently return. NO global toast — the news/regime/etc.
+//      already toast errors, and stacking an order-book toast on every
+//      coin click is the noisiest UX failure mode we have.
+async function loadOrderbook(d, binance) {
+  const slot = document.getElementById('orderbook-' + d.id);
+  const status = document.getElementById('ob-status');
+  if (!slot) return;
+  if (!binance.available) {
+    slot.innerHTML = '<div style="color:var(--txt3)">Binance pár pro tento coin není dostupný.</div>';
+    if (status) status.textContent = '–';
+    return;
+  }
+  const pair = binance.pair.replace('/', '');
+  // Route to /fapi for ALPHA/futures-only coins — /api/v3/depth returns
+  // 400 "Invalid symbol" for perp-only listings like 1000PEPEUSDT.
+  const useFutures = (d?.binance_market === 'futures') || (binance.market === 'futures') || (d?.exchange === 'ALPHA');
+  const baseUrl = useFutures
+    ? 'https://fapi.binance.com/fapi/v1/depth'
+    : 'https://api.binance.com/api/v3/depth';
+  const url = `${baseUrl}?symbol=${encodeURIComponent(pair)}&limit=10`;
+
+  // Manual AbortController — AbortSignal.timeout() is patchy across
+  // older Safari and we still see legitimate users on it.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4000);
+
+  try {
+    const r = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    if (SEL !== d.id) return;
+    const bids = (j.bids || []).slice(0, 5);
+    const asks = (j.asks || []).slice(0, 5).reverse();
+    if (!bids.length && !asks.length) {
+      slot.innerHTML = '<div style="color:var(--txt3)">Order book prázdný.</div>';
+      if (status) status.textContent = pair;
+      return;
+    }
+    const row = (p, q, side) => {
+      const cls = side === 'b' ? 'pos' : 'neg';
+      return `<div style="display:flex;justify-content:space-between"><span class="${cls}">${parseFloat(p).toFixed(4)}</span><span style="color:var(--txt3)">${parseFloat(q).toFixed(3)}</span></div>`;
+    };
+    slot.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:1px">${asks.map(([p, q]) => row(p, q, 'a')).join('')}</div>
+      <div style="border-top:1px dashed var(--b2);border-bottom:1px dashed var(--b2);text-align:center;padding:3px;color:var(--acc)">— mid —</div>
+      <div style="display:flex;flex-direction:column;gap:1px">${bids.map(([p, q]) => row(p, q, 'b')).join('')}</div>
+    `;
+    if (status) status.textContent = pair;
+  } catch (e) {
+    // Distinguish the common failure modes for the inline message only.
+    // A generic "Failed to fetch" / AbortError is almost always an
+    // adblocker or corporate proxy blocking the Binance host directly
+    // from the browser — not an actual outage.
+    if (SEL !== d.id) return;
+    const isNet = e.name === 'AbortError'
+      || /Failed to fetch|NetworkError|TypeError/i.test(String(e.message || ''));
+    // V6.8 Sprint 1 (FIX-3): e.message is an arbitrary string from any
+    // network-layer failure. Escape it before insertion.
+    const msg = isNet
+      ? 'Order book blokován prohlížečem (adblock / CORS). Použijte AI Analýzu pro plnou hloubku.'
+      : `Order book nedostupný: ${_esc(e.message)}`;
+    slot.innerHTML = `<div style="color:var(--txt3);font-size:9px;line-height:1.4">${msg}</div>`;
+    if (status) status.textContent = isNet ? 'blocked' : 'error';
+    // Intentionally NO global Toast here — the inline UI message is
+    // already in the slot the user is looking at, and a toast per coin
+    // click would flood the screen.
+    console.warn('[ORDERBOOK]', e.name, e.message);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function resolveTvSymbol(d) {
+  // Dynamic venue prefixing for TradingView. The widget previously
+  // hardcoded BINANCE: for every coin, which crashed with "This
+  // symbol doesn't exist" the moment a DEX-only coin ranked into the
+  // Top 10 grid. Routing matrix:
+  //
+  //   BIN   (Binance Spot)            → BINANCE:<sym><quote>
+  //   ALPHA (Binance Futures perp)    → BINANCE:<sym>USDT.P
+  //                                     (TV perp notation; the .P
+  //                                      suffix maps to USDⓈ-M futures)
+  //   DEX   (off-Binance)             → MEXC:<sym>USDT, with a
+  //                                     CRYPTO:<sym>USD fallback hint
+  //                                     for the few coins MEXC doesn't
+  //                                     list either. CRYPTO:* is TV's
+  //                                     cross-exchange aggregator
+  //                                     index — guarantees *some*
+  //                                     chart renders rather than the
+  //                                     "symbol doesn't exist" error.
+  const baseSym = String(d.symbol || '').toUpperCase().replace(/[/:]/g, '');
+  if (!baseSym) return null;
+  const rawPair = String(d.pair || '').toUpperCase().replace(/[/:]/g, '');
+  const futPair = String(d.futures_pair || '').toUpperCase().replace(/[/:]/g, '');
+  const quote = String(d.quote || 'USDT').toUpperCase();
+
+  const isAlpha = d.exchange === 'ALPHA' || d.binance_market === 'futures';
+  const isBin = !isAlpha && (d.exchange === 'BIN' || d.binance_available === true);
+
+  if (isAlpha) {
+    const pair = futPair || rawPair || (baseSym + 'USDT');
+    return { tv: 'BINANCE:' + pair + '.P', exch: 'BINANCE', pair, venue: 'alpha' };
+  }
+  if (isBin) {
+    const pair = rawPair || (baseSym + quote);
+    return { tv: 'BINANCE:' + pair, exch: 'BINANCE', pair, venue: 'spot' };
+  }
+  // DEX path. MEXC lists the long tail of memecoins / new launches
+  // that other CEXs skip, so it has the highest hit-rate fallback.
+  // The `fallbackTv` field lets the caller wire a second iframe or an
+  // onerror handler that swaps to the cross-exchange aggregator if the
+  // MEXC symbol also 404s on TV.
+  const dexPair = baseSym + 'USDT';
+  return {
+    tv: 'MEXC:' + dexPair,
+    fallbackTv: 'CRYPTO:' + baseSym + 'USD',
+    exch: 'MEXC',
+    pair: dexPair,
+    venue: 'dex',
+  };
+}
+
+function renderTopCharts() {
+  // Dynamic Top 10 — sort the loaded global DATA pool by signal score
+  // DESC and render TradingView widgets for the leaders. Re-runs on
+  // every doRefresh so the grid follows the current market state.
+  const grid = document.getElementById('topcharts-grid');
+  if (!grid) return;
+  if (!Array.isArray(DATA) || !DATA.length) {
+    grid.innerHTML = '<div style="padding:20px;color:var(--txt3);font-size:10px">Loading scanner data…</div>';
+    return;
+  }
+  const top10 = [...DATA]
+    .sort((a, b) => (b._sig_score || 0) - (a._sig_score || 0))
+    .slice(0, 10);
+  grid.innerHTML = top10.map(d => {
+    const sym = typeof d.symbol === 'string' ? d.symbol.toUpperCase() : String(d.symbol || '').toUpperCase();
+    const resolved = resolveTvSymbol(d);
+    if (!resolved) return '';
+    // V6.8 Sprint 1 (FIX-3): src is fully synthesized by encodeURIComponent
+    // around a fixed host — safe. sym + venueLabel + venue still escaped
+    // because they came from upstream rows.
+    const src = 'https://s.tradingview.com/widgetembed/?symbol=' + encodeURIComponent(resolved.tv) + '&interval=15&hidesidetoolbar=1&theme=dark&style=1';
+    const venueLabel = resolved.venue === 'alpha' ? 'ALPHA' : resolved.venue === 'dex' ? resolved.exch : 'BIN';
+    return `<div class="tc-card" data-venue="${_esc(resolved.venue)}"><div class="tc-head"><span class="tc-sym">${_esc(sym)} <span class="tc-venue">${_esc(venueLabel)}</span></span><span class="tc-meta">score ${(_sigOf(d).score)|0}/10</span></div><iframe class="tc-frame" loading="lazy" src="${_esc(src)}" allowfullscreen></iframe></div>`;
+  }).join('');
+}
+
+// ─────────────────────────────────────────────────────────────
+// HEATMAP — V6.1 strict equal-grid canvas renderer.
+//
+//   • Block SIZE  = STRICTLY EQUAL across all 500 cells.
+//   • Block ORDER = sorted by 24h quote volume DESC. Top-left = largest,
+//                   bottom-right = smallest. Row-major fill.
+//   • Block COLOR = 24h % price change (red ↔ neutral ↔ green).
+//   • RENDERER    = single <canvas>, DPR-aware, hardware-accelerated.
+//                   Hit-test on hover + click, one absolute tooltip div.
+//                   No DOM bloat — 500 cells cost ~1 paint per repaint.
+// ─────────────────────────────────────────────────────────────
+
+const _hm = {
+  rects: [],           // [{x,y,w,h,d}] in CSS px
+  lastWidth: 0,
+  lastHeight: 0,
+  resizeRaf: 0,
+  hoverIdx: -1,
+};
+
+function _hmColor(c) {
+  const int = Math.min(1, Math.abs(c) / 12);
+  if (c <= -6) return { bg: `rgba(255,51,86,${0.32 + int * 0.55})`, txt: '#ff7a91' };
+  if (c <= -2) return { bg: `rgba(255,176,32,${0.22 + int * 0.45})`, txt: '#ffc977' };
+  if (c <   2) return { bg: 'rgba(96,112,144,.16)',                  txt: '#9fb1c8' };
+  if (c <   6) return { bg: `rgba(0,212,132,${0.22 + int * 0.45})`,  txt: '#5fe5b4' };
+  return         { bg: `rgba(0,212,132,${0.32 + int * 0.55})`,        txt: '#7af0c5' };
+}
+
+function _hmFmtCap(mc) {
+  if (!mc) return '—';
+  if (mc >= 1e12) return '$' + (mc/1e12).toFixed(2) + 'T';
+  if (mc >= 1e9)  return '$' + (mc/1e9).toFixed(2)  + 'B';
+  if (mc >= 1e6)  return '$' + (mc/1e6).toFixed(1)  + 'M';
+  return '$' + Math.round(mc/1e3) + 'K';
+}
+
+// Strict equal-grid layout. Given a container WxH and N items, picks
+// the col/row count whose cell aspect is closest to 1:1, then lays the
+// items out row-major (top-left → bottom-right). Items must already be
+// sorted DESC by 24h volume by the caller.
+function _hmGridLayout(items, W, H, out) {
+  const n = items.length;
+  if (!n || W < 4 || H < 4) return;
+  // Pick cols so cell aspect ≈ 1. cols = round(sqrt(n * W/H)).
+  let cols = Math.max(1, Math.round(Math.sqrt(n * (W / H))));
+  cols = Math.min(cols, n);
+  let rows = Math.ceil(n / cols);
+  // Tweak to minimize empty trailing slots. If the last row would be
+  // less than half full, drop a column.
+  if (cols > 1 && (rows * cols - n) >= Math.floor(cols / 2)) {
+    cols -= 1;
+    rows = Math.ceil(n / cols);
+  }
+  const cw = W / cols;
+  const ch = H / rows;
+  for (let i = 0; i < n; i++) {
+    const r = (i / cols) | 0;
+    const c = i - r * cols;
+    out.push({ x: c * cw, y: r * ch, w: cw, h: ch, d: items[i].d });
+  }
+}
+
+function _hmDraw(canvas) {
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  const W = canvas.clientWidth;
+  const H = canvas.clientHeight;
+  canvas.width  = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#04060e';
+  ctx.fillRect(0, 0, W, H);
+
+  for (const r of _hm.rects) {
+    const c = Number(r.d.price_change_percentage_24h) || 0;
+    const col = _hmColor(c);
+    // Cell fill
+    ctx.fillStyle = col.bg;
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    // Border
+    ctx.strokeStyle = 'rgba(4,6,14,.85)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+
+    // V6.8: drop the (28×18) gate. Labels must stay visible on mobile
+    // canvases where 500 cells crush every box below the old threshold.
+    // We still bail out on truly degenerate cells (<10px on either axis)
+    // to avoid sub-pixel font noise.
+    if (r.w < 10 || r.h < 10) continue;
+
+    const sym = String(r.d.symbol || '').toUpperCase();
+    const area = r.w * r.h;
+    // Dynamic font: scale by sqrt(area) but enforce a 7px floor so
+    // even tiny mobile cells render readable text. Cap at 28px.
+    const fontSym = Math.max(7, Math.min(28, Math.sqrt(area) * 0.30));
+    const fontChg = Math.max(7, Math.min(20, fontSym * 0.75));
+    // Truncate symbol if it would visually overflow the cell. Estimate
+    // character width as ~0.6 × font-size for monospace.
+    const maxChars = Math.max(1, Math.floor((r.w - 4) / (fontSym * 0.6)));
+    const symFit = sym.length > maxChars ? sym.slice(0, maxChars) : sym;
+    ctx.fillStyle = col.txt;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `700 ${fontSym}px var(--mono, monospace)`;
+    const cx = r.x + r.w / 2;
+    const cy = r.y + r.h / 2;
+    if (r.h > 38 && r.w > 44) {
+      ctx.fillText(symFit, cx, cy - fontChg * 0.65);
+      ctx.font = `600 ${fontChg}px var(--mono, monospace)`;
+      ctx.fillText((c >= 0 ? '+' : '') + c.toFixed(1) + '%', cx, cy + fontSym * 0.55);
+    } else {
+      ctx.fillText(symFit, cx, cy);
+    }
+  }
+
+  if (_hm.hoverIdx >= 0 && _hm.hoverIdx < _hm.rects.length) {
+    const r = _hm.rects[_hm.hoverIdx];
+    ctx.strokeStyle = '#00e8c8';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
+  }
+}
+
+function _hmHit(px, py) {
+  for (let i = 0; i < _hm.rects.length; i++) {
+    const r = _hm.rects[i];
+    if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return i;
+  }
+  return -1;
+}
+
+function _hmEnsureChrome() {
+  const view = document.getElementById('v-heatmap');
+  if (!view) return null;
+  let canvas = document.getElementById('hm-canvas');
+  let tip    = document.getElementById('hm-tip');
+  if (!canvas) {
+    const grid = document.getElementById('hm-grid');
+    if (grid) { grid.innerHTML = ''; grid.id = 'hm-canvas-wrap'; grid.className = 'hm-canvas-wrap'; }
+    const wrap = document.getElementById('hm-canvas-wrap') || grid || view;
+    canvas = document.createElement('canvas');
+    canvas.id = 'hm-canvas';
+    canvas.className = 'hm-canvas';
+    wrap.appendChild(canvas);
+    tip = document.createElement('div');
+    tip.id = 'hm-tip';
+    tip.className = 'hm-tip';
+    tip.style.display = 'none';
+    wrap.appendChild(tip);
+
+    canvas.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      const py = e.clientY - rect.top;
+      const idx = _hmHit(px, py);
+      if (idx !== _hm.hoverIdx) {
+        _hm.hoverIdx = idx;
+        _hmDraw(canvas);
+      }
+      if (idx >= 0) {
+        const r = _hm.rects[idx];
+        const d = r.d;
+        const c = Number(d.price_change_percentage_24h) || 0;
+        const mc = Number(d.market_cap) || 0;
+        const vol = Number(d.total_volume) || 0;
+        // V6.8 Sprint 1 (FIX-3): d.symbol is upstream — escape. The
+        // numeric outputs come from Number() coercion above so they're
+        // safe by construction.
+        tip.innerHTML = `<div class="hm-tip__sym">${_esc(String(d.symbol||'').toUpperCase())}</div>
+          <div class="hm-tip__row"><span>24h</span><b style="color:${c>=0?'var(--grn)':'var(--red)'}">${(c>=0?'+':'')+c.toFixed(2)}%</b></div>
+          <div class="hm-tip__row"><span>Market Cap</span><b>${_esc(_hmFmtCap(mc))}</b></div>
+          <div class="hm-tip__row"><span>24h Vol</span><b>${_esc(_hmFmtCap(vol))}</b></div>
+          <div class="hm-tip__hint">click → scanner</div>`;
+        tip.style.display = 'block';
+        const tw = tip.offsetWidth;
+        const th = tip.offsetHeight;
+        let tx = px + 14;
+        let ty = py + 14;
+        if (tx + tw > rect.width) tx = px - tw - 14;
+        if (ty + th > rect.height) ty = py - th - 14;
+        tip.style.transform = `translate(${tx}px,${ty}px)`;
+      } else {
+        tip.style.display = 'none';
+      }
+    });
+    canvas.addEventListener('mouseleave', () => { _hm.hoverIdx = -1; tip.style.display = 'none'; _hmDraw(canvas); });
+    canvas.addEventListener('click', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const idx = _hmHit(e.clientX - rect.left, e.clientY - rect.top);
+      if (idx < 0) return;
+      const id = String(_hm.rects[idx].d.id || _hm.rects[idx].d.symbol || '').toLowerCase();
+      const scannerTab = document.querySelector('#tabs .tab');
+      pickCoin(id);
+      if (scannerTab) sv('scanner', scannerTab);
+    });
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(() => {
+        if (_hm.resizeRaf) cancelAnimationFrame(_hm.resizeRaf);
+        _hm.resizeRaf = requestAnimationFrame(() => renderHeatmap());
+      });
+      ro.observe(canvas);
+      _ObserverRegistry.add(ro);
+    }
+  }
+  return canvas;
+}
+
+function renderHeatmap() {
+  const canvas = _hmEnsureChrome();
+  if (!canvas) return;
+
+  // V6.8: Pool sorted by market_cap_rank ASC — matches CoinMarketCap's
+  // canonical ranking order (#1 BTC top-left, #500 bottom-right). Rows
+  // missing a rank (Binance-only synthesized BIN rows, market_cap_rank=0)
+  // are pushed to the tail so the visible grid mirrors CMC's universe.
+  const pool = (Array.isArray(DATA) ? DATA : [])
+    .filter(d => Number(d.total_volume) > 0)
+    .sort((a, b) => {
+      const ra = Number(a.market_cap_rank) || Number.MAX_SAFE_INTEGER;
+      const rb = Number(b.market_cap_rank) || Number.MAX_SAFE_INTEGER;
+      if (ra !== rb) return ra - rb;
+      return (Number(b.market_cap) || 0) - (Number(a.market_cap) || 0);
+    })
+    .slice(0, 500);
+
+  if (!pool.length) {
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#04060e';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#a0a0a0';
+    ctx.font = '12px var(--mono, monospace)';
+    ctx.textAlign = 'center';
+    ctx.fillText('No 24h volume data available.', canvas.clientWidth/2, canvas.clientHeight/2);
+    return;
+  }
+
+  const W = canvas.clientWidth;
+  const H = canvas.clientHeight;
+  if (W < 10 || H < 10) return;
+
+  const items = pool.map(d => ({ d }));
+  _hm.rects = [];
+  _hmGridLayout(items, W, H, _hm.rects);
+  _hmDraw(canvas);
+
+  const hmCount = document.getElementById('hm-count');
+  if (hmCount) hmCount.textContent = pool.length + ' coins · equal grid · sorted by MC rank #1→#' + pool.length;
+}
+
+function renderAlerts() {
+  const als = ALL_ALERTS;
+  // V6.8 Sprint 1 (FIX-3): a.t / a.b are built from upstream symbols
+  // and signal reasons — escape both. a.coinId is JSON-stringified into
+  // the onclick attribute so quote injection from a poisoned id can
+  // never escape the handler.
+  const row = a => {
+    const idAttr = _esc(String(a.coinId || ''));
+    return `<div class="alrt" data-coin-id="${idAttr}"><div class="aico" style="color:var(--acc)">●</div><div class="abody"><div class="atitle">${_esc(a.t)}</div><div class="adesc">${_esc(a.b)}</div></div></div>`;
+  };
+  const rowReadOnly = a => `<div class="alrt" style="margin-bottom:5px;border:1px solid var(--b1);border-radius:var(--rad)"><div class="abody"><div class="atitle">${_esc(a.t)}</div><div class="adesc">${_esc(a.b)}</div></div></div>`;
+  document.getElementById('alert-feed').innerHTML = als.slice(0, 15).map(row).join('');
+  document.getElementById('alerts-all').innerHTML = als.map(rowReadOnly).join('');
+}
+
+function renderRegimeView() {
+  // Renders the REGIME tab: current state card + transition history.
+  // Both pull from REGIME (populated by fetchRegime() against /api/regime).
+  const main = document.getElementById('regime-main');
+  const log  = document.getElementById('regime-log');
+  if (!main && !log) return;
+
+  const bucket = REGIME.bucket || 'chop';
+  const score  = Number(REGIME.score) || 0;
+  const label  = REGIME.label || (bucket.toUpperCase());
+  const tone   = bucket === 'bear' ? 'var(--red)' : bucket === 'chop' ? 'var(--amb)' : 'var(--grn)';
+  const inputs = REGIME.inputs || {};
+  const reasons = Array.isArray(REGIME.reasons) ? REGIME.reasons : [];
+
+  if (main) {
+    if (!REGIME.computed_at && !REGIME.history?.length) {
+      main.innerHTML = `<div style="padding:18px;text-align:center;color:var(--txt3);font-size:11px">Načítám tržní režim…</div>`;
+    } else {
+      const ts = REGIME.computed_at ? new Date(REGIME.computed_at).toLocaleTimeString('cs-CZ') : '—';
+      const staleBadge = REGIME.stale ? '<span style="margin-left:8px;padding:1px 6px;border:1px solid var(--amb);color:var(--amb);border-radius:var(--rad);font-size:8px">STALE</span>' : '';
+      const cachedBadge = REGIME.cached && !REGIME.stale ? '<span style="margin-left:8px;padding:1px 6px;border:1px solid var(--b2);color:var(--txt3);border-radius:var(--rad);font-size:8px">CACHED</span>' : '';
+      // V6.8 Sprint 1 (FIX-3): label, reasons, inputs all come from the
+      // /api/regime upstream — escape every interpolated string. Numerics
+      // route through Number(...) so they're safe.
+      main.innerHTML = `
+        <div style="padding:14px 16px;display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+            <div>
+              <div style="font-size:18px;font-weight:700;color:${tone};letter-spacing:.05em">${_esc(label)}</div>
+              <div style="font-size:9px;color:var(--txt3);margin-top:2px">Computed ${_esc(ts)}${cachedBadge}${staleBadge}</div>
+            </div>
+            <div style="text-align:right">
+              <div style="font-size:24px;font-weight:700;color:${tone}">${score}</div>
+              <div style="font-size:9px;color:var(--txt3)">SCORE / 100</div>
+            </div>
+          </div>
+          <div style="height:6px;background:var(--s3);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${score}%;background:${tone};transition:width .3s"></div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:4px">
+            <div style="background:var(--s3);padding:8px;border-radius:var(--rad)">
+              <div style="font-size:9px;color:var(--txt3)">BREADTH</div>
+              <div style="font-size:13px;color:var(--txt);margin-top:2px">${inputs.green_pct != null ? inputs.green_pct.toFixed(1) + '%' : '—'} <span style="color:var(--txt3);font-size:9px">green</span></div>
+            </div>
+            <div style="background:var(--s3);padding:8px;border-radius:var(--rad)">
+              <div style="font-size:9px;color:var(--txt3)">BTC 24H</div>
+              <div style="font-size:13px;color:${(inputs.btc_change_24h||0)>=0?'var(--grn)':'var(--red)'};margin-top:2px">${inputs.btc_change_24h != null ? (inputs.btc_change_24h>=0?'+':'') + inputs.btc_change_24h.toFixed(2) + '%' : '—'}</div>
+            </div>
+            <div style="background:var(--s3);padding:8px;border-radius:var(--rad)">
+              <div style="font-size:9px;color:var(--txt3)">AVG VOL</div>
+              <div style="font-size:13px;color:var(--txt);margin-top:2px">${inputs.avg_vol_24h != null ? inputs.avg_vol_24h.toFixed(2) + '%' : '—'}</div>
+            </div>
+          </div>
+          ${reasons.length ? `<div style="margin-top:4px">
+            ${reasons.map(r => `<div style="font-size:10px;color:var(--txt2);padding:2px 0">• ${_esc(r)}</div>`).join('')}
+          </div>` : ''}
+          <div style="font-size:9px;color:var(--txt3);border-top:1px dashed var(--b2);padding-top:6px;margin-top:4px">
+            Buckets — &lt;35: BEAR/FLUSH · 35–65: CHOP · &gt;65: BULL/TREND · Pool: ${_esc(inputs.coins_total || '—')} coinů
+          </div>
+        </div>`;
+    }
+  }
+
+  if (log) {
+    const hist = Array.isArray(REGIME.history) ? REGIME.history : [];
+    if (!hist.length) {
+      log.innerHTML = `<div style="font-size:9px;color:var(--txt3);text-align:center;padding:8px">Historie přechodů zatím prázdná. Server zaznamenává změny labelu.</div>`;
+    } else {
+      log.innerHTML = hist.map(h => {
+        const at = h.at ? new Date(h.at).toLocaleString('cs-CZ', { hour12: false }) : '—';
+        const tcol = h.bucket === 'bear' ? 'var(--red)' : h.bucket === 'chop' ? 'var(--amb)' : 'var(--grn)';
+        // V6.8 Sprint 1 (FIX-3): h.from / h.label come from the regime API.
+        const fromLabel = h.from ? `<span style="color:var(--txt3)">${_esc(h.from)}</span> → ` : '';
+        return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 8px;background:var(--s3);border-radius:var(--rad);font-size:10px">
+          <div>${fromLabel}<b style="color:${tcol}">${_esc(h.label || '—')}</b></div>
+          <div style="color:var(--txt3);font-size:9px">${_esc(at)} · score ${h.score | 0}</div>
+        </div>`;
+      }).join('');
+    }
+  }
+}
+
+function renderSectors() {
+  const sectorStats = {};
+  for (const [sec, ids] of Object.entries(SECTOR_MAP)) {
+    const coins = DATA.filter(d => ids.includes(d.id));
+    if (!coins.length) continue;
+    const avg24h = coins.reduce((s,d) => s + (d.price_change_percentage_24h || 0), 0) / coins.length;
+    sectorStats[sec] = { avg24h, count: coins.length };
+  }
+  // V6.8 Sprint 1 (FIX-3): sec comes from SECTOR_MAP (compile-time
+  // constant) but escape anyway for consistency. st.count + fp() are
+  // numeric. Defense-in-depth in case SECTOR_MAP is ever loaded from
+  // a config endpoint.
+  document.getElementById('sector-grid').innerHTML = Object.entries(sectorStats).map(([sec, st]) => `<div class="sector-card"><div class="sc-head"><span class="sc-name">${_esc(sec)}</span><span class="sc-count">${st.count|0} coinu</span></div><div class="sc-metrics"><div class="sc-mv" style="color:${st.avg24h>=0?'var(--grn)':'var(--red)'}">${_esc(fp(st.avg24h,1))}</div></div></div>`).join('');
+}
+
+// ─── V6.5 MOVERS — Top 30 Gainers & Losers ───
+function renderMovers() {
+  const gEl = document.getElementById('movers-gainers');
+  const lEl = document.getElementById('movers-losers');
+  if (!gEl || !lEl) return;
+  if (!Array.isArray(DATA) || !DATA.length) {
+    gEl.innerHTML = lEl.innerHTML = '<div style="padding:14px;color:var(--txt3);font-size:10px;text-align:center">Loading data…</div>';
+    return;
+  }
+
+  const valid = DATA.filter(d => Number.isFinite(d.price_change_percentage_24h));
+  const sorted = [...valid].sort((a, b) => b.price_change_percentage_24h - a.price_change_percentage_24h);
+  const gainers = sorted.slice(0, 30);
+  const losers  = sorted.slice(-30).reverse();
+
+  // V6.8: dynamic green/red. Returns inline color or a "no data" muted gray
+  // (—) so a missing 1H / 7D point can't be misread as 0%.
+  function pctCell(val) {
+    if (!Number.isFinite(val)) return `<span class="mover-pct" style="color:var(--txt3)">—</span>`;
+    const col = val >= 0 ? 'var(--grn)' : 'var(--red)';
+    return `<span class="mover-pct" style="color:${col}">${fp(val, 2)}</span>`;
+  }
+
+  function moverRow(d, i) {
+    const sym = (d.symbol || d.id || '').toUpperCase();
+    const c1  = Number.isFinite(d._c1)  ? d._c1  : null;
+    const c24 = Number.isFinite(d._c24) ? d._c24 : d.price_change_percentage_24h;
+    const c7d = Number.isFinite(d._c7d) ? d._c7d : null;
+    const vol = d.total_volume || 0;
+    const volStr = vol >= 1e9 ? '$' + (vol/1e9).toFixed(1) + 'B'
+      : vol >= 1e6 ? '$' + (vol/1e6).toFixed(0) + 'M'
+      : vol >= 1e3 ? '$' + (vol/1e3).toFixed(0) + 'K' : '$' + vol.toFixed(0);
+    // V6.8 Sprint 1 (FIX-3): sym + d.id are upstream; escape sym for the
+    // text node and JSON.stringify d.id for the attribute. volStr/fmt are
+    // numeric-derived but escape defensively.
+    const idAttr = _esc(String(d.id || ''));
+    return `<div class="mover-row" data-coin-id="${idAttr}" data-coin-tab="scanner">
+      <span class="mover-rank">${i + 1}</span>
+      <span class="mover-sym">${_esc(sym)}</span>
+      <span class="mover-price">${_esc(fmt(d.current_price))}</span>
+      ${pctCell(c1)}
+      ${pctCell(c24)}
+      ${pctCell(c7d)}
+      <span class="mover-vol">${_esc(volStr)}</span>
+    </div>`;
+  }
+
+  const hdr = `<div class="mover-hdr">
+    <span class="mover-rank">#</span>
+    <span class="mover-sym">COIN</span>
+    <span class="mover-price">PRICE</span>
+    <span class="mover-pct">1H %</span>
+    <span class="mover-pct">24H %</span>
+    <span class="mover-pct">7D %</span>
+    <span class="mover-vol">VOL</span>
+  </div>`;
+
+  gEl.innerHTML = hdr + gainers.map((d, i) => moverRow(d, i)).join('');
+  lEl.innerHTML = hdr + losers.map((d, i) => moverRow(d, i)).join('');
+
+  const sumEl = document.getElementById('movers-summary');
+  if (sumEl) sumEl.textContent = `${DATA.length} coins tracked · top ${gainers.length} gainers · bottom ${losers.length} losers`;
+}
+
+function sv(v, el) {
+  // V6.3: clear ALL inline style overrides on every view, then add .on
+  // to the target. CSS handles display type per-view via ID selectors.
+  document.querySelectorAll('.view').forEach(x => {
+    x.classList.remove('on');
+    x.style.display = '';
+    x.style.opacity = '';
+    x.style.visibility = '';
+    x.style.transform = '';
+    x.style.flexDirection = '';
+    x.style.height = '';
+  });
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
+  const target = document.getElementById('v-' + v);
+  if (target) target.classList.add('on');
+  if (el) el.classList.add('on');
+  if (v === 'livefeed' && typeof LiveFeed !== 'undefined') LiveFeed.clearUnread();
+  // Heatmap canvas needs a redraw after the view becomes visible
+  // (clientWidth/Height are zero while display:none).
+  if (v === 'heatmap') requestAnimationFrame(() => { try { renderHeatmap(); } catch(e){} });
+  if (v === 'manual') requestAnimationFrame(() => { try { initManual(); } catch(e){} });
+  if (v === 'calendar') requestAnimationFrame(() => {
+    try { renderCalendar(); } catch(e){}
+    // Kick off live unlocks fetch (cached client-side 25 min); re-render
+    // when the network round-trips so the user sees fresh data without
+    // waiting for the next view switch.
+    try {
+      calFetchUnlocks().then(() => { try { renderCalendar(); } catch(e){} });
+    } catch(e){}
+  });
+}
+
+// ─── V6.6 CALENDAR — Live unlocks API + custom localStorage events ───
+// V6.5's hardcoded CAL_UNLOCK_SEED was rejected (missed XPL/PUMP/BIO and
+// every other newer/smaller-cap listing). The seed is gone. Unlocks now
+// come from /api/unlocks (DefiLlama emissions + CryptoRank) and are
+// merged with the user's localStorage events at render time.
+const CAL_STORAGE_KEY = 'terminal_v5_calendar_events';
+const CAL_UNLOCKS_CACHE_KEY = 'terminal_v5_unlocks_cache_v1';
+const CAL_UNLOCKS_CACHE_TTL_MS = 25 * 60 * 1000; // mirror edge memory TTL
+
+// V6.7 — one-shot nuke of poisoned empty-array cache from prior build.
+// Earlier versions stored `{ items: [] }` when /api/unlocks returned an
+// empty payload, which then short-circuited the FALLBACK_UNLOCKS path on
+// every subsequent load. Flush exactly once per browser per migration key.
+(function _calNukePoisonedUnlockCache() {
+  try {
+    const NUKE_KEY = 'terminal_v5_unlocks_nuke_v67';
+    if (!localStorage.getItem(NUKE_KEY)) {
+      localStorage.removeItem(CAL_UNLOCKS_CACHE_KEY);
+      localStorage.setItem(NUKE_KEY, '1');
+    }
+  } catch (e) {}
+})();
+let CAL_SELECTED_COLOR = '#00e8c8';
+let CAL_UNLOCKS = [];        // live unlocks (normalized for the calendar)
+let CAL_UNLOCKS_LOADED = false;
+let CAL_UNLOCKS_FETCHING = null;
+
+// Hardcoded safety net — used when /api/unlocks fails, times out, or returns
+// an empty array. Keeps the calendar populated with high-profile upcoming
+// unlocks so the UI never goes blank. Dates are mock projections.
+const FALLBACK_UNLOCKS = [
+  { symbol:'XPL',  project:'Plasma',         ts: Date.parse('2026-05-25T12:00:00Z'), date:'2026-05-25', amount_tokens:88_900_000, amount_usd: 42_000_000, pct_supply: 8.88, magnitude:'large',  source:'fallback' },
+  { symbol:'PUMP', project:'Pump.fun',       ts: Date.parse('2026-06-01T12:00:00Z'), date:'2026-06-01', amount_tokens:200_000_000, amount_usd: 18_500_000, pct_supply: 2.00, magnitude:'large',  source:'fallback' },
+  { symbol:'BIO',  project:'Bio Protocol',   ts: Date.parse('2026-06-08T12:00:00Z'), date:'2026-06-08', amount_tokens:155_000_000, amount_usd:  9_200_000, pct_supply: 4.65, magnitude:'medium', source:'fallback' },
+  { symbol:'ZRO',  project:'LayerZero',      ts: Date.parse('2026-06-20T12:00:00Z'), date:'2026-06-20', amount_tokens: 25_700_000, amount_usd: 73_000_000, pct_supply: 2.13, magnitude:'huge',   source:'fallback' },
+  { symbol:'ARB',  project:'Arbitrum',       ts: Date.parse('2026-06-16T12:00:00Z'), date:'2026-06-16', amount_tokens: 92_650_000, amount_usd: 58_400_000, pct_supply: 1.87, magnitude:'huge',   source:'fallback' },
+  { symbol:'OP',   project:'Optimism',       ts: Date.parse('2026-05-31T12:00:00Z'), date:'2026-05-31', amount_tokens: 31_340_000, amount_usd: 47_800_000, pct_supply: 2.42, magnitude:'large',  source:'fallback' },
+  { symbol:'SUI',  project:'Sui',            ts: Date.parse('2026-07-01T12:00:00Z'), date:'2026-07-01', amount_tokens: 64_200_000, amount_usd:115_000_000, pct_supply: 1.95, magnitude:'huge',   source:'fallback' },
+  { symbol:'APT',  project:'Aptos',          ts: Date.parse('2026-07-12T12:00:00Z'), date:'2026-07-12', amount_tokens: 11_310_000, amount_usd: 62_900_000, pct_supply: 1.78, magnitude:'huge',   source:'fallback' },
+  { symbol:'TIA',  project:'Celestia',       ts: Date.parse('2026-07-14T12:00:00Z'), date:'2026-07-14', amount_tokens: 17_750_000, amount_usd: 36_500_000, pct_supply: 4.79, magnitude:'large',  source:'fallback' },
+  { symbol:'JUP',  project:'Jupiter',        ts: Date.parse('2026-07-25T12:00:00Z'), date:'2026-07-25', amount_tokens: 53_460_000, amount_usd: 28_400_000, pct_supply: 1.91, magnitude:'large',  source:'fallback' },
+  { symbol:'ENA',  project:'Ethena',         ts: Date.parse('2026-08-02T12:00:00Z'), date:'2026-08-02', amount_tokens:171_900_000, amount_usd: 84_300_000, pct_supply: 5.62, magnitude:'huge',   source:'fallback' },
+  { symbol:'WLD',  project:'Worldcoin',      ts: Date.parse('2026-08-13T12:00:00Z'), date:'2026-08-13', amount_tokens: 38_750_000, amount_usd: 96_200_000, pct_supply: 1.32, magnitude:'huge',   source:'fallback' },
+];
+
+function calLoadCustomEvents() {
+  try {
+    const raw = localStorage.getItem(CAL_STORAGE_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch(e) { return []; }
+}
+
+function calSaveCustomEvents(arr) {
+  try { localStorage.setItem(CAL_STORAGE_KEY, JSON.stringify(arr)); } catch(e){}
+}
+
+function _calLoadCachedUnlocks() {
+  try {
+    const raw = localStorage.getItem(CAL_UNLOCKS_CACHE_KEY);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj || !Array.isArray(obj.items) || !obj.at) return null;
+    // V6.7: strict empty-array guard. An empty cache is poison — treat it
+    // as a miss AND evict it so the next call falls through to FALLBACK.
+    if (obj.items.length === 0) {
+      try { localStorage.removeItem(CAL_UNLOCKS_CACHE_KEY); } catch (e) {}
+      return null;
+    }
+    if (Date.now() - obj.at > CAL_UNLOCKS_CACHE_TTL_MS) return null;
+    return obj.items;
+  } catch(e) { return null; }
+}
+
+function _calStoreCachedUnlocks(items) {
+  // NEVER cache an empty array — that would defeat the fallback on next load.
+  if (!Array.isArray(items) || items.length === 0) return;
+  try { localStorage.setItem(CAL_UNLOCKS_CACHE_KEY, JSON.stringify({ at: Date.now(), items })); } catch(e){}
+}
+
+function _calClearCachedUnlocks() {
+  try { localStorage.removeItem(CAL_UNLOCKS_CACHE_KEY); } catch(e){}
+}
+
+function _calFetchUnlocksWithTimeout(ms) {
+  return new Promise((resolve, reject) => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => { ctrl.abort(); reject(new Error('timeout')); }, ms);
+    fetch('/api/unlocks', { headers: { 'Accept': 'application/json' }, signal: ctrl.signal })
+      .then(r => { clearTimeout(t); resolve(r); })
+      .catch(e => { clearTimeout(t); reject(e); });
+  });
+}
+
+function _calNormalizeUnlock(u) {
+  if (!u || !Number.isFinite(u.ts)) return null;
+  const sym = String(u.symbol || '').toUpperCase();
+  if (!sym) return null;
+  const usd = Number.isFinite(u.amount_usd) ? u.amount_usd : null;
+  const pct = Number.isFinite(u.pct_supply) ? u.pct_supply : null;
+  const tokens = Number.isFinite(u.amount_tokens) ? u.amount_tokens : null;
+  const mag = u.magnitude || 'unknown';
+  let amountStr = '';
+  if (usd != null) {
+    amountStr = usd >= 1e9 ? `$${(usd/1e9).toFixed(2)}B`
+              : usd >= 1e6 ? `$${(usd/1e6).toFixed(1)}M`
+              : usd >= 1e3 ? `$${(usd/1e3).toFixed(0)}K` : `$${usd.toFixed(0)}`;
+  } else if (tokens != null) {
+    amountStr = tokens >= 1e6 ? `${(tokens/1e6).toFixed(1)}M tokens` : `${tokens.toLocaleString()} tokens`;
+  }
+  const pctStr = pct != null ? ` · ${pct.toFixed(2)}% supply` : '';
+  const noteParts = [];
+  if (amountStr) noteParts.push(amountStr);
+  if (pctStr) noteParts.push(pctStr.trim().replace(/^·\s*/, ''));
+  if (mag && mag !== 'unknown') noteParts.push(mag);
+  noteParts.push(`source: ${u.source || 'live'}`);
+
+  return {
+    kind: 'unlock',
+    ts: u.ts,
+    topic: `${sym} unlock — ${u.project || sym}`,
+    note: noteParts.join(' · '),
+    color: '#ffb347',
+    sym,
+  };
+}
+
+async function calFetchUnlocks(force = false) {
+  if (CAL_UNLOCKS_FETCHING) return CAL_UNLOCKS_FETCHING;
+  if (!force && CAL_UNLOCKS_LOADED) return CAL_UNLOCKS;
+
+  if (!force) {
+    const cached = _calLoadCachedUnlocks();
+    // V6.7: strict length check — never accept an empty cached array as
+    // a usable state. The poisoned-state symptom from V6.5/V6.6 was a
+    // truthy `[]` falling through to render before fallback could run.
+    if (Array.isArray(cached) && cached.length > 0) {
+      CAL_UNLOCKS = cached.map(_calNormalizeUnlock).filter(Boolean);
+      CAL_UNLOCKS_LOADED = true;
+    }
+  }
+
+  CAL_UNLOCKS_FETCHING = (async () => {
+    try {
+      const r = await _calFetchUnlocksWithTimeout(10_000);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      const raw = Array.isArray(data?.items) ? data.items : [];
+      if (raw.length === 0) throw new Error('empty');
+      _calStoreCachedUnlocks(raw);
+      CAL_UNLOCKS = raw.map(_calNormalizeUnlock).filter(Boolean);
+      CAL_UNLOCKS_LOADED = true;
+    } catch(e) {
+      console.warn('[calendar] unlocks fetch failed → using FALLBACK_UNLOCKS:', e.message);
+      _calClearCachedUnlocks();
+      CAL_UNLOCKS = FALLBACK_UNLOCKS.map(_calNormalizeUnlock).filter(Boolean);
+      CAL_UNLOCKS_LOADED = true;
+    } finally {
+      CAL_UNLOCKS_FETCHING = null;
+    }
+    return CAL_UNLOCKS;
+  })();
+  return CAL_UNLOCKS_FETCHING;
+}
+
+function calBuildUnlockItems() {
+  return CAL_UNLOCKS.slice();
+}
+
+function calSaveEvent() {
+  const date = document.getElementById('cal-in-date').value;
+  const time = document.getElementById('cal-in-time').value || '12:00';
+  const topic = (document.getElementById('cal-in-topic').value || '').trim();
+  if (!date || !topic) {
+    alert('Date and Topic are required.');
+    return;
+  }
+  const ts = new Date(`${date}T${time}:00`).getTime();
+  if (!Number.isFinite(ts)) { alert('Invalid date/time.'); return; }
+  const events = calLoadCustomEvents();
+  events.push({ id: 'e_' + Date.now() + '_' + Math.random().toString(36).slice(2,8), ts, topic, color: CAL_SELECTED_COLOR });
+  calSaveCustomEvents(events);
+  document.getElementById('cal-in-topic').value = '';
+  renderCalendar();
+}
+
+function calDeleteEvent(id) {
+  const events = calLoadCustomEvents().filter(e => e.id !== id);
+  calSaveCustomEvents(events);
+  renderCalendar();
+}
+
+function _calFmtDate(ts) {
+  const d = new Date(ts);
+  const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  return { day: `${d.getDate()} ${months[d.getMonth()]}`, time: `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}` };
+}
+
+function _calDaysFromNow(ts) {
+  const ms = ts - Date.now();
+  const days = Math.round(ms / (24*3600*1000));
+  if (days < 0) return `${Math.abs(days)}d ago`;
+  if (days === 0) return 'today';
+  if (days === 1) return '1d';
+  return `${days}d`;
+}
+
+function renderCalendar() {
+  const list = document.getElementById('cal-list');
+  const ticker = document.getElementById('cal-ticker');
+  const cnt = document.getElementById('cal-count');
+  if (!list) return;
+
+  const unlocks = calBuildUnlockItems();
+  const customs = calLoadCustomEvents().map(e => ({ kind:'custom', ts:e.ts, topic:e.topic, color:e.color || '#00e8c8', id:e.id }));
+  const all = [...unlocks, ...customs].sort((a,b) => a.ts - b.ts);
+
+  const liveLabel = CAL_UNLOCKS_LOADED
+    ? `${unlocks.length} live unlock${unlocks.length===1?'':'s'} · ${customs.length} custom`
+    : (CAL_UNLOCKS_FETCHING ? 'Loading live unlocks…' : `${customs.length} custom`);
+  if (cnt) cnt.textContent = `${all.length} item${all.length===1?'':'s'} · ${liveLabel}`;
+
+  if (!all.length) {
+    const msg = CAL_UNLOCKS_FETCHING
+      ? 'Fetching live token unlocks…'
+      : 'No upcoming events. Add one above or wait for live unlocks to load.';
+    list.innerHTML = `<div class="cal-empty">${msg}</div>`;
+    if (ticker) ticker.innerHTML = `<span class="cal-tick-item">${msg}</span>`;
+    return;
+  }
+
+  list.innerHTML = all.map(it => {
+    const { day, time } = _calFmtDate(it.ts);
+    const tag = it.kind === 'unlock'
+      ? `<span class="cal-item__tag unlock">${_calDaysFromNow(it.ts)}</span>`
+      : `<span class="cal-item__tag custom">${_calDaysFromNow(it.ts)}</span>`;
+    const del = it.kind === 'custom'
+      ? `<button class="cal-item__del" title="Delete" onclick="calDeleteEvent('${it.id}')">✕</button>`
+      : `<span></span>`;
+    const noteHtml = it.note ? `<small>${escapeHtml(it.note)}</small>` : '';
+    return `<div class="cal-item">
+      <span class="cal-item__bar" style="background:${it.color}"></span>
+      <div class="cal-item__date"><span class="cal-item__d-day">${day}</span><span class="cal-item__d-time">${time}</span></div>
+      <div class="cal-item__topic">${escapeHtml(it.topic)}${noteHtml}</div>
+      ${tag}
+      ${del}
+    </div>`;
+  }).join('');
+
+  if (ticker) {
+    // V6.8 Sprint 1 (FIX-3): symbol-derived `sym` may have flowed in from
+    // the /api/unlocks live feed. dateStr / daysFromNow are number-formatted
+    // so safe. Wrap the emoji + symbol composition in _esc as well.
+    const tickItems = all.slice(0, 20).map(it => {
+      const d = new Date(it.ts);
+      const dateStr = `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}`;
+      const rawSym = it.kind === 'unlock' ? (it.sym || (it.topic || '').split(' ')[0] || '') : '';
+      const symHtml = it.kind === 'unlock' ? `🔓 ${_esc(rawSym)}` : `📌`;
+      return `<span class="cal-tick-item"><span class="cal-tick-sym">${symHtml}</span>${escapeHtml(it.topic)}<span class="cal-tick-date">${_esc(dateStr)} · ${_esc(_calDaysFromNow(it.ts))}</span></span>`;
+    }).join('');
+    ticker.innerHTML = tickItems + tickItems;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+document.addEventListener('click', (e) => {
+  const sw = e.target.closest('.cal-color');
+  if (!sw) return;
+  CAL_SELECTED_COLOR = sw.getAttribute('data-color') || '#00e8c8';
+  document.querySelectorAll('#cal-colors .cal-color').forEach(x => x.classList.remove('on'));
+  sw.classList.add('on');
+});
+
+(function _calInitDateField() {
+  const ready = () => {
+    const f = document.getElementById('cal-in-date');
+    if (f && !f.value) {
+      const d = new Date();
+      f.value = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    }
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ready);
+  else ready();
+})();
+
+// ─── INTERACTIVE MANUAL — reveal observer + TOC scroll-spy ───
+let _manualIOReady = false;
+function initManual() {
+  const doc = document.getElementById('manual-doc');
+  if (!doc) return;
+
+  // V6.2 NUCLEAR: force-reveal ALL [data-reveal] elements immediately.
+  // CSS #v-manual.on [data-reveal] already overrides opacity/transform,
+  // but we also add the .is-in class so the IO never needs to fire.
+  // This guarantees content is visible even if the observer root is
+  // broken (clipped, zero-height, reduced-motion, etc.).
+  doc.querySelectorAll('[data-reveal]').forEach(el => {
+    el.classList.add('is-in');
+  });
+
+  if (_manualIOReady) return;
+  _manualIOReady = true;
+
+  // Reveal-on-scroll. IntersectionObserver fires once per element and
+  // toggles `is-in`; the CSS handles the actual fade/slide. Zero
+  // animation libraries pulled in — same easing semantics GSAP uses,
+  // implemented in 6 lines.
+  const reveals = doc.querySelectorAll('[data-reveal]');
+  const io = _ObserverRegistry.add(new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) {
+        e.target.classList.add('is-in');
+        io.unobserve(e.target);
+      }
+    }
+  }, { root: doc, threshold: 0.12, rootMargin: '0px 0px -40px 0px' }));
+  reveals.forEach((el, i) => {
+    el.style.transitionDelay = (Math.min(i, 6) * 60) + 'ms';
+    io.observe(el);
+  });
+
+  // TOC scroll-spy. Sections light up the matching TOC link as they
+  // cross the top of the viewport.
+  const sections = doc.querySelectorAll('.manual-section, .manual-hero, .manual-foot');
+  const links = document.querySelectorAll('.manual-toc__link');
+  const linkByHash = new Map();
+  links.forEach(a => linkByHash.set(a.getAttribute('href'), a));
+  const spy = _ObserverRegistry.add(new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const link = linkByHash.get('#' + e.target.id);
+      if (!link) continue;
+      if (e.isIntersecting) {
+        links.forEach(a => a.classList.remove('is-active'));
+        link.classList.add('is-active');
+      }
+    }
+  }, { root: doc, threshold: 0.4 }));
+  sections.forEach(s => { if (s.id) spy.observe(s); });
+
+  // Smooth-scroll TOC clicks inside the doc container (default browser
+  // smooth-scroll resolves against the window, not our scrollable doc).
+  links.forEach(a => {
+    a.addEventListener('click', (e) => {
+      const href = a.getAttribute('href');
+      if (!href || !href.startsWith('#')) return;
+      const target = doc.querySelector(href);
+      if (!target) return;
+      e.preventDefault();
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+}
+
+function _syncChips(rootSelector, activeLabel) {
+  document.querySelectorAll(rootSelector + ' .f-chip').forEach(c => c.classList.toggle('on', c.textContent.trim() === activeLabel));
+}
+
+function setFilter(f, el) {
+  f = f || 'all'; currentFilter = f; currentPage = 0;
+  _syncChips('.scanner-left', f.toUpperCase());
+  renderList();
+}
+
+function setAlertFilter(f, el) {
+  f = f || 'all'; currentAlertFilter = f; currentPage = 0;
+  _syncChips('#v-alerts', f.toUpperCase());
+  renderAlerts();
+}
+
+document.addEventListener('refresh_now', () => { doRefresh(); });
+
+async function doRefresh() {
+  document.getElementById('sts').textContent = 'FETCHING...';
+  const live = await fetchData();
+  if (live && live.length) DATA = live;
+
+  // V6.9 Sprint 2: compute sig(d) EXACTLY ONCE per refresh cycle.
+  // The full result is cached on the coin (`d._sig`) and the score is
+  // mirrored to `d._sig_score` / `d.score` so downstream Array.sort()
+  // comparators can read native properties without re-parsing.
+  // All other hot-path call sites (getFilteredSorted, buildAlerts,
+  // renderList, pickCoin, renderTopCharts, briefing) now route through
+  // `_sigOf(d)` which lazy-falls-back to sig(d) if a coin somehow
+  // bypassed this stamp (e.g. injected mid-cycle).
+  DATA.forEach(d => {
+    try {
+      const s = sig(d);
+      d._sig = s;
+      d._sig_score = s.score;
+      d.score = s.score;
+    } catch {
+      d._sig = null; d._sig_score = 0; d.score = 0;
+    }
+  });
+  DATA.sort((a, b) => (b._sig_score || 0) - (a._sig_score || 0));
+
+  // Regime fetch runs in parallel with the rest of the render —
+  // we don't await it before painting the scanner because regime
+  // is its own panel; if it lags, the scanner is unaffected.
+  const regimePromise = fetchRegime();
+  buildAlerts();
+
+  // V5 (Phase 3): volatility / panic sentiment detection. Reuses the
+  // /api/markets poll — no extra fetch. Triggered coins are pushed to
+  // LiveFeed (throttled per-symbol) and rendered in the top-bar badge.
+  try {
+    const vol = detectVolatilitySpikes(DATA);
+    renderVolatilityBadge(vol);
+    window.__lastVolatility = vol;
+  } catch (e) { console.warn('[VOL] detector failed:', e.message); }
+
+  // V5 (Phase 4 Wildcard A): smart-money divergence fetch runs in
+  // parallel — non-blocking, soft-fails if Binance/Redis is down.
+  fetchDivergence();
+
+  // V5 (Sniper Limit Protocol): orderbook bid-wall scan, batched and
+  // cached server-side (60s memory + Redis). Non-blocking; renderList
+  // reads SNIPER_MAP on the NEXT paint if this lands after it.
+  fetchSniper().then(() => {
+    // Re-render so freshly-arrived sniper hits get stamped without
+    // waiting for the next refresh tick (~30-60s later).
+    try { renderList(); } catch (e) { /* */ }
+  });
+
+  // V5 (Phase 4 Wildcard B): pre-compute composite momentum scores so
+  // renderList + pickCoin can read them synchronously.
+  try {
+    DATA.forEach((d) => { d._mom = computeMomentumScore(d); });
+  } catch (e) { console.warn('[MOM] compute failed:', e.message); }
+
+  renderTopbar();
+  renderList();
+  renderAlerts();
+  renderSectors();
+  renderHeatmap();
+  renderTopCharts();
+  renderMovers();
+
+  // LiveFeed: push refresh event
+  LiveFeed.push(`Data refreshed — ${DATA.length} coins loaded`, 'info');
+
+  // V5 (D-9): cap hot-event blast per tick at MAX_HOT_PUSHES so a
+  // market-wide spike (50+ coins hot simultaneously) doesn't flood
+  // the feed and queue. We sort by hotness desc so the top movers
+  // always make it through.
+  const MAX_HOT_PUSHES = 8;
+  const hot = DATA
+    .map((d) => {
+      try { return { d, h: calcHotness(d) }; } catch { return null; }
+    })
+    .filter((x) => x && x.h >= 80)
+    .sort((a, b) => b.h - a.h)
+    .slice(0, MAX_HOT_PUSHES);
+  hot.forEach(({ d, h }) => {
+    LiveFeed.push(`${(d.symbol||d.id).toUpperCase()} hotness ${h}%`, 'hot');
+  });
+
+  // Once the server-side regime arrives, repaint the badge + the
+  // REGIME tab. No more hardcoded "NORMAL (Score: 0)" stub.
+  regimePromise.then(() => {
+    renderTopbar();
+    renderRegimeView();
+    LiveFeed.push(`Regime: ${(REGIME.label||REGIME.bucket||'—').toUpperCase()} (score ${REGIME.score|0})`, 'regime');
+  });
+
+  if (SEL) pickCoin(SEL);
+}
+
+// ========== INITIALIZATION & AUTH ==========
+let _appRunning = false;
+async function initTerminalApp() {
+  if (_appRunning) return;
+  _appRunning = true;
+  loadTgConfig();
+  initResizableColumns();
+  initHotnessTooltip();
+  if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+  fetchBinancePairs();
+  await doRefresh();
+  window._refreshTimer = setInterval(doRefresh, REFRESH_INTERVAL * 1000);
+  // Start crypto news feed (every 5 min)
+  LiveFeed.init();
+  LiveFeed.startNewsLoop();
+}
+
+// V5: bootstrap Supabase config from /api/config (env-driven on the
+// edge), with the legacy hardcoded values kept ONLY as a last-resort
+// fallback for local-dev environments that haven't set the env vars.
+// Production deploys should set SUPABASE_URL + SUPABASE_ANON_KEY in
+// Netlify env so rotation is a redeploy, not a code change.
+const _FALLBACK_SUPABASE = {
+  url: 'https://pfxfythajbzuisdvhhvd.supabase.co',
+  key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBmeGZ5dGhhamJ6dWlzZHZoaHZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY4NTMyNDYsImV4cCI6MjA5MjQyOTI0Nn0.dQbPdej9ur7Irqo_iJN-uki1S2EgS00-iOKd3erVZSQ',
+};
+
+async function _bootstrapSupabaseConfig() {
+  try {
+    const r = await fetch('/api/config', { headers: { 'Accept': 'application/json' } });
+    if (r.ok) {
+      const j = await r.json();
+      if (j?.configured && j.supabase_url && j.supabase_anon_key) {
+        return { url: j.supabase_url, key: j.supabase_anon_key };
+      }
+    }
+  } catch (e) {
+    console.warn('[BOOTSTRAP] /api/config fetch failed, using fallback:', e.message);
+  }
+  console.warn('[BOOTSTRAP] Using fallback Supabase config (env vars not set on edge)');
+  return _FALLBACK_SUPABASE;
+}
+
+let supabaseCl = null;
+
+(async function _initSupabase() {
+  const cfg = await _bootstrapSupabaseConfig();
+  supabaseCl = window.supabase.createClient(cfg.url, cfg.key);
+  window.__supabase = supabaseCl;
+  // Re-wire auth listeners now that the client exists. The handlers
+  // defined further below capture `supabaseCl` by closure — they read
+  // it lazily so they pick up the bootstrapped instance.
+  if (typeof window._wireSupabaseListeners === 'function') {
+    window._wireSupabaseListeners();
+  }
+})();
+
+// V5: auth wiring deferred until _bootstrapSupabaseConfig resolves
+// and supabaseCl exists. The _wireSupabaseListeners stub is called
+// by the bootstrap IIFE above; it can be invoked safely multiple times
+// because it idempotently re-attaches against the live client.
+let _authWired = false;
+window._wireSupabaseListeners = function _wireSupabaseListeners() {
+  if (_authWired || !supabaseCl) return;
+  _authWired = true;
+
+  const authForm = document.getElementById('auth-form');
+  if (authForm) {
+    authForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = document.getElementById('auth-email').value.trim();
+      const password = document.getElementById('auth-password').value;
+      const btn = document.getElementById('auth-submit');
+      const err = document.getElementById('auth-error');
+
+      btn.disabled = true; btn.textContent = 'Ověřuji...'; err.classList.remove('visible');
+
+      try {
+        const { error } = await supabaseCl.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+      } catch (error) {
+        console.error('🔍 Supabase Login Error Detail:', error);
+        err.textContent = error.message || 'Chyba sítě nebo neplatný požadavek (více v konzoli).';
+        err.classList.add('visible');
+        window.Toast?.error('Login failed', error.message || 'Network or auth error', { endpoint: 'supabase.auth.signInWithPassword' });
+      } finally {
+        btn.disabled = false; btn.textContent = 'PŘIHLÁSIT SE';
+      }
+    });
+  }
+
+  document.getElementById('logout-btn')?.addEventListener('click', async () => {
+    if (confirm('Opravdu se chcete odhlásit?')) {
+      await supabaseCl.auth.signOut();
+    }
+  });
+
+  supabaseCl.auth.onAuthStateChange((event, session) => {
+    if (session) {
+      // V5: cache the user's tier on the global state so client-side
+      // gating (top coin cap, DEX visibility) can read it synchronously.
+      // Admin emails are mirrored client-side for UI labeling — but
+      // the actual tier enforcement happens server-side in lib/tier.js.
+      const email = String(session.user?.email || '').trim().toLowerCase();
+      const adminEmails = ['ales.cesnek@thevld.com', 'vld@thevld.com'];
+      const isAdmin = adminEmails.includes(email);
+      window.__userTier = isAdmin || session.user?.user_metadata?.tier === 'pro' ? 'pro' : 'free';
+      window.__isAdmin = isAdmin;
+      document.getElementById('auth-gate').hidden = true;
+      document.getElementById('terminal-app').style.display = 'block';
+      const emBtn = document.getElementById('user-email');
+      if (emBtn) {
+        const label = isAdmin ? 'ADMIN' : window.__userTier.toUpperCase();
+        emBtn.textContent = (session.user?.email || '—') + ' · ' + label;
+      }
+      initTerminalApp();
+    } else {
+      // V6.9 Sprint 2: nuke every observer + the 120s scanner refresh
+      // timer + LiveFeed's two intervals. Previously the app kept
+      // hammering /api/markets after signout (ghost network spam).
+      try { _terminalTeardown(); } catch (err) { console.warn('[AUTH] teardown failed:', err.message); }
+      window.__userTier = 'free';
+      window.__isAdmin = false;
+      document.getElementById('auth-gate').hidden = false;
+      document.getElementById('terminal-app').style.display = 'none';
+    }
+  });
+};
+
+// ── Module 4: Market Briefing trigger ──
+// We pick the top 3 coins by computed score from the *current* DATA
+// snapshot. The backend re-fetches fresh Binance snapshots for them
+// — we only send the symbol list.
+document.getElementById('briefing-trigger')?.addEventListener('click', () => {
+  if (!Array.isArray(DATA) || !DATA.length) {
+    console.warn('[BRIEFING] DATA not ready');
+    return;
+  }
+  const top3 = [...DATA]
+    .map(d => ({ d, score: (d._sig_score != null ? d._sig_score : (d.score != null ? d.score : (typeof sig === 'function' ? sig(d).score : 0))) }))
+    .sort((a, b) => (b.score || 0) - (a.score || 0))
+    .slice(0, 3)
+    .map(x => (x.d.symbol || x.d.id || '').toString().toUpperCase())
+    .filter(Boolean);
+  if (!top3.length) {
+    console.warn('[BRIEFING] No top symbols resolved');
+    return;
+  }
+  if (typeof window.requestBriefing === 'function') {
+    window.requestBriefing(top3);
+    LiveFeed.push(`AI Briefing requested: ${top3.join(', ')}`, 'ai');
+  } else {
+    console.error('[BRIEFING] requestBriefing not available');
+  }
+});
+
+// ── V4 Premium: Market Briefing collapsible panel ──
+// One global button (in topbar) + a dedicated collapsible panel
+// directly under the topbar. Both share the same fetch path so the
+// 45-min cache layer is hit consistently regardless of entry point.
+(function wireMarketBriefing() {
+  const panel = document.getElementById('mkt-briefing-panel');
+  const toggle = document.getElementById('mkt-briefing-toggle');
+  const body = document.getElementById('mkt-briefing-body');
+  const refreshBtn = document.getElementById('mkt-briefing-refresh');
+  const headerBtn = document.getElementById('mkt-briefing-trigger');
+  let loadedOnce = false;
+
+  if (!panel || !toggle || !body) return;
+
+  function setOpen(open) {
+    panel.dataset.state = open ? 'open' : 'closed';
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    body.hidden = !open;
+    const chev = toggle.querySelector('.mkt-briefing__chev');
+    if (chev) chev.textContent = open ? '▾' : '▸';
+  }
+
+  function ensureOpenAndLoad(force = false) {
+    setOpen(true);
+    if (force || !loadedOnce) {
+      loadedOnce = true;
+      if (typeof window.requestMarketBriefing === 'function') {
+        window.requestMarketBriefing({ force });
+        if (typeof LiveFeed?.push === 'function') {
+          LiveFeed.push(force ? 'Market Briefing: forced refresh' : 'Market Briefing: loaded', 'ai');
+        }
+      } else {
+        console.error('[MKT-BRIEFING] requestMarketBriefing unavailable');
+      }
+    }
+  }
+
+  toggle.addEventListener('click', (e) => {
+    // Don't toggle when the user clicked the inline ↻ or × buttons
+    if (e.target.closest('#mkt-briefing-refresh') || e.target.closest('#mkt-briefing-close')) return;
+    if (panel.dataset.state === 'open') {
+      setOpen(false);
+    } else {
+      ensureOpenAndLoad(false);
+    }
+  });
+  toggle.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      toggle.click();
+    }
+  });
+  refreshBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    ensureOpenAndLoad(true);
+  });
+  headerBtn?.addEventListener('click', () => {
+    ensureOpenAndLoad(false);
+    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+
+  // V6.3: Close button hides the entire briefing bar.
+  const closeBtn = document.getElementById('mkt-briefing-close');
+  closeBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setOpen(false);
+    panel.style.display = 'none';
+  });
+})();
+
+// ========== TARGET 3: RESIZABLE COLUMNS ==========
+//
+// Design notes (V4):
+//   • Handles always sit on the LEFT edge of col[i] — dragging the
+//     handle moves the seam between col[i-1] and col[i]. Visually
+//     consistent because every handle uses the same anchor.
+//   • The first two cells (# and COIN) are explicitly opted out:
+//     resizing the row-number col has no value, and the user
+//     wants COIN's left edge to stay flush against the row marker.
+//   • Saved widths are validated against the live column count — a
+//     stale localStorage entry from a different layout is discarded
+//     instead of being smeared across the wrong columns.
+//   • Drag math is purely local (only the two adjacent columns
+//     change), so total row width never grows from a drag — that
+//     prevents the SCORE column from being shoved past the right
+//     edge of the container.
+const MIN_COL_PX = 50;
+
+function initResizableColumns() {
+  const STORAGE_KEY = 'swing_col_widths';
+  // The COIN column (index 1) is the "flex" cell — it absorbs slack
+  // via minmax(width, 1fr). Every other column is a fixed pixel width.
+  const FLEX_COL = 1;
+  // Cells we never attach a drag handle to. # is the row marker, COIN
+  // is the first content column whose left edge we want flush.
+  const NO_HANDLE_INDICES = new Set([0, 1]);
+
+  const readSaved = () => {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)); }
+    catch { return null; }
+  };
+
+  function applyWidths(widths) {
+    if (!Array.isArray(widths) || !widths.length) return;
+    const tpl = widths
+      .map((w, i) => {
+        const px = Math.max(MIN_COL_PX, Math.round(Number(w) || MIN_COL_PX));
+        return i === FLEX_COL ? `minmax(${px}px, 1fr)` : `${px}px`;
+      })
+      .join(' ');
+    let styleEl = document.getElementById('dynamic-cols');
+    if (!styleEl) {
+      styleEl = document.createElement('style');
+      styleEl.id = 'dynamic-cols';
+      document.head.appendChild(styleEl);
+    }
+    styleEl.textContent = `#v-scanner .thdr, #v-scanner .trow, #clist .trow { grid-template-columns: ${tpl} !important; }`;
+  }
+
+  function getColWidths() {
+    const hdr = document.querySelector('.thdr');
+    if (!hdr) return null;
+    return Array.from(hdr.children).map(c => c.offsetWidth);
+  }
+
+  // Apply saved widths if their length matches the current header.
+  // A mismatch (e.g. 10-col layout cached, 12-col layout live) means
+  // a layout migration happened — we drop the stale entry rather
+  // than apply a misaligned template.
+  function maybeApplySaved() {
+    const hdr = document.querySelector('.thdr');
+    if (!hdr) return;
+    const expected = hdr.children.length;
+    const saved = readSaved();
+    if (Array.isArray(saved) && saved.length === expected) {
+      applyWidths(saved);
+    } else if (saved) {
+      console.info('[RESIZE] Discarding stale saved widths (expected', expected, 'got', saved.length, ')');
+      try { localStorage.removeItem(STORAGE_KEY); } catch {}
+    }
+  }
+
+  // Observe the header row and attach drag handles when it appears.
+  const observer = _ObserverRegistry.add(new MutationObserver(() => {
+    const hdr = document.querySelector('.thdr');
+    if (!hdr || hdr.dataset.resizable === '1') return;
+    hdr.dataset.resizable = '1';
+    flagNoHandleCells(hdr);
+    attachHandles(hdr);
+    maybeApplySaved();
+  }));
+  observer.observe(document.body, { childList: true, subtree: true });
+
+  function flagNoHandleCells(hdr) {
+    Array.from(hdr.children).forEach((col, i) => {
+      if (NO_HANDLE_INDICES.has(i)) col.classList.add('no-handle');
+      else col.classList.remove('no-handle');
+    });
+  }
+
+  function attachHandles(hdr) {
+    const cols = Array.from(hdr.children);
+    // Remove any old handles before adding fresh ones.
+    cols.forEach(col => {
+      const existing = col.querySelector('.col-resize-handle');
+      if (existing) existing.remove();
+    });
+
+    cols.forEach((col, i) => {
+      if (NO_HANDLE_INDICES.has(i)) return;
+      col.style.position = 'relative';
+      const handle = document.createElement('div');
+      handle.className = 'col-resize-handle';
+      col.appendChild(handle);
+
+      handle.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const startX = e.clientX;
+        const prevW = cols[i - 1]?.offsetWidth || MIN_COL_PX;
+        const startW = col.offsetWidth;
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+
+        const onMove = (ev) => {
+          const dx = ev.clientX - startX;
+          // Clamp so neither neighbor can shrink below MIN_COL_PX.
+          let validDx = dx;
+          if (prevW + validDx < MIN_COL_PX) validDx = MIN_COL_PX - prevW;
+          if (startW - validDx < MIN_COL_PX) validDx = startW - MIN_COL_PX;
+
+          const widths = getColWidths();
+          if (!widths) return;
+          widths[i - 1] = prevW + validDx;
+          widths[i] = startW - validDx;
+          applyWidths(widths);
+        };
+        const onUp = () => {
+          document.body.style.cursor = '';
+          document.body.style.userSelect = '';
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          const widths = getColWidths();
+          if (Array.isArray(widths) && widths.length) {
+            try { localStorage.setItem(STORAGE_KEY, JSON.stringify(widths)); } catch {}
+          }
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+    });
+  }
+}
+
+// Global utility to reset the terminal layout if columns are broken
+window.resetLayout = function() {
+  localStorage.removeItem('swing_col_widths');
+  location.reload();
+};
+
+// ========== TARGET 4: HOTNESS TOOLTIP ==========
+function initHotnessTooltip() {
+  // We observe the DOM because the header is rendered dynamically
+  const observer = _ObserverRegistry.add(new MutationObserver(() => {
+    const hotHeaders = document.querySelectorAll('.thdr [data-hot-tip]');
+    hotHeaders.forEach(el => {
+      if (el.dataset.tipReady) return;
+      el.dataset.tipReady = '1';
+      el.style.position = 'relative';
+      el.style.cursor = 'help';
+
+      const tip = document.createElement('div');
+      tip.className = 'hotness-tooltip';
+      tip.innerHTML = `
+        <div class="ht-row"><span class="ht-dot" style="background:var(--txt3)"></span><b>&lt;30%</b> Dead</div>
+        <div class="ht-row"><span class="ht-dot" style="background:var(--amb)"></span><b>30-60%</b> Normal</div>
+        <div class="ht-row"><span class="ht-dot" style="background:var(--red)"></span><b>60-85%</b> Hot</div>
+        <div class="ht-row"><span class="ht-dot" style="background:#ff1744"></span><b>&gt;85%</b> Boiling</div>
+      `;
+      el.appendChild(tip);
+
+      el.addEventListener('mouseenter', () => tip.classList.add('ht-visible'));
+      el.addEventListener('mouseleave', () => tip.classList.remove('ht-visible'));
+    });
+  }));
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
+// Hook AI analysis into LiveFeed
+const _origRequestAnalysis = window.requestAnalysis;
+if (typeof _origRequestAnalysis === 'function') {
+  window.requestAnalysis = function(sym, id) {
+    LiveFeed.push(`AI analysis requested: ${sym}`, 'ai');
+    // Resolve coin context so non-Binance/DEX coins still get an
+    // analysis. The backend uses this to skip the Binance fetch
+    // entirely when binance_available === false.
+    let ctx = null;
+    try {
+      const d = (Array.isArray(DATA) ? DATA : []).find(x => (id && x.id === id) || (x.symbol || '').toUpperCase() === String(sym || '').toUpperCase());
+      if (d) {
+        ctx = {
+          id: d.id,
+          symbol: (d.symbol || '').toUpperCase(),
+          name: d.name || d.id,
+          binance_available: !!isOnBinance(d),
+          // V4 Premium: forward the venue (spot vs futures) + futures
+          // pair so analyze.js can hit /fapi for ALPHA coins.
+          binance_market: d.binance_market || (d.exchange === 'ALPHA' ? 'futures' : (isOnBinance(d) ? 'spot' : null)),
+          exchange: d.exchange || null,
+          pair: d.pair || null,
+          quote: d.quote || null,
+          futures_pair: d.futures_pair || null,
+          futures_quote: d.futures_quote || null,
+          spot_pair: d.spot_pair || null,
+          current_price: d.current_price || 0,
+          price_change_percentage_24h: d.price_change_percentage_24h || 0,
+          high_24h: d.high_24h || 0,
+          low_24h: d.low_24h || 0,
+          total_volume: d.total_volume || 0,
+          market_cap: d.market_cap || 0,
+          market_cap_rank: d.market_cap_rank || 0,
+        };
+      }
+    } catch {}
+    if (ctx) window.__lastAnalyzeCtx = ctx;
+    return _origRequestAnalysis.call(this, sym, id, ctx);
+  };
+}

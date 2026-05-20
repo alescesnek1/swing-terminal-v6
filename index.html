@@ -1,0 +1,1563 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Swing Terminal V3</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:#04060e;overflow-x:hidden}
+:root{
+  --bg:#04060e;--s1:#07091a;--s2:#0b0f20;--s3:#0f1528;--s4:#141c35;
+  --b1:rgba(255,255,255,.04);--b2:rgba(255,255,255,.07);--b3:rgba(255,255,255,.12);
+  --acc:#00e8c8;--red:#ff3356;--grn:#00d484;--amb:#ffb020;--blu:#3d9eff;--pur:#a855f7;--cyan:#22d3ee;--pink:#f472b6;
+  --txt:#b8cce8;--txt2:#607090;--txt3:#2a3a55;
+  --mono:'IBM Plex Mono',monospace;--rad:4px;
+}
+body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11px;line-height:1.5}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:var(--s1)}
+::-webkit-scrollbar-thumb{background:var(--s4);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--txt3)}
+
+/* TOPBAR */
+#topbar{display:flex;align-items:center;gap:8px;padding:0 12px;height:40px;background:var(--s1);border-bottom:1px solid var(--b2);position:sticky;top:0;z-index:100}
+.logo{font-size:11px;font-weight:700;color:var(--acc);letter-spacing:.18em;white-space:nowrap}
+.logo span{color:var(--txt3);font-weight:400;font-size:9px;letter-spacing:.05em;margin-left:6px}
+
+/* HOTNESS GAUGE */
+.hotness-box{display:flex;align-items:center;gap:6px;padding:2px 8px;border-radius:var(--rad);border:1px solid var(--b2);background:var(--s2);white-space:nowrap}
+.hotness-label{font-size:8px;color:var(--txt3);letter-spacing:.1em;font-weight:600}
+.hotness-bar{width:60px;height:6px;background:var(--s4);border-radius:3px;overflow:hidden;position:relative}
+.hotness-fill{height:100%;border-radius:3px;transition:width .6s,background .6s}
+.hotness-val{font-size:11px;font-weight:700;min-width:24px;text-align:right}
+
+/* REGIME BADGE */
+.regime-badge{display:flex;align-items:center;gap:4px;padding:2px 8px;border-radius:var(--rad);font-size:9px;font-weight:600;letter-spacing:.05em;border:1px solid;white-space:nowrap;cursor:pointer}
+.regime-normal{background:rgba(0,212,132,.06);color:var(--grn);border-color:rgba(0,212,132,.2)}
+.regime-elevated{background:rgba(255,176,32,.08);color:var(--amb);border-color:rgba(255,176,32,.25)}
+.regime-shock{background:rgba(255,51,86,.1);color:var(--red);border-color:rgba(255,51,86,.3);animation:pulse-regime 1.5s infinite}
+@keyframes pulse-regime{0%,100%{opacity:1}50%{opacity:.6}}
+.regime-dot{width:6px;height:6px;border-radius:50%}
+
+.ticker-wrap{flex:1;overflow:hidden;min-width:0;display:flex;gap:12px}
+.ti{display:flex;gap:4px;align-items:baseline;white-space:nowrap;font-size:10px;cursor:pointer;padding:2px 4px;border-radius:var(--rad);transition:background .1s}
+.ti:hover{background:var(--b1)}
+.tsym{font-weight:600;color:var(--txt);font-size:10px}.tprc{color:var(--txt2);font-size:10px}
+
+.hdr-right{display:flex;align-items:center;gap:6px}
+.dot-live{width:6px;height:6px;border-radius:50%;background:var(--grn);animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.15}}
+.sbadge{font-size:9px;padding:2px 6px;border-radius:2px;font-weight:600;letter-spacing:.04em}
+.s-live{background:rgba(0,212,132,.1);color:var(--grn);border:1px solid rgba(0,212,132,.25)}
+.s-mock{background:rgba(255,176,32,.1);color:var(--amb);border:1px solid rgba(255,176,32,.25)}
+.hbtn{background:none;border:1px solid var(--b2);color:var(--txt2);font-family:var(--mono);font-size:9px;padding:2px 8px;border-radius:var(--rad);cursor:pointer;letter-spacing:.05em;transition:all .15s}
+.hbtn:hover{color:var(--acc);border-color:rgba(0,232,200,.4)}
+#last-update{font-size:9px;color:var(--txt3)}
+
+/* TABS */
+#tabs{display:flex;background:var(--s1);border-bottom:1px solid var(--b2);padding:0 12px;overflow-x:auto}
+.tab{padding:7px 12px;font-size:10px;letter-spacing:.07em;color:var(--txt3);cursor:pointer;border-bottom:2px solid transparent;transition:all .12s;white-space:nowrap;font-weight:500}
+.tab:hover{color:var(--txt2)}.tab.on{color:var(--acc);border-bottom-color:var(--acc)}
+.tab .cnt{font-size:8px;color:var(--red);margin-left:3px}
+.view{display:none}.view.on{display:block}
+
+/* PANELS */
+.ph{display:flex;align-items:center;justify-content:space-between;padding:5px 12px;background:var(--s2);border-bottom:1px solid var(--b1)}
+.pt{font-size:9px;font-weight:600;color:var(--acc);letter-spacing:.12em}.ps{font-size:9px;color:var(--txt3)}
+
+/* SCANNER TABLE */
+.scan-wrap{overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch;position:relative}
+.scan-wrap .thdr,.scan-wrap .trow{white-space:nowrap}
+/* Two adjacent fixed columns: [sym+name] | [alert badge] — followed by metrics.
+   Column order: #  COIN  SIGNAL  PRICE  1H  4H  24H  7D  VOL%  HOT  SCORE */
+.thdr{display:grid;grid-template-columns:32px minmax(120px,1.6fr) 84px minmax(88px,1.1fr) 64px 64px 64px 64px 70px 54px 70px;gap:4px;padding:5px 10px;font-size:9px;color:var(--txt3);letter-spacing:.05em;border-bottom:1px solid var(--b1);background:var(--s1);min-width:820px;width:100%}
+.trow{display:grid;grid-template-columns:32px minmax(120px,1.6fr) 84px minmax(88px,1.1fr) 64px 64px 64px 64px 70px 54px 70px;gap:4px;padding:5px 10px;border-bottom:1px solid rgba(15,21,40,.9);cursor:pointer;transition:background .1s;align-items:center;font-size:10px;min-width:820px;width:100%}
+.trow:hover{background:var(--s2)}.trow.sel{background:rgba(0,232,200,.035);border-left:2px solid var(--acc);padding-left:8px}.trow:last-child{border-bottom:none}
+.trow.alert-high{background:rgba(255,51,86,.03)}.trow.alert-med{background:rgba(255,176,32,.02)}
+.rn{color:var(--txt3);font-size:9px}
+/* COIN cell: keep internal stack of symbol + name tight so it behaves as one column. */
+.coin-cell{display:flex;flex-direction:column;align-items:flex-start;gap:0;min-width:0;overflow:hidden}
+.csym{font-weight:600;font-size:11px;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.cnm{font-size:8px;color:var(--txt3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+/* SIGNAL cell: its OWN grid column, directly adjacent to COIN. No flexbox merging. */
+.sig-cell{display:flex;align-items:center;justify-content:flex-start;min-width:0}
+.pos{color:var(--grn)}.neg{color:var(--red)}.tr{text-align:right}
+.bdg{display:inline-flex;align-items:center;justify-content:center;padding:1px 5px;border-radius:2px;font-size:8px;font-weight:600;letter-spacing:.04em}
+.buy{background:rgba(0,212,132,.1);color:var(--grn);border:1px solid rgba(0,212,132,.3)}
+.sell{background:rgba(255,51,86,.1);color:var(--red);border:1px solid rgba(255,51,86,.3)}
+.neut{background:rgba(96,112,144,.1);color:var(--txt3);border:1px solid rgba(96,112,144,.2)}
+.flush{background:rgba(168,85,247,.1);color:var(--pur);border:1px solid rgba(168,85,247,.3)}
+.reclaim{background:rgba(34,211,238,.1);color:var(--cyan);border:1px solid rgba(34,211,238,.3)}
+.regime-alert{background:rgba(255,51,86,.12);color:var(--red);border:1px solid rgba(255,51,86,.35)}
+.sector-alert{background:rgba(61,158,255,.1);color:var(--blu);border:1px solid rgba(61,158,255,.3)}
+.sbars{display:inline-flex;gap:2px;align-items:center;justify-content:flex-end}
+.sb{width:3px;height:9px;border-radius:1px;background:var(--s4)}
+.sb.g{background:var(--grn)}.sb.a{background:var(--amb)}.sb.r{background:var(--red)}
+
+/* DETAIL PANEL */
+.dhead{display:flex;justify-content:space-between;align-items:flex-start;padding:10px 12px 8px;border-bottom:1px solid var(--b1)}
+.dsym{font-size:20px;font-weight:600;color:var(--acc)}.dname{font-size:9px;color:var(--txt3);margin-top:2px}
+.dprc{font-size:17px;font-weight:500;text-align:right}.dchg{text-align:right;font-size:11px;margin-top:2px}
+.mgrid{display:grid;grid-template-columns:1fr 1fr}
+.mc{padding:6px 10px;border-right:1px solid var(--b1);border-bottom:1px solid var(--b1)}.mc:nth-child(even){border-right:none}
+.ml{font-size:8px;color:var(--txt3);letter-spacing:.05em;margin-bottom:2px}.mv{font-size:12px;font-weight:500}.ms{font-size:8px;color:var(--txt3);margin-top:1px}
+.btrack{height:5px;background:var(--s4);border-radius:2px;overflow:hidden;margin:4px 0 2px}.bfill{height:100%;border-radius:2px;transition:width .4s}
+.lsbar{display:flex;height:5px;border-radius:2px;overflow:hidden;margin:3px 0}.lsl{background:var(--grn)}.lss{background:var(--red)}
+
+/* BINANCE BUTTON */
+.binance-btn{display:block;text-align:center;padding:8px 12px;margin:6px 10px;border-radius:var(--rad);font-weight:600;font-size:11px;letter-spacing:.06em;text-decoration:none;transition:all .15s;font-family:var(--mono)}
+.binance-btn.active{background:rgba(243,186,47,.12);color:#f3ba2f;border:1px solid rgba(243,186,47,.35)}
+.binance-btn.active:hover{background:rgba(243,186,47,.2)}
+.binance-btn.unavail{background:var(--s3);color:var(--txt3);border:1px solid var(--b2);cursor:default}
+
+/* AI ORDER BOOK COPY BUTTON */
+.ai-copy-btn{display:block;width:calc(100% - 20px);text-align:center;padding:8px 12px;margin:4px 10px 6px;border-radius:var(--rad);font-weight:600;font-size:11px;letter-spacing:.04em;cursor:pointer;font-family:var(--mono);background:rgba(168,85,247,.1);color:var(--pur);border:1px solid rgba(168,85,247,.35);transition:all .15s}
+.ai-copy-btn:hover:not(:disabled){background:rgba(168,85,247,.2)}
+.ai-copy-btn:disabled{opacity:.5;cursor:wait}
+.ai-copy-btn.ok{background:rgba(0,212,132,.15);color:var(--grn);border-color:rgba(0,212,132,.4)}
+.ai-copy-btn.err{background:rgba(255,51,86,.12);color:var(--red);border-color:rgba(255,51,86,.4)}
+
+/* ALERTS */
+.alrt{display:flex;gap:7px;padding:5px 10px;border-bottom:1px solid rgba(15,21,40,.9);transition:background .1s}
+.alrt:hover{background:var(--s2)}.aico{font-size:11px;flex-shrink:0;margin-top:1px}.abody{flex:1}
+.atitle{font-weight:600;font-size:10px;color:var(--txt)}.adesc{font-size:9px;color:var(--txt2);margin-top:2px}.areason{font-size:8px;color:var(--txt3);margin-top:2px;font-style:italic}.atime{font-size:9px;color:var(--txt3);white-space:nowrap}
+.atype{font-size:7px;padding:1px 4px;border-radius:2px;font-weight:700;letter-spacing:.06em;margin-left:5px}
+.atype-coin{background:rgba(0,232,200,.1);color:var(--acc)}
+.atype-sector{background:rgba(61,158,255,.1);color:var(--blu)}
+.atype-regime{background:rgba(255,51,86,.12);color:var(--red)}
+.al-buy{border-left:2px solid var(--grn)}.al-sell{border-left:2px solid var(--red)}.al-info{border-left:2px solid var(--blu)}.al-warn{border-left:2px solid var(--amb)}.al-flush{border-left:2px solid var(--pur)}.al-reclaim{border-left:2px solid var(--cyan)}.al-regime{border-left:2px solid var(--red)}.al-sector{border-left:2px solid var(--blu)}
+
+/* REGIME PANEL */
+.regime-panel{padding:10px 12px;border-bottom:1px solid var(--b1)}
+.regime-gauge{position:relative;height:28px;border-radius:14px;overflow:hidden;background:linear-gradient(to right,var(--grn),var(--amb),var(--red));margin:8px 0;opacity:.3}
+.regime-gauge.active{opacity:1}
+.regime-pip{position:absolute;top:50%;width:4px;height:20px;border-radius:2px;background:#fff;transform:translate(-50%,-50%);box-shadow:0 0 6px rgba(255,255,255,.5);transition:left .6s}
+.regime-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px}
+.rm-card{padding:8px;border-radius:var(--rad);background:var(--s2);border:1px solid var(--b1);text-align:center}
+.rm-label{font-size:8px;color:var(--txt3);letter-spacing:.08em;margin-bottom:3px}.rm-val{font-size:16px;font-weight:600}
+
+/* SECTOR CARDS */
+.sector-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;padding:10px 12px}
+.sector-card{padding:10px;border-radius:var(--rad);background:var(--s2);border:1px solid var(--b1);cursor:pointer;transition:all .15s}
+.sector-card:hover{border-color:var(--b3);background:var(--s3)}
+.sector-card.active{border-color:rgba(0,232,200,.3)}
+.sc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.sc-name{font-weight:600;font-size:11px;color:var(--txt)}.sc-count{font-size:9px;color:var(--txt3)}
+.sc-metrics{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px}
+.sc-m{font-size:9px}.sc-ml{color:var(--txt3)}.sc-mv{font-weight:600}
+
+/* TOP CHARTS (15m) */
+.topcharts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:8px;padding:8px 12px}
+.tc-card{background:var(--s2);border:1px solid var(--b1);border-radius:var(--rad);overflow:hidden;display:flex;flex-direction:column;min-height:260px}
+.tc-head{display:flex;justify-content:space-between;align-items:center;padding:5px 8px;border-bottom:1px solid var(--b1);background:var(--s1)}
+.tc-sym{font-weight:700;font-size:11px;color:var(--txt);letter-spacing:.05em}
+.tc-meta{font-size:9px;color:var(--txt3)}
+.tc-frame{flex:1;width:100%;border:0;background:var(--s1)}
+.tc-unavail{flex:1;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--txt3);padding:24px 12px;text-align:center}
+.tc-fallback{background:var(--s1);border-top:1px solid var(--b1);padding:4px 8px;font-size:8px;color:var(--txt3);letter-spacing:.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tc-fallback a{color:var(--txt2);text-decoration:none;transition:color .12s}
+.tc-fallback a:hover{color:var(--acc)}
+@media(max-width:640px){.topcharts-grid{grid-template-columns:1fr;padding:6px 8px}.tc-card{min-height:220px}}
+
+/* HEATMAP */
+.hm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(72px,1fr));gap:4px;padding:8px 12px}
+.hm-cell{padding:6px 4px;border-radius:var(--rad);text-align:center;cursor:pointer;transition:opacity .1s;border:1px solid transparent}
+.hm-cell:hover{opacity:.8}.hm-sym{font-weight:600;font-size:10px}.hm-chg{font-size:10px;font-weight:700;margin-top:2px}
+
+/* SETTINGS */
+.settings-section{padding:12px;border-bottom:1px solid var(--b1)}
+.settings-title{font-size:10px;font-weight:600;color:var(--acc);letter-spacing:.1em;margin-bottom:8px}
+.s-row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.s-label{font-size:10px;color:var(--txt2);width:140px;flex-shrink:0}
+.s-input{background:var(--s3);border:1px solid var(--b2);color:var(--txt);font-family:var(--mono);font-size:10px;padding:4px 8px;border-radius:var(--rad);flex:1}
+.s-input:focus{outline:none;border-color:var(--acc)}
+.s-btn{background:rgba(0,232,200,.1);border:1px solid rgba(0,232,200,.3);color:var(--acc);font-family:var(--mono);font-size:10px;padding:4px 12px;border-radius:var(--rad);cursor:pointer;font-weight:600}
+.s-btn:hover{background:rgba(0,232,200,.2)}
+.s-btn.danger{background:rgba(255,51,86,.1);border-color:rgba(255,51,86,.3);color:var(--red)}
+.s-status{font-size:9px;padding:4px 8px;border-radius:var(--rad);margin-top:6px}
+
+/* CHECKLIST */
+.ck{display:flex;align-items:flex-start;gap:7px;padding:4px 10px;border-bottom:1px solid rgba(15,21,40,.9)}.ck:last-child{border-bottom:none}
+.ckbox{width:14px;height:14px;border-radius:2px;border:1px solid;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:8px;font-weight:700;margin-top:1px}
+.ck-y{border-color:var(--grn);background:rgba(0,212,132,.1);color:var(--grn)}.ck-w{border-color:var(--amb);background:rgba(255,176,32,.1);color:var(--amb)}.ck-n{border-color:var(--txt3);background:transparent;color:transparent}
+.cktxt{flex:1}.cklbl{font-weight:500;color:var(--txt);font-size:10px}.ckval{color:var(--txt2);font-size:9px;margin-top:1px}
+
+/* WHY BOX */
+.why-box{margin:4px 10px;padding:8px;border-radius:var(--rad);background:var(--s3);border:1px solid var(--b2)}
+.why-title{font-size:8px;font-weight:600;color:var(--amb);letter-spacing:.1em;margin-bottom:4px}
+.why-item{font-size:9px;color:var(--txt2);padding:2px 0;display:flex;align-items:center;gap:5px}
+.why-tag{font-size:7px;padding:1px 4px;border-radius:2px;font-weight:600;border:1px solid}
+
+/* SETUP VALIDITY */
+.validity-box{margin:4px 10px;padding:8px;border-radius:var(--rad);border:1px solid}
+.validity-title{font-size:8px;font-weight:600;letter-spacing:.1em;margin-bottom:3px}
+.validity-desc{font-size:9px;line-height:1.5}
+
+.grid2{display:grid;grid-template-columns:1fr 1fr}.br{border-right:1px solid var(--b1)}
+
+/* LINKS */
+.lnk{background:var(--s2);border:1px solid var(--b1);color:var(--txt3);font-family:var(--mono);font-size:9px;padding:3px 8px;border-radius:var(--rad);cursor:pointer;text-decoration:none;letter-spacing:.04em;transition:all .15s;display:inline-block;white-space:nowrap}
+.lnk:hover{color:var(--acc);border-color:rgba(0,232,200,.35)}
+
+#botbar{display:flex;align-items:center;gap:5px;padding:5px 12px;background:var(--s1);border-top:1px solid var(--b1);flex-wrap:wrap;position:sticky;bottom:0}
+
+/* FILTER BAR */
+.filter-bar{display:flex;align-items:center;gap:6px;padding:4px 10px;background:var(--s1);border-bottom:1px solid var(--b1);flex-wrap:wrap}
+.f-input{background:var(--s3);border:1px solid var(--b2);color:var(--txt);font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:var(--rad);width:140px}
+.f-input:focus{outline:none;border-color:var(--acc)}
+.f-chip{font-size:9px;padding:2px 7px;border-radius:10px;cursor:pointer;border:1px solid var(--b2);color:var(--txt3);transition:all .12s;background:transparent}
+.f-chip:hover,.f-chip.on{color:var(--acc);border-color:rgba(0,232,200,.35);background:rgba(0,232,200,.06)}
+
+/* PAGINATION */
+.page-bar{display:flex;align-items:center;justify-content:center;gap:6px;padding:6px;border-top:1px solid var(--b1)}
+.page-btn{font-size:9px;padding:3px 8px;border-radius:var(--rad);cursor:pointer;border:1px solid var(--b2);color:var(--txt3);background:transparent;font-family:var(--mono);transition:all .12s}
+.page-btn:hover,.page-btn.on{color:var(--acc);border-color:rgba(0,232,200,.35)}
+.page-info{font-size:9px;color:var(--txt3)}
+
+/* SCANNER 3-COL LAYOUT (desktop) */
+.scanner-3col{display:grid;grid-template-columns:180px 1fr 340px;min-height:calc(100vh - 110px)}
+.scanner-left{background:var(--s1);border-right:1px solid var(--b1);display:flex;flex-direction:column;padding:10px 8px;gap:6px;overflow-y:auto}
+.scanner-left .f-input{width:100%;margin-bottom:4px}
+.scanner-left .f-chip{display:block;text-align:left;padding:6px 10px;font-size:10px;border-radius:var(--rad);letter-spacing:.06em;font-weight:500}
+.scanner-left .sl-title{font-size:9px;font-weight:600;color:var(--acc);letter-spacing:.12em;margin:4px 2px}
+.scanner-center{display:flex;flex-direction:column;min-width:0;border-right:1px solid var(--b1)}
+.scanner-right{display:flex;flex-direction:column;overflow-y:auto;max-height:calc(100vh - 85px)}
+
+/* ========== MOBILE RESPONSIVE ========== */
+@media(max-width:1100px){
+  .scanner-3col{grid-template-columns:160px 1fr 320px}
+}
+@media(max-width:900px){
+  /* Scanner: collapse to single column, filters horizontal again */
+  .scanner-3col{grid-template-columns:1fr !important;min-height:auto !important}
+  .scanner-left{flex-direction:row;flex-wrap:wrap;border-right:none;border-bottom:1px solid var(--b1);padding:6px 8px;gap:4px;overflow-x:auto}
+  .scanner-left .f-input{width:140px;margin-bottom:0}
+  .scanner-left .f-chip{display:inline-block;padding:2px 7px;font-size:9px;border-radius:10px}
+  .scanner-left .sl-title{display:none}
+  .scanner-center{border-right:none;border-bottom:1px solid var(--b1)}
+  #clist{max-height:50vh !important}
+  /* Sticky coin symbol column on mobile so user can orient while scrolling right */
+  .thdr > *:nth-child(2),.trow > *:nth-child(2){position:sticky;left:0;z-index:2;background:inherit}
+  .thdr > *:nth-child(2){background:var(--s1)}
+  .trow > *:nth-child(2){background:var(--bg)}
+  .trow:hover > *:nth-child(2){background:var(--s2)}
+}
+
+@media(max-width:640px){
+  /* Topbar: compact */
+  #topbar{flex-wrap:wrap;height:auto;padding:6px 10px;gap:5px}
+  .logo{font-size:10px}.logo span{display:none}
+  .hotness-box{order:2}.regime-badge{order:3}
+  .ticker-wrap{order:4;width:100%;flex:none;overflow-x:auto;padding:3px 0}
+  .hdr-right{order:1;margin-left:auto}
+
+  /* Tabs: scrollable */
+  #tabs{padding:0 6px;gap:0}
+  .tab{padding:6px 8px;font-size:9px}
+
+  /* Filter bar: wrap */
+  .filter-bar{padding:4px 6px;gap:4px}
+  .f-input{width:100px;font-size:9px}
+  .f-chip{font-size:8px;padding:2px 5px}
+
+  /* Table: compact columns for mobile — user horizontally scrolls to reach SCORE */
+  .thdr,.trow{grid-template-columns:22px 96px 60px 74px 46px 46px 46px 46px 48px 42px 52px;gap:3px;padding:3px 6px;font-size:9px;min-width:620px;width:max-content}
+  .csym{font-size:10px}
+  .cnm{font-size:7px}
+  .bdg{font-size:7px;padding:1px 3px}
+
+  /* Detail panel: full width */
+  .dhead{padding:8px 10px 6px}
+  .dsym{font-size:16px}.dprc{font-size:14px}
+  .mgrid{grid-template-columns:1fr 1fr}
+  .mc{padding:5px 8px}
+  .ml{font-size:7px}.mv{font-size:11px}
+
+  /* Regime metrics: 2 cols */
+  .regime-metrics{grid-template-columns:1fr 1fr}
+  .rm-val{font-size:14px}
+
+  /* Sector cards: 1 col */
+  .sector-grid{grid-template-columns:1fr;padding:6px 8px}
+
+  /* Heatmap: smaller cells */
+  .hm-grid{grid-template-columns:repeat(auto-fill,minmax(58px,1fr));gap:3px;padding:6px 8px}
+  .hm-sym{font-size:9px}.hm-chg{font-size:9px}
+
+  /* Alerts */
+  .alrt{padding:4px 8px;gap:5px}
+  .atitle{font-size:9px}.adesc{font-size:8px}
+
+  /* Bottom bar */
+  #botbar{padding:4px 8px;gap:3px}
+  .lnk{font-size:8px;padding:2px 5px}
+
+  /* Settings */
+  .s-row{flex-wrap:wrap}
+  .s-label{width:100%;font-size:9px}
+
+  /* Binance button */
+  .binance-btn{font-size:10px;padding:6px 8px;margin:4px 8px}
+
+  /* Why/validity boxes */
+  .why-box,.validity-box{margin:4px 8px;padding:6px}
+}
+
+@media(max-width:380px){
+  /* Extra small: tighter columns but keep all 11 visible via horizontal swipe */
+  .thdr,.trow{grid-template-columns:20px 82px 54px 66px 40px 40px 40px 40px 42px 38px 46px;font-size:8px;min-width:560px;width:max-content}
+  .csym{font-size:9px}
+  .tab{padding:5px 6px;font-size:8px}
+  #topbar{padding:4px 6px}
+}
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <div class="logo">◈ SWING TERMINAL <span>V3</span></div>
+  <div class="hotness-box">
+    <span class="hotness-label">HOTNESS</span>
+    <div class="hotness-bar"><div id="hotness-fill" class="hotness-fill" style="width:0%;background:var(--grn)"></div></div>
+    <span id="hotness-val" class="hotness-val" style="color:var(--grn)">0</span>
+  </div>
+  <div id="regime-badge" class="regime-badge regime-normal" onclick="sv('regime',document.querySelectorAll('.tab')[1])">
+    <div class="regime-dot" style="background:var(--grn)"></div>
+    <span id="regime-text">NORMAL</span>
+  </div>
+  <div class="ticker-wrap" id="tkr"><span style="color:var(--txt3)">Nacitam TOP 500...</span></div>
+  <div class="hdr-right">
+    <div class="dot-live"></div>
+    <span id="sts" style="font-size:9px;color:var(--txt3)">INIT</span>
+    <span id="srcb" class="sbadge s-mock">LOADING</span>
+    <button class="hbtn" onclick="doRefresh()">↻</button>
+    <span id="last-update"></span>
+  </div>
+</div>
+
+<div id="tabs">
+  <div class="tab on" onclick="sv('scanner',this)">SCANNER</div>
+  <div class="tab" onclick="sv('regime',this)">REGIME</div>
+  <div class="tab" onclick="sv('sectors',this)">SECTORS</div>
+  <div class="tab" onclick="sv('heatmap',this)">HEATMAP</div>
+  <div class="tab" onclick="sv('topcharts',this)">TOP CHARTS</div>
+  <div class="tab" onclick="sv('alerts',this)">ALERTS <span id="abadge" class="cnt"></span></div>
+  <div class="tab" onclick="sv('config',this)">CONFIG</div>
+</div>
+
+<div class="view on" id="v-scanner">
+<div class="scanner-3col">
+  <!-- LEVÝ SLOUPEC: FILTRY -->
+  <aside class="scanner-left">
+    <input class="f-input" id="coin-search" placeholder="Hledat coin..." oninput="currentPage=0;renderList()">
+    <div class="sl-title">FILTRY</div>
+    <div class="f-chip on" onclick="setFilter('all',this)">ALL</div>
+    <div class="f-chip" onclick="setFilter('alerts',this)">ALERTS</div>
+    <div class="f-chip" onclick="setFilter('L1',this)">L1</div>
+    <div class="f-chip" onclick="setFilter('L2',this)">L2</div>
+    <div class="f-chip" onclick="setFilter('DeFi',this)">DeFi</div>
+    <div class="f-chip" onclick="setFilter('Meme',this)">MEME</div>
+    <div class="f-chip" onclick="setFilter('AI',this)">AI</div>
+    <div class="f-chip" onclick="setFilter('Gaming',this)">GAME</div>
+    <div class="f-chip" onclick="setFilter('Infra',this)">INFRA</div>
+    <span id="scnt" class="ps" style="margin-top:auto;padding-top:8px"></span>
+  </aside>
+
+  <!-- PROSTŘEDNÍ SLOUPEC: TABULKA -->
+  <div class="scanner-center">
+    <div class="scan-wrap">
+      <div class="thdr">
+        <span>#</span>
+        <span>COIN</span>
+        <span>SIGNAL</span>
+        <span class="tr">PRICE</span>
+        <span class="tr">1H</span>
+        <span class="tr">4H</span>
+        <span class="tr">24H</span>
+        <span class="tr">7D</span>
+        <span class="tr">VOL%</span>
+        <span class="tr">HOT</span>
+        <span class="tr">SCORE</span>
+      </div>
+      <div id="clist" style="max-height:calc(100vh - 230px);overflow-y:auto"></div>
+    </div>
+    <div id="page-bar" class="page-bar"></div>
+  </div>
+
+  <!-- PRAVÝ SLOUPEC: DETAIL + ALERT FEED (Detail je trvale viditelny) -->
+  <div class="scanner-right">
+    <div id="detail-section">
+      <div class="ph"><span class="pt">DETAIL VIEW</span><span id="dlbl" class="ps">→ klikni na coin</span></div>
+      <div id="dcon"><div style="padding:16px 12px;color:var(--txt3);font-size:10px;text-align:center;line-height:1.7">
+        Klikni na coin v tabulce pro zobrazeni detailu.<br>
+        <span style="font-size:9px;color:var(--txt3)">Zde se zobrazi metriky, validity, on-demand order book a odkazy na Binance/TradingView.</span>
+      </div></div>
+    </div>
+    <div class="ph"><span class="pt">LIVE ALERT FEED</span><span id="acnt" class="ps"></span></div>
+    <div id="alert-feed" style="flex:1;overflow-y:auto"></div>
+  </div>
+</div>
+</div>
+
+<div class="view" id="v-regime">
+  <div class="ph"><span class="pt">MARKET REGIME / SHOCK DETECTOR</span><span class="ps">real-time detekce market-wide pohybu</span></div>
+  <div id="regime-main"></div>
+  <div class="ph"><span class="pt">REGIME CHANGE LOG</span><span class="ps">posledních 20 zmén</span></div>
+  <div id="regime-log" style="max-height:300px;overflow-y:auto"></div>
+</div>
+
+<div class="view" id="v-sectors">
+  <div class="ph"><span class="pt">SECTOR ANALYSIS</span><span class="ps">skupinové pohyby a cluster alerty</span></div>
+  <div id="sector-grid" class="sector-grid"></div>
+  <div class="ph"><span class="pt">SECTOR ALERT FEED</span></div>
+  <div id="sector-alerts"></div>
+</div>
+
+<div class="view" id="v-heatmap">
+  <div class="ph"><span class="pt">MARKET HEATMAP — TOP 500</span><span class="ps">barva = 24H change</span></div>
+  <div id="hm-grid" class="hm-grid"></div>
+</div>
+
+<div class="view" id="v-topcharts">
+  <div class="ph"><span class="pt">TOP 10 CHARTS — 15m</span><span class="ps">serazeno podle score · fallback BINANCE → BYBIT</span></div>
+  <div id="topcharts-grid" class="topcharts-grid"></div>
+</div>
+
+<div class="view" id="v-alerts">
+  <div class="ph"><span class="pt">VSECHNY ALERTY</span><span id="a-all-cnt" class="ps"></span></div>
+  <div class="filter-bar">
+    <div class="f-chip on" onclick="setAlertFilter('all',this)">ALL</div>
+    <div class="f-chip" onclick="setAlertFilter('coin',this)">COIN</div>
+    <div class="f-chip" onclick="setAlertFilter('sector',this)">SECTOR</div>
+    <div class="f-chip" onclick="setAlertFilter('regime',this)">REGIME</div>
+  </div>
+  <div id="alerts-all" style="max-height:calc(100vh - 180px);overflow-y:auto"></div>
+</div>
+
+<div class="view" id="v-config">
+  <div class="settings-section">
+    <div class="settings-title">TELEGRAM NOTIFIKACE</div>
+    <div style="font-size:10px;color:var(--txt2);line-height:1.5;margin:2px 0 6px 0">
+      Notifikace jsou plně řízeny backendem (Netlify cron <code>cron-alerts.mjs</code>).
+      Token a Chat ID se ukládají výhradně v server-side environment variables
+      (<code>TG_BOT_TOKEN</code>, <code>TG_CHAT_ID</code>) — do prohlížeče se už nikdy nezadávají.
+    </div>
+    <div class="s-row"><span class="s-label">Min. skore pro Alerty:</span>
+      <input class="s-input" id="tg-min-score" type="number" min="1" max="10" value="6" style="width:80px">
+      <span style="font-size:9px;color:var(--txt3)">1–10 (default 6)</span>
+    </div>
+    <div style="font-size:8px;color:var(--txt3);margin:0 0 6px 0">Tento floor platí jen pro lokální UI highlighting. Backend má vlastní <code>MIN_ALERT_SCORE</code> env var.</div>
+    <div class="s-row">
+      <button class="s-btn" onclick="saveTgConfig()">ULOZIT</button>
+    </div>
+    <div id="tg-status" class="s-status" style="display:none"></div>
+  </div>
+  <div class="settings-section">
+    <div class="settings-title">ALERT THRESHOLDS</div>
+    <div class="s-row"><span class="s-label">Refresh interval (s):</span><input class="s-input" id="cfg-refresh" type="number" value="120" min="30" max="600" style="width:80px"></div>
+    <div class="s-row"><span class="s-label">Regime shock threshold:</span><input class="s-input" id="cfg-shock" type="number" value="70" min="30" max="100" style="width:80px"></div>
+    <div class="s-row"><span class="s-label">TG throttle (min):</span><input class="s-input" id="cfg-throttle" type="number" value="15" min="1" max="60" style="width:80px"></div>
+    <div style="font-size:8px;color:var(--txt3);margin:4px 0 6px 0">Telegram alerty posila výhradně backend (Netlify cron). Prohlížeč žádné zprávy neodesílá.</div>
+    <div class="s-row"><button class="s-btn" onclick="saveConfig()">ULOZIT CONFIG</button></div>
+  </div>
+  <div class="settings-section">
+    <div class="settings-title">BINANCE PAR STATUS</div>
+    <div id="binance-status" style="font-size:9px;color:var(--txt2)">Nacitam...</div>
+  </div>
+  <div class="settings-section">
+    <div class="settings-title">INFO</div>
+    <div style="font-size:10px;color:var(--txt2);line-height:1.7">
+      <div>Data: CoinGecko Free API (TOP 500 by market cap · 2x250 paged)</div>
+      <div>Binance pary: automaticka validace USDC spot paru</div>
+      <div>Telegram: alerty s throttlingem a anti-spam logikou</div>
+      <div>Regime detection: BTC+ETH+SOL sync, breadth, volume, korelace</div>
+      <div>Refresh: kazde 2 minuty (konfigurovatelne)</div>
+    </div>
+  </div>
+</div>
+
+<div id="botbar">
+  <span style="font-size:9px;color:var(--txt3)">NASTROJE:</span>
+  <a class="lnk" href="https://www.coinglass.com/LiquidationData" target="_blank">CoinGlass</a>
+  <a class="lnk" href="https://coinalyze.net/" target="_blank">Coinalyze</a>
+  <a class="lnk" href="https://www.tradingview.com/crypto-screener/" target="_blank">TV Screener</a>
+  <a class="lnk" href="https://platform.arkhamintelligence.com/" target="_blank">Arkham</a>
+  <a class="lnk" href="https://www.binance.com/en/markets/overview" target="_blank">Binance</a>
+  <a class="lnk" href="https://alternative.me/crypto/fear-and-greed-index/" target="_blank">Fear&Greed</a>
+</div>
+
+<script>
+// ========== CONFIG & STATE ==========
+const PAGE_SIZE = 40;
+let DATA = [], SEL = null, SRC = 'LOADING', FG = 50;
+let BINANCE_USDC_PAIRS = new Set();
+let BINANCE_USDT_PAIRS = new Set();
+let currentPage = 0, currentFilter = 'all', currentAlertFilter = 'all';
+let REGIME = { level: 'normal', score: 0, reasons: [], history: [] };
+let ALL_ALERTS = [];
+let TG_SENT = {}; // throttle map: key -> timestamp
+let REFRESH_INTERVAL = 120;
+let SHOCK_THRESHOLD = 70;
+let TG_THROTTLE_MIN = 15;
+// Local UI highlighting floor. Backend has its own MIN_ALERT_SCORE env var.
+let TG_MIN_SCORE = 6;
+function getMinScoreFromStorage() {
+  try {
+    const raw = localStorage.getItem('swing_tg');
+    if (raw) {
+      const cfg = JSON.parse(raw);
+      const n = parseInt(cfg.minScore);
+      if (Number.isFinite(n)) return Math.max(1, Math.min(10, n));
+    }
+  } catch (e) {}
+  return 6;
+}
+
+// ========== SECTOR MAPPING ==========
+const SECTOR_MAP = {
+  'L1': ['bitcoin','ethereum','solana','cardano','avalanche-2','polkadot','near','sui','aptos','toncoin','cosmos','fantom','algorand','hedera-hashgraph','internet-computer','sei-network','celestia','injective-protocol','stacks','kaspa','mantle','eos','tezos','flow','multiversx-egld','vechain','cronos','neo','zilliqa','harmony','celo','mina-protocol','oasis-network'],
+  'L2': ['matic-network','arbitrum','optimism','starknet','blast','immutable-x','metis-token','boba-network','loopring','skale'],
+  'DeFi': ['uniswap','aave','chainlink','maker','lido-dao','curve-dao-token','synthetix-network-token','compound-governance-token','pancakeswap-token','jupiter-exchange-solana','raydium','thorchain','1inch','sushi','yearn-finance','convex-finance','frax','dydx-chain','gmx','pendle','ethena','ondo-finance','morpho'],
+  'Meme': ['dogecoin','shiba-inu','pepe','dogwifcoin','floki','bonk','brett-based','mog-coin','popcat','trump-official','fartcoin','ai16z','goatseus-maximus','cat-in-a-dogs-world'],
+  'AI': ['fetch-ai','render-token','bittensor','akash-network','ocean-protocol','singularitynet','phala-network','virtual-protocol','grass','io-net','nosana','arkham'],
+  'Gaming': ['axie-infinity','the-sandbox','decentraland','gala','illuvium','ultra','beam-2','pixels-2','ronin','echelon-prime'],
+  'Infra': ['filecoin','arweave','the-graph','helium','theta-token','livepeer','audius','pyth-network','wormhole','layerzero']
+};
+
+function getSector(id) {
+  for (const [sec, ids] of Object.entries(SECTOR_MAP)) {
+    if (ids.includes(id)) return sec;
+  }
+  return 'Other';
+}
+
+// ========== UTILITY FUNCTIONS ==========
+function fmt(n) {
+  if (n == null || isNaN(n)) return '$0';
+  if (n >= 1e12) return '$' + (n/1e12).toFixed(2) + 'T';
+  if (n >= 1e9) return '$' + (n/1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return '$' + (n/1e6).toFixed(1) + 'M';
+  if (n >= 1000) return '$' + n.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  if (n >= 1) return '$' + n.toFixed(2);
+  if (n >= 0.001) return '$' + n.toFixed(4);
+  return '$' + n.toFixed(6);
+}
+function fp(n, d=2) { return n == null ? '—' : (n >= 0 ? '+' : '') + n.toFixed(d) + '%'; }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// Seeded PRNG for deterministic mock derivations
+function rng(seed) { let s = (((seed % 2147483647) + 2147483647) % 2147483647) || 1; return () => { s = (16807 * s) % 2147483647; return (s - 1) / 2147483646; }; }
+function coinRng(id, salt=0) { return rng(id.split('').reduce((a,c) => a*31 + c.charCodeAt(0), 1) + salt + Math.floor(Date.now()/900000)); }
+
+// ========== DERIVED METRICS ==========
+function get1h(d) { return d.price_change_percentage_1h_in_currency ?? (d.price_change_percentage_24h != null ? d.price_change_percentage_24h / 6 + (coinRng(d.id,11)()-0.5)*2.5 : 0); }
+function get4h(d) { return d._4h ?? (d.price_change_percentage_24h != null ? d.price_change_percentage_24h / 2.8 + (coinRng(d.id,44)()-0.5)*3 : 0); }
+function getVolPct(d) { return d.total_volume / (d.market_cap || 1) * 100; }
+function getFunding(d) {
+  const r = coinRng(d.id, 99), c = d.price_change_percentage_24h || 0;
+  return clamp(0.0075 - c * 0.0019 + (r()-0.5) * 0.009, -0.06, 0.08);
+}
+function getPredFunding(d) { return clamp(getFunding(d) + (coinRng(d.id,77)()-0.5)*0.004, -0.06, 0.08); }
+function getBasis(d) { return (getFunding(d) * 800 + (coinRng(d.id,55)()-0.5)*0.4).toFixed(2); }
+function getOiPct(d) {
+  const c = d.price_change_percentage_24h || 0;
+  const oi = (d.market_cap || 5e9) * Math.max(0.01, 0.13 + c * 0.005);
+  return oi / (d.market_cap || 1) * 100;
+}
+function getLsRatio(d) {
+  const c = d.price_change_percentage_24h || 0;
+  const l = clamp(51 + c * 0.9, 31, 69);
+  return { l, s: 100 - l };
+}
+
+// ========== COMPOSITE HOTNESS SCORE (0-100) ==========
+function calcHotness(d) {
+  const c24 = Math.abs(d.price_change_percentage_24h || 0);
+  const c1h = Math.abs(get1h(d));
+  const vol = getVolPct(d);
+  const fund = Math.abs(getFunding(d)) * 100;
+  const oiPct = getOiPct(d);
+
+  // Volume component (0-30)
+  const volScore = clamp(vol * 3, 0, 30);
+  // Price velocity component (0-25)
+  const priceScore = clamp(c24 * 1.2 + c1h * 2, 0, 25);
+  // Funding extremes (0-15)
+  const fundScore = clamp(fund * 5, 0, 15);
+  // OI component (0-15)
+  const oiScore = clamp((oiPct > 20 ? (oiPct - 20) * 2 : 0) + (oiPct < 8 && c24 > 4 ? 10 : 0), 0, 15);
+  // Breadth contribution (0-15) - how many alerts are active
+  const alertCount = ALL_ALERTS.filter(a => a.coinId === d.id).length;
+  const alertScore = clamp(alertCount * 5, 0, 15);
+
+  return Math.round(clamp(volScore + priceScore + fundScore + oiScore + alertScore, 0, 100));
+}
+
+// ========== MARKET-WIDE HOTNESS (0-100) ==========
+function calcMarketHotness() {
+  if (!DATA.length) return 0;
+  const avgVol = DATA.reduce((s,d) => s + getVolPct(d), 0) / DATA.length;
+  const avgAbs24h = DATA.reduce((s,d) => s + Math.abs(d.price_change_percentage_24h || 0), 0) / DATA.length;
+  const alertDensity = ALL_ALERTS.length / Math.max(DATA.length, 1) * 100;
+  const fundingExtremes = DATA.filter(d => Math.abs(getFunding(d)) > 0.02).length / Math.max(DATA.length, 1) * 100;
+
+  const volComp = clamp(avgVol * 5, 0, 30);
+  const priceComp = clamp(avgAbs24h * 3, 0, 25);
+  const alertComp = clamp(alertDensity * 3, 0, 25);
+  const fundComp = clamp(fundingExtremes * 2, 0, 20);
+
+  return Math.round(clamp(volComp + priceComp + alertComp + fundComp, 0, 100));
+}
+
+// ========== COIN SIGNAL ==========
+function sig(d) {
+  const c24 = d.price_change_percentage_24h || 0;
+  const c7 = d.price_change_percentage_7d_in_currency || 0;
+  const v = getVolPct(d), f = getFunding(d), h1 = get1h(d), h4 = get4h(d), op = getOiPct(d);
+  let score = 0, reasons = [], pattern = null, whyTags = [];
+
+  if (c24 < -8) { score += 3; reasons.push('Silny dump 24h (' + fp(c24) + ')'); whyTags.push({tag:'PRICE DROP',col:'var(--red)'}); }
+  else if (c24 < -4) { score += 2; reasons.push('Dump 24h'); whyTags.push({tag:'PRICE DROP',col:'var(--red)'}); }
+  else if (c24 < -2) { score += 1; reasons.push('Mirny pokles'); }
+  if (c24 > 10) { score -= 1; reasons.push('Silny pump — pozor na korekci'); whyTags.push({tag:'PUMP',col:'var(--grn)'}); }
+
+  if (h1 < -3) { score += 1; reasons.push('Dump 1h'); whyTags.push({tag:'1H DUMP',col:'var(--red)'}); }
+  if (h4 < -5) { score += 1; reasons.push('Dump 4h'); whyTags.push({tag:'4H DUMP',col:'var(--red)'}); }
+  if (h1 > 2 && c24 < -3) { score += 2; reasons.push('Reclaim po dumpu — sweep signal'); pattern = 'RECLAIM'; whyTags.push({tag:'RECLAIM',col:'var(--cyan)'}); }
+
+  if (c7 < -20) { score += 2; reasons.push('7D extremni oversold'); whyTags.push({tag:'7D OVERSOLD',col:'var(--pur)'}); }
+  else if (c7 < -12) { score += 1; reasons.push('7D slabost'); }
+
+  if (v > 10) { score += 2; reasons.push('Vysoky volume >' + v.toFixed(0) + '%'); whyTags.push({tag:'HIGH VOL',col:'var(--amb)'}); }
+  else if (v > 6) { score += 1; reasons.push('Zvyseny volume'); }
+
+  if (f < -0.02) { score += 3; reasons.push('Neg. funding — short overload'); whyTags.push({tag:'SHORT SQUEEZE',col:'var(--grn)'}); }
+  else if (f < -0.005) { score += 2; reasons.push('Funding chladne'); whyTags.push({tag:'FUNDING RESET',col:'var(--blu)'}); }
+  else if (f > 0.05) { score -= 1; reasons.push('Prehrity funding'); whyTags.push({tag:'OVERHEATED',col:'var(--amb)'}); }
+
+  if (op < 10 && c24 < -5) { score += 1; reasons.push('OI odfouknuty'); whyTags.push({tag:'OI FLUSH',col:'var(--pur)'}); }
+  if (op > 28) { score -= 1; reasons.push('OI prehraty — caution'); }
+
+  if (c24 < -6 && v > 7) { score += 1; reasons.push('Kapitulace (dump + vysoky objem)'); pattern = pattern || 'FLUSH'; whyTags.push({tag:'CAPITULATION',col:'var(--red)'}); }
+
+  if (REGIME.level === 'shock') { whyTags.push({tag:'MARKET SHOCK',col:'var(--red)'}); }
+
+  if (!reasons.length) reasons.push('Zadny vyrazny signal');
+  let label, cls;
+  if (score >= 6) { label = 'BUY'; cls = 'buy'; }
+  else if (c24 > 12 && v < 3) { label = 'SELL'; cls = 'sell'; score = -2; }
+  else { label = 'NEUT'; cls = 'neut'; }
+  if (pattern === 'RECLAIM') { label = 'RECLAIM'; cls = 'reclaim'; }
+  else if (pattern === 'FLUSH' && score >= 6) { label = 'FLUSH+BUY'; cls = 'flush'; }
+
+  // Normalize score to 0-10 scale
+  score = Math.max(0, Math.min(10, score));
+  return { label, cls, score, reasons, pattern, whyTags };
+}
+
+// ========== SETUP VALIDITY ==========
+function getSetupValidity(d) {
+  const s = sig(d), c24 = d.price_change_percentage_24h || 0;
+  const h1 = get1h(d), v = getVolPct(d), f = getFunding(d), op = getOiPct(d);
+
+  if (s.label === 'RECLAIM') return { type: 'BREAKOUT RECLAIM', col: 'var(--cyan)', border: 'rgba(34,211,238,.3)', desc: 'Cena se vratila po sweepu. Silny signal pokud volume potvrzuje. Over CoinGlass zda byly liquidace pod low.' };
+  if (s.label === 'FLUSH+BUY') return { type: 'FLUSH + REBOUND', col: 'var(--pur)', border: 'rgba(168,85,247,.3)', desc: 'Kapitulacni pohyb s volume. Idealni setup pokud funding resetoval a OI odtekl. Hledej confirmation na 15m.' };
+  if (s.score >= 7) return { type: 'STRONG SETUP', col: 'var(--grn)', border: 'rgba(0,212,132,.3)', desc: 'Vice konvergujicich signalu. Orer derivaty (OI, funding, liquidace) pred vstupem.' };
+  if (s.score >= 6) return { type: 'STRONG SIGNAL', col: 'var(--grn)', border: 'rgba(0,212,132,.3)', desc: 'Dostatek konvergujicich signalu pro alert. Over derivaty (OI, funding, liquidace) pred vstupem.' };
+  if (REGIME.level === 'shock') return { type: 'MARKET-WIDE SQUEEZE', col: 'var(--red)', border: 'rgba(255,51,86,.3)', desc: 'Celotrhovy pohyb. Individualni setup je sekundarni — resi se systemovy risk/reward.' };
+  if (c24 > 8) return { type: 'EXTENDED — RISKY LONG', col: 'var(--amb)', border: 'rgba(255,176,32,.3)', desc: 'Uz hodne vybehlo. Long entry ma spatny R:R. Cekej na pullback.' };
+  return { type: 'WEAK / NOISY', col: 'var(--txt3)', border: 'var(--b2)', desc: 'Zadny jasny setup. Cekej na lepsi konvergenci signalu.' };
+}
+
+// ========== MARKET REGIME DETECTION ==========
+function detectRegime() {
+  if (DATA.length < 10) return;
+
+  const btc = DATA.find(d => d.id === 'bitcoin');
+  const eth = DATA.find(d => d.id === 'ethereum');
+  const sol = DATA.find(d => d.id === 'solana');
+
+  let regimeScore = 0;
+  const reasons = [];
+
+  // 1) BTC + ETH + SOL synchronous impulse
+  if (btc && eth && sol) {
+    const bc = btc.price_change_percentage_24h || 0;
+    const ec = eth.price_change_percentage_24h || 0;
+    const sc = sol.price_change_percentage_24h || 0;
+    const allSameDir = (bc > 0 && ec > 0 && sc > 0) || (bc < 0 && ec < 0 && sc < 0);
+    const avgMag = (Math.abs(bc) + Math.abs(ec) + Math.abs(sc)) / 3;
+    if (allSameDir && avgMag > 5) {
+      regimeScore += 30;
+      reasons.push(`BTC/ETH/SOL synchronni impulz (avg ${avgMag.toFixed(1)}%)`);
+    } else if (allSameDir && avgMag > 3) {
+      regimeScore += 15;
+      reasons.push(`BTC/ETH/SOL soubezny pohyb (avg ${avgMag.toFixed(1)}%)`);
+    }
+  }
+
+  // 2) Breadth: % of top 200 moving >3% same direction
+  const up3 = DATA.filter(d => (d.price_change_percentage_24h || 0) > 3).length;
+  const down3 = DATA.filter(d => (d.price_change_percentage_24h || 0) < -3).length;
+  const breadth = Math.max(up3, down3) / DATA.length * 100;
+  if (breadth > 60) { regimeScore += 25; reasons.push(`Breadth ${breadth.toFixed(0)}% coinu > 3% stejnym smerem`); }
+  else if (breadth > 40) { regimeScore += 12; reasons.push(`Zvysena breadth ${breadth.toFixed(0)}%`); }
+
+  // 3) Cumulative volume
+  const avgVol = DATA.reduce((s,d) => s + getVolPct(d), 0) / Math.max(DATA.length, 1);
+  if (avgVol > 8) { regimeScore += 20; reasons.push(`Prumerny volume ${avgVol.toFixed(1)}%`); }
+  else if (avgVol > 5) { regimeScore += 10; reasons.push(`Zvyseny prumerny volume ${avgVol.toFixed(1)}%`); }
+
+  // 4) Alert density
+  const coinAlerts = ALL_ALERTS.filter(a => a.category === 'coin' && (a.pri <= 2)).length;
+  if (coinAlerts > 15) { regimeScore += 15; reasons.push(`${coinAlerts} aktivnich coin alertu`); }
+  else if (coinAlerts > 8) { regimeScore += 8; reasons.push(`${coinAlerts} coin alertu`); }
+
+  // 5) Cross-correlation surge (simplified: std dev of 24h changes)
+  const changes = DATA.map(d => d.price_change_percentage_24h || 0);
+  const mean = changes.reduce((a,b) => a+b, 0) / changes.length;
+  const std = Math.sqrt(changes.reduce((s,c) => s + (c-mean)**2, 0) / changes.length);
+  // Low std + high mean = correlated move
+  if (Math.abs(mean) > 4 && std < 5) { regimeScore += 10; reasons.push(`Vysoka korelace (mean ${mean.toFixed(1)}%, std ${std.toFixed(1)})`); }
+
+  // Determine level
+  const shockThresh = SHOCK_THRESHOLD;
+  let level = 'normal';
+  if (regimeScore >= shockThresh) level = 'shock';
+  else if (regimeScore >= shockThresh * 0.5) level = 'elevated';
+
+  // Log regime change
+  if (level !== REGIME.level) {
+    REGIME.history.unshift({
+      time: new Date().toLocaleTimeString('cs-CZ'),
+      date: new Date().toLocaleDateString('cs-CZ'),
+      from: REGIME.level,
+      to: level,
+      score: regimeScore,
+      reasons: reasons.slice(0, 3)
+    });
+    if (REGIME.history.length > 20) REGIME.history.pop();
+
+    // Regime notifications are now handled exclusively by the backend cron (cron-alerts.mjs).
+  }
+
+  REGIME = { level, score: regimeScore, reasons, history: REGIME.history };
+}
+
+// ========== ALERT SYSTEM ==========
+function buildAlerts() {
+  const als = [];
+
+  // COIN ALERTS — strictly score >= TG_MIN_SCORE. Nothing below that becomes an alert.
+  const FLOOR = TG_MIN_SCORE;
+  DATA.forEach(d => {
+    const s = sig(d), h1 = get1h(d), c24 = d.price_change_percentage_24h || 0;
+    if (s.score < FLOOR) return; // hard gate — no alert object below floor
+    const sym = (d.symbol || d.id).toUpperCase();
+
+    if (s.label === 'FLUSH+BUY' && s.score >= FLOOR) als.push({tp:'flush',t:`${sym} — FLUSH SETUP`,b:`Kapitulace · Score ${s.score}/10`,reason:s.reasons[0],pri:1,category:'coin',coinId:d.id});
+    else if (s.label === 'RECLAIM' && s.score >= FLOOR) als.push({tp:'reclaim',t:`${sym} — RECLAIM`,b:`Navrat po sweepu · 1H: ${fp(h1,1)} po dumpu ${fp(c24)}`,reason:s.reasons[0],pri:1,category:'coin',coinId:d.id});
+    else if (s.score >= 7) als.push({tp:'buy',t:`${sym} — STRONG BUY`,b:`Score ${s.score}/10 · ${s.reasons[0]}`,reason:s.reasons.join(', '),pri:1,category:'coin',coinId:d.id});
+    else if (s.score >= FLOOR) als.push({tp:'buy',t:`${sym} — STRONG SIGNAL`,b:`Score ${s.score}/10 · ${s.reasons[0]}`,reason:s.reasons.join(', '),pri:1,category:'coin',coinId:d.id});
+  });
+
+  // SECTOR ALERTS
+  const sectorData = {};
+  for (const [sec, ids] of Object.entries(SECTOR_MAP)) {
+    const coins = DATA.filter(d => ids.includes(d.id));
+    if (coins.length < 2) continue;
+    const avgChange = coins.reduce((s,d) => s + (d.price_change_percentage_24h || 0), 0) / coins.length;
+    const movingCount = coins.filter(d => Math.abs(d.price_change_percentage_24h || 0) > 4).length;
+    sectorData[sec] = { avgChange, movingCount, total: coins.length };
+
+    if (movingCount >= 3 && Math.abs(avgChange) > 4) {
+      als.push({
+        tp: avgChange < 0 ? 'warn' : 'info',
+        t: `SECTOR: ${sec} ${avgChange < 0 ? 'DUMP' : 'PUMP'}`,
+        b: `${movingCount}/${coins.length} coinu se hybe · avg ${fp(avgChange)}`,
+        reason: `Sector-wide ${avgChange < 0 ? 'sell-off' : 'rally'}`,
+        pri: 1,
+        category: 'sector',
+        sector: sec
+      });
+    } else if (movingCount >= 2 && Math.abs(avgChange) > 2.5) {
+      als.push({
+        tp: 'info',
+        t: `SECTOR: ${sec} aktivita`,
+        b: `${movingCount} coinu v pohybu · avg ${fp(avgChange)}`,
+        reason: 'Elevated sector activity',
+        pri: 2,
+        category: 'sector',
+        sector: sec
+      });
+    }
+  }
+
+  // REGIME ALERTS
+  if (REGIME.level === 'shock') {
+    als.push({
+      tp: 'warn',
+      t: `🚨 MARKET SHOCK — Score ${REGIME.score}`,
+      b: REGIME.reasons.slice(0, 2).join(' · '),
+      reason: REGIME.reasons.join(', '),
+      pri: 0,
+      category: 'regime'
+    });
+  } else if (REGIME.level === 'elevated') {
+    als.push({
+      tp: 'info',
+      t: `⚠ MARKET ELEVATED — Score ${REGIME.score}`,
+      b: REGIME.reasons.slice(0, 2).join(' · '),
+      reason: REGIME.reasons[0] || '',
+      pri: 1,
+      category: 'regime'
+    });
+  }
+
+  if (!als.length) als.push({tp:'info',t:'TRH V KLIDU',b:'Zadne vyrazne signaly.',reason:'',pri:3,category:'info'});
+  als.sort((a,b) => a.pri - b.pri);
+  ALL_ALERTS = als;
+  return als;
+}
+
+// ========== UI CONFIG (local-only — no secrets) ==========
+// Telegram token and chat ID are NEVER stored or read in the browser.
+// They live exclusively in server-side env vars (TG_BOT_TOKEN / TG_CHAT_ID).
+function loadTgConfig() {
+  // Purge any legacy secrets that older builds wrote into localStorage.
+  try {
+    const legacy = JSON.parse(localStorage.getItem('swing_tg') || '{}');
+    if (legacy.token || legacy.chatId) {
+      localStorage.setItem('swing_tg', JSON.stringify({ minScore: getMinScoreFromStorage() }));
+    }
+  } catch(e) {}
+  try {
+    TG_MIN_SCORE = getMinScoreFromStorage();
+    const el = document.getElementById('tg-min-score');
+    if (el) el.value = TG_MIN_SCORE;
+  } catch(e) {}
+  try {
+    const cfg2 = JSON.parse(localStorage.getItem('swing_cfg') || '{}');
+    if (cfg2.refresh) { REFRESH_INTERVAL = cfg2.refresh; document.getElementById('cfg-refresh').value = cfg2.refresh; }
+    if (cfg2.shock) { SHOCK_THRESHOLD = cfg2.shock; document.getElementById('cfg-shock').value = cfg2.shock; }
+    if (cfg2.throttle) { TG_THROTTLE_MIN = cfg2.throttle; document.getElementById('cfg-throttle').value = cfg2.throttle; }
+  } catch(e) {}
+}
+
+function saveTgConfig() {
+  let minScore = parseInt(document.getElementById('tg-min-score').value);
+  if (!Number.isFinite(minScore)) minScore = 6;
+  minScore = Math.max(1, Math.min(10, minScore));
+  document.getElementById('tg-min-score').value = minScore;
+  // Only the UI highlighting floor is persisted. No token, no chat ID.
+  localStorage.setItem('swing_tg', JSON.stringify({ minScore }));
+  TG_MIN_SCORE = minScore;
+  showTgStatus('Ulozeno! Min skore pro UI highlighting: ' + minScore + '/10', 'var(--grn)');
+}
+
+function saveConfig() {
+  const refresh = parseInt(document.getElementById('cfg-refresh').value) || 120;
+  const shock = parseInt(document.getElementById('cfg-shock').value) || 70;
+  const throttle = parseInt(document.getElementById('cfg-throttle').value) || 15;
+  REFRESH_INTERVAL = refresh;
+  SHOCK_THRESHOLD = shock;
+  TG_THROTTLE_MIN = throttle;
+  localStorage.setItem('swing_cfg', JSON.stringify({refresh, shock, throttle}));
+  if (window._refreshTimer) clearInterval(window._refreshTimer);
+  window._refreshTimer = setInterval(doRefresh, refresh * 1000);
+  showTgStatus('Config ulozen! Refresh: ' + refresh + 's', 'var(--grn)');
+}
+
+function showTgStatus(msg, color) {
+  const el = document.getElementById('tg-status');
+  el.style.display = 'block';
+  el.style.color = color;
+  el.style.background = color === 'var(--grn)' ? 'rgba(0,212,132,.08)' : color === 'var(--red)' ? 'rgba(255,51,86,.08)' : 'var(--s3)';
+  el.textContent = msg;
+  setTimeout(() => el.style.display = 'none', 5000);
+}
+
+// ========== TELEGRAM FROM FRONTEND: DISABLED ==========
+// All Telegram delivery is handled by the backend Netlify cron job
+// (netlify/functions/cron-alerts.mjs). The browser no longer holds, sends,
+// or reads the bot token or chat ID. Any alert fan-out from the UI is done
+// through in-page surfaces (alerts panel, browser notifications) only.
+
+function processNewAlerts(alerts) {
+  // Local-only: browser notifications for the most critical items. No Telegram.
+  if ('Notification' in window && Notification.permission === 'granted') {
+    const critical = alerts.filter(a => a.pri <= 1 && a.category !== 'info');
+    critical.slice(0, 3).forEach(a => {
+      new Notification('Swing Terminal V2', { body: a.t + '\n' + a.b, icon: '◈' });
+    });
+  }
+}
+
+// ========== BINANCE PAIR VALIDATION ==========
+async function fetchBinancePairs() {
+  try {
+    const r = await fetch('https://api.binance.com/api/v3/exchangeInfo');
+    const data = await r.json();
+    data.symbols.forEach(s => {
+      if (s.status === 'TRADING' && s.isSpotTradingAllowed) {
+        if (s.quoteAsset === 'USDC') BINANCE_USDC_PAIRS.add(s.symbol);
+        if (s.quoteAsset === 'USDT') BINANCE_USDT_PAIRS.add(s.symbol);
+      }
+    });
+    document.getElementById('binance-status').textContent = `Nacteno: ${BINANCE_USDC_PAIRS.size} USDC paru, ${BINANCE_USDT_PAIRS.size} USDT paru`;
+  } catch(e) {
+    document.getElementById('binance-status').textContent = 'Chyba nacteni Binance paru: ' + e.message;
+  }
+}
+
+function getBinanceLink(d) {
+  const sym = (d.symbol || '').toUpperCase();
+  if (BINANCE_USDC_PAIRS.has(sym + 'USDC')) {
+    return { url: `https://www.binance.com/en/trade/${sym}_USDC?type=spot&interval=1h`, pair: sym + '/USDC', available: true, fallback: false };
+  }
+  if (BINANCE_USDT_PAIRS.has(sym + 'USDT')) {
+    return { url: `https://www.binance.com/en/trade/${sym}_USDT?type=spot&interval=1h`, pair: sym + '/USDT', available: true, fallback: true };
+  }
+  return { url: null, pair: null, available: false, fallback: false };
+}
+
+// ========== API FETCH ==========
+async function fetchCoinGeckoPage(page) {
+  const r = await fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=' + page + '&sparkline=false&price_change_percentage=1h,24h,7d');
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+async function fetchData() {
+  let live = null;
+  try {
+    const page1 = await fetchCoinGeckoPage(1);
+    // 1500ms gap to avoid CoinGecko rate limit (429)
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Graceful degradation: if page 2 fails (rate limit etc.),
+    // swallow the error and render TOP 250 from page 1 alone.
+    let page2 = [];
+    try {
+      page2 = await fetchCoinGeckoPage(2);
+    } catch (e2) {
+      console.warn('CoinGecko page 2 failed, serving TOP 250 only:', e2.message);
+    }
+
+    live = [].concat(page1 || [], page2 || []);
+    SRC = (page2 && page2.length) ? 'LIVE' : 'LIVE-250';
+  } catch(e) {
+    SRC = 'ERROR';
+    console.warn('CoinGecko fetch failed:', e.message);
+  }
+
+  // Fetch Fear & Greed
+  try {
+    const r2 = await fetch('https://api.alternative.me/fng/?limit=1');
+    const j = await r2.json();
+    if (j.data?.[0]) FG = parseInt(j.data[0].value);
+  } catch(e) {}
+
+  return live;
+}
+
+// ========== RENDER FUNCTIONS ==========
+function renderTopbar() {
+  const hotness = calcMarketHotness();
+  const hCol = hotness > 70 ? 'var(--red)' : hotness > 40 ? 'var(--amb)' : 'var(--grn)';
+  document.getElementById('hotness-fill').style.width = hotness + '%';
+  document.getElementById('hotness-fill').style.background = hCol;
+  document.getElementById('hotness-val').textContent = hotness;
+  document.getElementById('hotness-val').style.color = hCol;
+
+  // Regime badge
+  const rb = document.getElementById('regime-badge');
+  rb.className = 'regime-badge regime-' + REGIME.level;
+  const rdot = rb.querySelector('.regime-dot');
+  rdot.style.background = REGIME.level === 'shock' ? 'var(--red)' : REGIME.level === 'elevated' ? 'var(--amb)' : 'var(--grn)';
+  document.getElementById('regime-text').textContent = REGIME.level.toUpperCase() + (REGIME.score ? ' ' + REGIME.score : '');
+
+  // Source badge
+  document.getElementById('srcb').className = 'sbadge ' + (SRC === 'LIVE' ? 's-live' : 's-mock');
+  document.getElementById('srcb').textContent = SRC;
+  document.getElementById('sts').textContent = SRC;
+  document.getElementById('last-update').textContent = new Date().toLocaleTimeString('cs-CZ');
+
+  // Ticker (top 10)
+  const top10 = DATA.slice(0, 10);
+  document.getElementById('tkr').innerHTML = top10.map(d => {
+    const c = d.price_change_percentage_24h || 0;
+    const sym = (d.symbol || '').toUpperCase();
+    return `<div class="ti" onclick="pickCoin('${d.id}');sv('scanner',document.querySelector('.tab'))">
+      <span class="tsym">${sym}</span><span class="tprc">${fmt(d.current_price)}</span>
+      <span class="${c>=0?'pos':'neg'}">${fp(c,1)}</span></div>`;
+  }).join('');
+}
+
+function getFilteredSorted() {
+  let filtered = [...DATA];
+  const search = (document.getElementById('coin-search')?.value || '').toLowerCase();
+  if (search) {
+    filtered = filtered.filter(d => d.id.includes(search) || (d.symbol || '').toLowerCase().includes(search) || (d.name || '').toLowerCase().includes(search));
+  }
+  if (currentFilter === 'alerts') {
+    filtered = filtered.filter(d => sig(d).score >= 6);
+  } else if (currentFilter !== 'all' && SECTOR_MAP[currentFilter]) {
+    filtered = filtered.filter(d => SECTOR_MAP[currentFilter].includes(d.id));
+  }
+
+  // Sort: primarily by score descending, then by market cap
+  filtered.sort((a, b) => {
+    const sa = sig(a).score, sb = sig(b).score;
+    if (sa !== sb) return sb - sa;
+    return (b.market_cap || 0) - (a.market_cap || 0);
+  });
+
+  return filtered;
+}
+
+function renderList() {
+  const filtered = getFilteredSorted();
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  currentPage = clamp(currentPage, 0, Math.max(0, totalPages - 1));
+  const start = currentPage * PAGE_SIZE;
+  const page = filtered.slice(start, start + PAGE_SIZE);
+
+  if (filtered.length === 0) {
+    document.getElementById('clist').innerHTML =
+      `<div style="padding:30px 12px;text-align:center;color:var(--txt3);font-size:10px">
+         Žádné coiny neodpovídají aktuálnímu filtru${currentFilter!=='all'?' ('+currentFilter+')':''}.
+         <div style="margin-top:8px"><button class="s-btn" onclick="setFilter('all',null)">RESET FILTRŮ</button></div>
+       </div>`;
+    document.getElementById('page-bar').innerHTML = `<span class="page-info">0 coinu</span>`;
+    document.getElementById('scnt').textContent = '0 / ' + DATA.length + ' coinu · ' + SRC;
+    return;
+  }
+
+  document.getElementById('clist').innerHTML = page.map((d, i) => {
+    const s = sig(d), c24 = d.price_change_percentage_24h || 0;
+    const h1 = get1h(d), h4 = get4h(d), v = getVolPct(d), f = getFunding(d);
+    const c7 = d.price_change_percentage_7d_in_currency || 0;
+    const hot = calcHotness(d);
+    const sym = (d.symbol || '').toUpperCase();
+    const rowCls = s.score >= 7 ? ' alert-high' : s.score >= 6 ? ' alert-med' : '';
+
+    return `<div class="trow${SEL===d.id?' sel':''}${rowCls}" onclick="pickCoin('${d.id}')">
+      <span class="rn">${start + i + 1}</span>
+      <div class="coin-cell"><span class="csym">${sym}</span><span class="cnm">${d.name || d.id}</span></div>
+      <span class="sig-cell"><span class="bdg ${s.cls}">${s.label}</span></span>
+      <span class="tr" style="font-weight:500">${fmt(d.current_price)}</span>
+      <span class="tr ${h1>=0?'pos':'neg'}">${fp(h1,1)}</span>
+      <span class="tr ${h4>=0?'pos':'neg'}">${fp(h4,1)}</span>
+      <span class="tr ${c24>=0?'pos':'neg'}">${fp(c24,1)}</span>
+      <span class="tr ${c7>=0?'pos':'neg'}">${fp(c7,1)}</span>
+      <span class="tr" style="color:${v>7?'var(--amb)':'var(--txt2)'}">${v.toFixed(1)}</span>
+      <span class="tr" style="color:${hot>60?'var(--red)':hot>30?'var(--amb)':'var(--txt2)'}"><b>${hot}</b></span>
+      <span class="tr" style="color:${s.score>=5?'var(--grn)':s.score>=3?'var(--amb)':'var(--txt2)'};font-weight:700">${s.score}/10</span>
+    </div>`;
+  }).join('');
+
+  // Pagination
+  document.getElementById('page-bar').innerHTML = totalPages > 1 ? `
+    <button class="page-btn" onclick="currentPage=0;renderList()" ${currentPage===0?'disabled':''}>«</button>
+    <button class="page-btn" onclick="currentPage=Math.max(0,currentPage-1);renderList()" ${currentPage===0?'disabled':''}>‹</button>
+    <span class="page-info">${currentPage+1} / ${totalPages} (${filtered.length} coinu)</span>
+    <button class="page-btn" onclick="currentPage=Math.min(${totalPages-1},currentPage+1);renderList()" ${currentPage>=totalPages-1?'disabled':''}>›</button>
+    <button class="page-btn" onclick="currentPage=${totalPages-1};renderList()" ${currentPage>=totalPages-1?'disabled':''}>»</button>` : `<span class="page-info">${filtered.length} coinu</span>`;
+
+  document.getElementById('scnt').textContent = filtered.length + ' / ' + DATA.length + ' coinu · ' + SRC;
+}
+
+function pickCoin(id) {
+  SEL = id;
+  const d = DATA.find(x => x.id === id);
+  if (!d) return;
+
+  const s = sig(d), f = getFunding(d), pf = getPredFunding(d), b = getBasis(d), ls = getLsRatio(d), op = getOiPct(d);
+  const c24 = d.price_change_percentage_24h || 0, c7 = d.price_change_percentage_7d_in_currency || 0;
+  const h1 = get1h(d), h4 = get4h(d), v = getVolPct(d), hot = calcHotness(d);
+  const sym = (d.symbol || '').toUpperCase();
+  const validity = getSetupValidity(d);
+  const binance = getBinanceLink(d);
+  const sector = getSector(d.id);
+
+  const fc = f < -0.005 ? 'var(--red)' : f > 0.035 ? 'var(--amb)' : 'var(--grn)';
+  const sc = s.score >= 5 ? 'var(--grn)' : s.score >= 3 ? 'var(--amb)' : 'var(--txt2)';
+  const hotCol = hot > 60 ? 'var(--red)' : hot > 30 ? 'var(--amb)' : 'var(--grn)';
+
+  document.getElementById('dlbl').textContent = sym;
+  document.getElementById('dcon').innerHTML = `
+    <div class="dhead">
+      <div><div class="dsym">${sym}</div><div class="dname">${d.name || ''} · ${sector} · #${d.market_cap_rank || '—'}</div></div>
+      <div><div class="dprc">${fmt(d.current_price)}</div><div class="dchg ${c24>=0?'pos':'neg'}">${fp(c24)}</div></div>
+    </div>
+
+    ${binance.available ?
+      `<a class="binance-btn active" href="${binance.url}" target="_blank">
+        BINANCE SPOT → ${binance.pair}${binance.fallback ? ' (USDT fallback)' : ''} · 1H GRAF
+      </a>` :
+      `<div class="binance-btn unavail">USDC par nedostupny na Binance</div>`
+    }
+
+    <button class="ai-copy-btn" id="ai-copy-btn" onclick="copyOrderBookForAI('${d.id}')">
+      🤖 Zkopirovat order book data pro AI
+    </button>
+
+    <div class="validity-box" style="border-color:${validity.border}">
+      <div class="validity-title" style="color:${validity.col}">${validity.type}</div>
+      <div class="validity-desc" style="color:var(--txt2)">${validity.desc}</div>
+    </div>
+
+    <div class="mgrid">
+      <div class="mc"><div class="ml">SIGNAL</div><div class="mv"><span class="bdg ${s.cls}">${s.label}</span></div></div>
+      <div class="mc"><div class="ml">SCORE / HOTNESS</div><div class="mv"><span style="color:${sc}">${s.score}/10</span> · <span style="color:${hotCol}">${hot}</span></div></div>
+      <div class="mc"><div class="ml">1H / 4H</div><div class="mv" style="font-size:11px"><span class="${h1>=0?'pos':'neg'}">${fp(h1,1)}</span> / <span class="${h4>=0?'pos':'neg'}">${fp(h4,1)}</span></div></div>
+      <div class="mc"><div class="ml">7D</div><div class="mv ${c7>=0?'pos':'neg'}">${fp(c7)}</div></div>
+      <div class="mc"><div class="ml">FUNDING</div><div class="mv" style="color:${fc}">${(f*100).toFixed(3)}%</div><div class="ms">${f<-0.01?'SHORT overload':f>0.04?'LONG prehrity':'neutralni'}</div></div>
+      <div class="mc"><div class="ml">PRED. FUND 8H</div><div class="mv" style="color:${fc}">${(pf*100).toFixed(3)}%</div></div>
+      <div class="mc"><div class="ml">VOL/MCAP</div><div class="mv" style="color:${v>7?'var(--amb)':'var(--txt2)'}">${v.toFixed(1)}%</div></div>
+      <div class="mc"><div class="ml">OI/MCAP</div><div class="mv">${op.toFixed(0)}%</div><div class="ms">${op>25?'prehrity':op<10?'nizky':'OK'}</div></div>
+    </div>
+
+    <div style="padding:5px 10px;border-bottom:1px solid var(--b1)">
+      <div class="ml" style="margin-bottom:3px">LONG / SHORT RATIO</div>
+      <div class="lsbar"><div class="lsl" style="width:${ls.l}%"></div><div class="lss" style="width:${ls.s}%"></div></div>
+      <div style="display:flex;justify-content:space-between;font-size:9px"><span class="pos">${ls.l.toFixed(0)}% L</span><span class="neg">${ls.s.toFixed(0)}% S</span></div>
+    </div>
+
+    <div class="why-box">
+      <div class="why-title">PROC TENTO ALERT?</div>
+      ${s.whyTags.length ? s.whyTags.map(t => `<div class="why-item"><span class="why-tag" style="color:${t.col};border-color:${t.col}40">${t.tag}</span></div>`).join('') : '<div class="why-item" style="color:var(--txt3)">Zadny aktivni alert</div>'}
+      ${s.reasons.map(r => `<div style="font-size:9px;color:var(--txt2);padding:1px 0">• ${r}</div>`).join('')}
+    </div>
+
+    <div style="padding:5px 10px;display:flex;flex-direction:column;gap:3px">
+      <a class="lnk" style="display:block;text-align:center" href="https://www.tradingview.com/chart/?symbol=${sym}USD" target="_blank">TradingView → ${sym}/USD</a>
+      <a class="lnk" style="display:block;text-align:center" href="https://www.coinglass.com/currencies/${sym}" target="_blank">CoinGlass → ${sym}</a>
+      <a class="lnk" style="display:block;text-align:center" href="https://coinmarketcap.com/currencies/${d.id}/" target="_blank">CoinMarketCap → ${d.name || sym}</a>
+    </div>`;
+
+  renderList();
+}
+
+// ========== ON-DEMAND ORDER BOOK FOR AI (Binance depth) ==========
+async function copyOrderBookForAI(coinId) {
+  const btn = document.getElementById('ai-copy-btn');
+  if (!btn) return;
+  const d = DATA.find(x => x.id === coinId);
+  if (!d) return;
+
+  const sym = (d.symbol || '').toUpperCase();
+  const hasUsdt = BINANCE_USDT_PAIRS.has(sym + 'USDT');
+  const hasUsdc = BINANCE_USDC_PAIRS.has(sym + 'USDC');
+  const pair = hasUsdt ? sym + 'USDT' : hasUsdc ? sym + 'USDC' : null;
+
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.className = 'ai-copy-btn';
+  btn.textContent = '⏳ Nacitam depth...';
+
+  if (!pair) {
+    btn.className = 'ai-copy-btn err';
+    btn.textContent = '✗ Binance spot par nedostupny';
+    setTimeout(() => { btn.disabled = false; btn.className = 'ai-copy-btn'; btn.textContent = origText; }, 2500);
+    return;
+  }
+
+  try {
+    const res = await fetch(`https://api.binance.com/api/v3/depth?symbol=${pair}&limit=500`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const book = await res.json();
+
+    const price = parseFloat(d.current_price) || parseFloat(book.bids?.[0]?.[0]) || 0;
+    if (!price) throw new Error('no price');
+
+    const bidFloor = price * 0.95;
+    const askCeil = price * 1.05;
+
+    // Cumulative USD volume within -5% / +5% bands + max cluster level
+    let bidUsd = 0, bidMaxUsd = 0, bidMaxLvl = null;
+    for (const [pStr, qStr] of (book.bids || [])) {
+      const p = parseFloat(pStr), q = parseFloat(qStr);
+      if (p < bidFloor) break; // bids sorted desc
+      const usd = p * q;
+      bidUsd += usd;
+      if (usd > bidMaxUsd) { bidMaxUsd = usd; bidMaxLvl = p; }
+    }
+
+    let askUsd = 0, askMaxUsd = 0, askMaxLvl = null;
+    for (const [pStr, qStr] of (book.asks || [])) {
+      const p = parseFloat(pStr), q = parseFloat(qStr);
+      if (p > askCeil) break; // asks sorted asc
+      const usd = p * q;
+      askUsd += usd;
+      if (usd > askMaxUsd) { askMaxUsd = usd; askMaxLvl = p; }
+    }
+
+    const score = sig(d).score;
+    const fmtUsd = (n) => n >= 1e6 ? '$' + (n/1e6).toFixed(2) + 'M' : n >= 1000 ? '$' + (n/1000).toFixed(1) + 'K' : '$' + n.toFixed(0);
+    const fmtLvl = (p) => p == null ? '—' : (p >= 1 ? p.toFixed(p >= 100 ? 2 : 4) : p.toFixed(6));
+
+    const text = `[${sym}] Cena: ${fmtLvl(price)}. BIDS (-5%): ${fmtUsd(bidUsd)} (max cluster na ${fmtLvl(bidMaxLvl)}). ASKS (+5%): ${fmtUsd(askUsd)} (max cluster na ${fmtLvl(askMaxLvl)}). Skore: ${score}/10.`;
+
+    await navigator.clipboard.writeText(text);
+    btn.className = 'ai-copy-btn ok';
+    btn.textContent = '✓ Zkopirovano do schranky';
+    setTimeout(() => { btn.disabled = false; btn.className = 'ai-copy-btn'; btn.textContent = origText; }, 2500);
+  } catch (e) {
+    btn.className = 'ai-copy-btn err';
+    btn.textContent = '✗ Chyba: ' + (e.message || 'neznama');
+    setTimeout(() => { btn.disabled = false; btn.className = 'ai-copy-btn'; btn.textContent = origText; }, 3000);
+  }
+}
+
+function alHtml(a, i) {
+  const cm = {buy:'al-buy',sell:'al-sell',info:'al-info',warn:'al-warn',flush:'al-flush',reclaim:'al-reclaim',regime:'al-regime',sector:'al-sector'};
+  const ic = {buy:'▲',sell:'▼',info:'●',warn:'!',flush:'◆',reclaim:'↑'};
+  const cc = {buy:'var(--grn)',sell:'var(--red)',info:'var(--blu)',warn:'var(--amb)',flush:'var(--pur)',reclaim:'var(--cyan)'};
+  const catCls = {coin:'atype-coin',sector:'atype-sector',regime:'atype-regime'};
+
+  return `<div class="alrt ${cm[a.tp] || 'al-info'}" ${a.coinId ? `onclick="pickCoin('${a.coinId}');sv('scanner',document.querySelector('.tab'))" style="cursor:pointer"` : ''}>
+    <div class="aico" style="color:${cc[a.tp]||'var(--blu)'}">${ic[a.tp]||'●'}</div>
+    <div class="abody">
+      <div class="atitle">${a.t} <span class="atype ${catCls[a.category]||''}">${(a.category||'').toUpperCase()}</span></div>
+      <div class="adesc">${a.b}</div>
+      ${a.reason ? `<div class="areason">Why: ${a.reason}</div>` : ''}
+    </div>
+    <div class="atime">${i === 0 ? 'nyni' : i < 5 ? i * 2 + 'm' : ''}</div>
+  </div>`;
+}
+
+function renderAlerts() {
+  const als = ALL_ALERTS;
+  document.getElementById('alert-feed').innerHTML = als.slice(0, 15).map(alHtml).join('');
+
+  // Filtered alerts for full view
+  let filtered = als;
+  if (currentAlertFilter !== 'all') filtered = als.filter(a => a.category === currentAlertFilter);
+  document.getElementById('alerts-all').innerHTML = filtered.map(alHtml).join('');
+
+  const act = als.filter(a => a.pri <= 1).length;
+  document.getElementById('acnt').textContent = act + ' aktivnich';
+  document.getElementById('abadge').textContent = act > 0 ? '(' + act + ')' : '';
+  document.getElementById('a-all-cnt').textContent = als.length + ' alertu';
+}
+
+function renderRegime() {
+  const r = REGIME;
+  const col = r.level === 'shock' ? 'var(--red)' : r.level === 'elevated' ? 'var(--amb)' : 'var(--grn)';
+  const pct = clamp(r.score, 0, 100);
+
+  // Breadth calc
+  const up3 = DATA.filter(d => (d.price_change_percentage_24h || 0) > 3).length;
+  const down3 = DATA.filter(d => (d.price_change_percentage_24h || 0) < -3).length;
+  const breadthUp = (up3 / Math.max(DATA.length, 1) * 100).toFixed(0);
+  const breadthDown = (down3 / Math.max(DATA.length, 1) * 100).toFixed(0);
+  const avgVol = DATA.length ? (DATA.reduce((s,d) => s + getVolPct(d), 0) / DATA.length).toFixed(1) : '0';
+  const coinAlerts = ALL_ALERTS.filter(a => a.category === 'coin' && a.pri <= 2).length;
+
+  // BTC/ETH/SOL
+  const btc = DATA.find(d => d.id === 'bitcoin');
+  const eth = DATA.find(d => d.id === 'ethereum');
+  const sol = DATA.find(d => d.id === 'solana');
+
+  document.getElementById('regime-main').innerHTML = `
+    <div class="regime-panel">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+        <div style="font-size:28px;font-weight:700;color:${col}">${r.level.toUpperCase()}</div>
+        <div style="font-size:20px;font-weight:600;color:${col}">${r.score}/100</div>
+        <div style="font-size:10px;color:var(--txt2);margin-left:auto">Threshold: ${SHOCK_THRESHOLD} (konfigurovatelne v CONFIG)</div>
+      </div>
+      <div class="regime-gauge active"><div class="regime-pip" style="left:${pct}%;border-color:${col}"></div></div>
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--txt3);margin-bottom:10px"><span>0 NORMAL</span><span>${Math.round(SHOCK_THRESHOLD*0.5)} ELEVATED</span><span>${SHOCK_THRESHOLD} SHOCK</span></div>
+
+      <div class="regime-metrics">
+        <div class="rm-card">
+          <div class="rm-label">BTC 24H</div>
+          <div class="rm-val ${(btc?.price_change_percentage_24h||0)>=0?'pos':'neg'}">${fp(btc?.price_change_percentage_24h||0,1)}</div>
+        </div>
+        <div class="rm-card">
+          <div class="rm-label">ETH 24H</div>
+          <div class="rm-val ${(eth?.price_change_percentage_24h||0)>=0?'pos':'neg'}">${fp(eth?.price_change_percentage_24h||0,1)}</div>
+        </div>
+        <div class="rm-card">
+          <div class="rm-label">SOL 24H</div>
+          <div class="rm-val ${(sol?.price_change_percentage_24h||0)>=0?'pos':'neg'}">${fp(sol?.price_change_percentage_24h||0,1)}</div>
+        </div>
+        <div class="rm-card">
+          <div class="rm-label">COIN ALERTS</div>
+          <div class="rm-val" style="color:${coinAlerts>10?'var(--red)':coinAlerts>5?'var(--amb)':'var(--grn)'}">${coinAlerts}</div>
+        </div>
+      </div>
+
+      <div class="regime-metrics" style="margin-top:8px">
+        <div class="rm-card">
+          <div class="rm-label">BREADTH UP &gt;3%</div>
+          <div class="rm-val pos">${breadthUp}%</div>
+          <div style="font-size:9px;color:var(--txt3)">${up3} coinu</div>
+        </div>
+        <div class="rm-card">
+          <div class="rm-label">BREADTH DOWN &gt;3%</div>
+          <div class="rm-val neg">${breadthDown}%</div>
+          <div style="font-size:9px;color:var(--txt3)">${down3} coinu</div>
+        </div>
+        <div class="rm-card">
+          <div class="rm-label">AVG VOLUME</div>
+          <div class="rm-val" style="color:${parseFloat(avgVol)>7?'var(--amb)':'var(--txt)'}">${avgVol}%</div>
+          <div style="font-size:9px;color:var(--txt3)">vol/mcap</div>
+        </div>
+        <div class="rm-card">
+          <div class="rm-label">FEAR & GREED</div>
+          <div class="rm-val" style="color:${FG<30?'var(--red)':FG>70?'var(--grn)':'var(--amb)'}">${FG}</div>
+          <div style="font-size:9px;color:var(--txt3)">${FG<25?'EXTREME FEAR':FG<45?'FEAR':FG<55?'NEUTRAL':FG<75?'GREED':'EXTREME GREED'}</div>
+        </div>
+      </div>
+
+      ${r.reasons.length ? `<div style="margin-top:10px;padding:8px;background:var(--s3);border-radius:var(--rad);border:1px solid ${col}33">
+        <div style="font-size:9px;font-weight:600;color:${col};margin-bottom:4px">AKTIVNI FAKTORY:</div>
+        ${r.reasons.map(rr => `<div style="font-size:10px;color:var(--txt2);padding:2px 0">• ${rr}</div>`).join('')}
+      </div>` : '<div style="margin-top:10px;font-size:10px;color:var(--txt3);padding:8px">Zadne vyrazne regime signaly.</div>'}
+    </div>`;
+
+  // Regime log
+  document.getElementById('regime-log').innerHTML = r.history.length ? r.history.map(h => `
+    <div class="alrt al-${h.to === 'shock' ? 'warn' : h.to === 'elevated' ? 'info' : 'buy'}">
+      <div class="aico" style="color:${h.to==='shock'?'var(--red)':h.to==='elevated'?'var(--amb)':'var(--grn)'}">●</div>
+      <div class="abody">
+        <div class="atitle">${h.from.toUpperCase()} → ${h.to.toUpperCase()} (score ${h.score})</div>
+        <div class="adesc">${h.reasons.join(' · ')}</div>
+      </div>
+      <div class="atime">${h.time}<br><span style="font-size:8px">${h.date}</span></div>
+    </div>`).join('') : '<div style="padding:12px;text-align:center;color:var(--txt3);font-size:10px">Zadne zmeny rezimu.</div>';
+}
+
+function renderSectors() {
+  const sectorStats = {};
+  for (const [sec, ids] of Object.entries(SECTOR_MAP)) {
+    const coins = DATA.filter(d => ids.includes(d.id));
+    if (!coins.length) continue;
+    const avg24h = coins.reduce((s,d) => s + (d.price_change_percentage_24h || 0), 0) / coins.length;
+    const avg7d = coins.reduce((s,d) => s + (d.price_change_percentage_7d_in_currency || 0), 0) / coins.length;
+    const avgVol = coins.reduce((s,d) => s + getVolPct(d), 0) / coins.length;
+    const alerts = coins.filter(d => sig(d).score >= 6).length;
+    const totalMcap = coins.reduce((s,d) => s + (d.market_cap || 0), 0);
+    sectorStats[sec] = { coins, avg24h, avg7d, avgVol, alerts, totalMcap, count: coins.length };
+  }
+
+  // Also add "Other"
+  const mappedIds = Object.values(SECTOR_MAP).flat();
+  const otherCoins = DATA.filter(d => !mappedIds.includes(d.id));
+  if (otherCoins.length) {
+    const avg24h = otherCoins.reduce((s,d) => s + (d.price_change_percentage_24h || 0), 0) / otherCoins.length;
+    const avg7d = otherCoins.reduce((s,d) => s + (d.price_change_percentage_7d_in_currency || 0), 0) / otherCoins.length;
+    const avgVol = otherCoins.reduce((s,d) => s + getVolPct(d), 0) / otherCoins.length;
+    const alerts = otherCoins.filter(d => sig(d).score >= 6).length;
+    sectorStats['Other'] = { coins: otherCoins, avg24h, avg7d, avgVol, alerts, totalMcap: otherCoins.reduce((s,d) => s + (d.market_cap||0), 0), count: otherCoins.length };
+  }
+
+  document.getElementById('sector-grid').innerHTML = Object.entries(sectorStats).sort((a,b) => b[1].totalMcap - a[1].totalMcap).map(([sec, st]) => {
+    const col24 = st.avg24h >= 0 ? 'var(--grn)' : 'var(--red)';
+    const isActive = st.alerts >= 2 || Math.abs(st.avg24h) > 5;
+    return `<div class="sector-card${isActive?' active':''}" onclick="setFilter('${SECTOR_MAP[sec]?sec:'all'}',null);sv('scanner',document.querySelector('.tab'))">
+      <div class="sc-head">
+        <span class="sc-name">${sec}</span>
+        <span class="sc-count">${st.count} coinu${st.alerts ? ' · <span style="color:var(--amb)">' + st.alerts + ' alertu</span>' : ''}</span>
+      </div>
+      <div style="height:4px;background:var(--s4);border-radius:2px;overflow:hidden;margin:4px 0">
+        <div style="height:100%;width:${clamp(50+st.avg24h*5,5,95)}%;background:${col24};border-radius:2px"></div>
+      </div>
+      <div class="sc-metrics">
+        <div class="sc-m"><div class="sc-ml">24H</div><div class="sc-mv" style="color:${col24}">${fp(st.avg24h,1)}</div></div>
+        <div class="sc-m"><div class="sc-ml">7D</div><div class="sc-mv" style="color:${st.avg7d>=0?'var(--grn)':'var(--red)'}">${fp(st.avg7d,1)}</div></div>
+        <div class="sc-m"><div class="sc-ml">VOL</div><div class="sc-mv">${st.avgVol.toFixed(1)}%</div></div>
+        <div class="sc-m"><div class="sc-ml">MCAP</div><div class="sc-mv">${fmt(st.totalMcap)}</div></div>
+      </div>
+      <div style="margin-top:5px;font-size:9px;color:var(--txt3)">${st.coins.slice(0,5).map(d=>(d.symbol||'').toUpperCase()).join(' · ')}${st.count>5?' ...':''}</div>
+    </div>`;
+  }).join('');
+
+  // Sector alerts
+  const sectorAlerts = ALL_ALERTS.filter(a => a.category === 'sector');
+  document.getElementById('sector-alerts').innerHTML = sectorAlerts.length ?
+    sectorAlerts.map(alHtml).join('') :
+    '<div style="padding:12px;text-align:center;color:var(--txt3);font-size:10px">Zadne sector alerty</div>';
+}
+
+// Resolve the best TradingView exchange symbol with a tolerant fallback cascade.
+// Iframes can't be JS-inspected for "symbol doesn't exist" errors, so we prefer
+// the broadest aggregator (CRYPTO:SYMUSD) whenever Binance isn't validated.
+// Returns { tv: 'BINANCE:BTCUSDT', exch: 'BINANCE' }.
+function resolveTvSymbol(d) {
+  const sym = (d.symbol || '').toUpperCase();
+  if (!sym) return null;
+  if (BINANCE_USDT_PAIRS.has(sym + 'USDT')) return { tv: 'BINANCE:' + sym + 'USDT', exch: 'BINANCE' };
+  if (BINANCE_USDC_PAIRS.has(sym + 'USDC')) return { tv: 'BINANCE:' + sym + 'USDC', exch: 'BINANCE' };
+  // No validated Binance pair — use TradingView CRYPTO index (SYMUSD) as the
+  // broadest aggregate. Cascade MEXC → GATEIO is offered via the `alts` list
+  // below so the widget can try them if CRYPTO rejects.
+  return {
+    tv: 'CRYPTO:' + sym + 'USD',
+    exch: 'CRYPTO',
+    alts: ['MEXC:' + sym + 'USDT', 'GATEIO:' + sym + 'USDT']
+  };
+}
+
+function renderTopCharts() {
+  const list = [...DATA].sort((a, b) => {
+    const sa = sig(a).score, sb = sig(b).score;
+    if (sa !== sb) return sb - sa;
+    return (b.market_cap || 0) - (a.market_cap || 0);
+  }).slice(0, 10);
+
+  document.getElementById('topcharts-grid').innerHTML = list.map(d => {
+    const sym = (d.symbol || '').toUpperCase();
+    const s = sig(d);
+    const resolved = resolveTvSymbol(d);
+    if (!resolved) {
+      return `<div class="tc-card"><div class="tc-head"><span class="tc-sym">${sym}</span><span class="tc-meta">score ${s.score}/10</span></div><div class="tc-unavail">Symbol neni k dispozici.</div></div>`;
+    }
+    // Lightweight TradingView widget iframe (15m candles). Uses the symbol-overview-less
+    // `/widgetembed/` endpoint which is lighter than the full chart.
+    const src = 'https://s.tradingview.com/widgetembed/?symbol=' + encodeURIComponent(resolved.tv)
+      + '&interval=15&hidesidetoolbar=1&hidetoptoolbar=0&symboledit=0&saveimage=0&toolbarbg=0a0f1e'
+      + '&studies=[]&theme=dark&style=1&timezone=Europe%2FPrague&withdateranges=0&hide_side_toolbar=1&allow_symbol_change=0';
+    const altTitle = resolved.alts ? 'TV alts: ' + resolved.alts.join(' · ') : '';
+    return `<div class="tc-card">
+      <div class="tc-head">
+        <span class="tc-sym">${sym} <span style="color:var(--txt3);font-weight:400;font-size:9px" title="${altTitle}">· ${resolved.exch}</span></span>
+        <span class="tc-meta">score <b style="color:${s.score>=7?'var(--grn)':s.score>=6?'var(--amb)':'var(--txt2)'}">${s.score}/10</b> · ${fp(d.price_change_percentage_24h||0,1)}</span>
+      </div>
+      <iframe class="tc-frame" src="${src}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowtransparency="true" scrolling="no" allowfullscreen></iframe>
+      <div class="tc-fallback">
+        Nenacetl se graf? 🔍 Zkus:
+        <a href="https://dexscreener.com/search?q=${sym}" target="_blank" rel="noopener">DexScreener</a> |
+        <a href="https://www.mexc.com/exchange/${sym}_USDT" target="_blank" rel="noopener">MEXC</a> |
+        <a href="https://coinmarketcap.com/currencies/${d.id}/" target="_blank" rel="noopener">CoinMarketCap</a>
+      </div>
+    </div>`;
+  }).join('') || '<div style="padding:20px;text-align:center;color:var(--txt3);font-size:10px">Zadna data.</div>';
+}
+
+function renderHeatmap() {
+  document.getElementById('hm-grid').innerHTML = DATA.map(d => {
+    const c = d.price_change_percentage_24h || 0;
+    const int = Math.min(1, Math.abs(c) / 15);
+    const sym = (d.symbol || '').toUpperCase();
+    let bg, tc;
+    if (c < -6) { bg = `rgba(255,51,86,${0.15+int*0.5})`; tc = 'var(--red)'; }
+    else if (c < -2) { bg = `rgba(255,176,32,${0.12+int*0.4})`; tc = 'var(--amb)'; }
+    else if (c < 2) { bg = 'rgba(96,112,144,.08)'; tc = 'var(--txt2)'; }
+    else { bg = `rgba(0,212,132,${0.12+int*0.4})`; tc = 'var(--grn)'; }
+    return `<div class="hm-cell" style="background:${bg}" onclick="pickCoin('${d.id}');sv('scanner',document.querySelector('.tab'))">
+      <div class="hm-sym" style="color:${tc}">${sym}</div>
+      <div class="hm-chg" style="color:${tc}">${fp(c,1)}</div>
+    </div>`;
+  }).join('');
+}
+
+// ========== VIEW SWITCHING ==========
+function sv(v, el) {
+  document.querySelectorAll('.view').forEach(x => x.classList.remove('on'));
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
+  document.getElementById('v-' + v).classList.add('on');
+  if (el) el.classList.add('on');
+}
+
+// Map filter key -> chip label (used to locate the correct chip when el is null
+// or when a click on an already-active chip must reset state to ALL).
+const SCANNER_FILTER_LABELS = {
+  all:'ALL', alerts:'ALERTS', L1:'L1', L2:'L2', DeFi:'DeFi',
+  Meme:'MEME', AI:'AI', Gaming:'GAME', Infra:'INFRA'
+};
+const ALERT_FILTER_LABELS = { all:'ALL', coin:'COIN', sector:'SECTOR', regime:'REGIME' };
+
+function _syncChips(rootSelector, activeLabel) {
+  // Single source of truth: remove .on from every chip in scope, then
+  // add .on to exactly the one matching activeLabel.
+  const chips = document.querySelectorAll(rootSelector + ' .f-chip');
+  chips.forEach(c => {
+    c.classList.toggle('on', c.textContent.trim() === activeLabel);
+  });
+}
+
+function setFilter(f, el) {
+  // Toggle-off: clicking the already active filter resets to ALL
+  if (el && el.classList.contains('on') && f !== 'all') {
+    f = 'all';
+    el = null;
+  }
+  // Normalize: if the key isn't a known scanner filter, fall back to 'all'
+  if (!(f in SCANNER_FILTER_LABELS)) f = 'all';
+  currentFilter = f;
+  currentPage = 0;
+  _syncChips('.scanner-left', SCANNER_FILTER_LABELS[f]);
+  renderList();
+}
+
+function setAlertFilter(f, el) {
+  if (el && el.classList.contains('on') && f !== 'all') {
+    f = 'all';
+    el = null;
+  }
+  if (!(f in ALERT_FILTER_LABELS)) f = 'all';
+  currentAlertFilter = f;
+  currentPage = 0;
+  _syncChips('#v-alerts', ALERT_FILTER_LABELS[f] || 'ALL');
+  renderAlerts();
+}
+
+// ========== MAIN REFRESH ==========
+async function doRefresh() {
+  // Wipe TG throttle cache at every refresh tick so stale entries can't block
+  // legitimate re-alerts when scores cross the 6/10 floor repeatedly.
+  TG_SENT = {};
+  document.getElementById('sts').textContent = 'FETCHING...';
+  const live = await fetchData();
+
+  if (live && live.length) {
+    DATA = live;
+  } else if (!DATA.length) {
+    // Keep old data if we have it, otherwise show error
+    document.getElementById('sts').textContent = 'NO DATA';
+    return;
+  }
+
+  // Process
+  detectRegime();
+  buildAlerts();
+  processNewAlerts(ALL_ALERTS);
+
+  // Render everything
+  renderTopbar();
+  renderList();
+  renderAlerts();
+  renderRegime();
+  renderSectors();
+  renderHeatmap();
+  renderTopCharts();
+  if (SEL) pickCoin(SEL);
+}
+
+// ========== INIT ==========
+async function init() {
+  loadTgConfig();
+
+  // Request notification permission
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+
+  // Fetch Binance pairs in parallel with first data fetch
+  fetchBinancePairs();
+  await doRefresh();
+
+  window._refreshTimer = setInterval(doRefresh, REFRESH_INTERVAL * 1000);
+}
+
+init();
+</script>
+</body>
+</html>

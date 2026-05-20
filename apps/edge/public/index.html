@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Swing Terminal V5">
+  <!-- Force browsers to drop the previously cached HTML so the v3+ asset URLs are actually fetched. -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>">
+  <title>Swing Terminal V5</title>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/terminal.css?v=6h8">
+  
+  <!-- Supabase CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+</head>
+<body>
+
+  <!-- AUTH GATE -->
+  <div id="auth-gate" class="auth-gate">
+    <div class="auth-card">
+      <div class="auth-card__logo">◈</div>
+      <h1 class="auth-card__title">SWING TERMINAL V5</h1>
+      <p class="auth-card__sub">Auth required</p>
+
+      <div id="auth-error" class="auth-error"></div>
+
+      <form id="auth-form">
+        <div class="auth-field">
+          <label for="auth-email">Email</label>
+          <input type="email" id="auth-email" required autocomplete="email" placeholder="admin@example.com">
+        </div>
+        <div class="auth-field">
+          <label for="auth-password">Password</label>
+          <input type="password" id="auth-password" required autocomplete="current-password" placeholder="••••••••">
+        </div>
+        <button type="submit" id="auth-submit" class="auth-btn-submit">PŘIHLÁSIT SE</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- AI MODAL -->
+  <div id="ai-modal" class="ai-modal" hidden aria-hidden="true" role="dialog" aria-labelledby="ai-modal-symbol">
+    <div class="ai-modal__backdrop" data-close></div>
+    <div class="ai-modal__content">
+      <div class="ai-modal__header">
+        <div class="ai-modal__title">
+          <span class="icon">🤖</span> Analýza — <span id="ai-modal-symbol"></span>
+        </div>
+        <button class="ai-modal__close" aria-label="Zavřít" data-close>&times;</button>
+      </div>
+      <div class="ai-modal__body" id="ai-modal-body"></div>
+      <div class="ai-modal__footer">
+        <span class="ai-modal__meta" id="ai-modal-meta"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- BRIEFING MODAL -->
+  <div id="briefing-modal" class="ai-modal" hidden aria-hidden="true" role="dialog" aria-labelledby="briefing-modal-title">
+    <div class="ai-modal__backdrop" data-close></div>
+    <div class="ai-modal__content">
+      <div class="ai-modal__header">
+        <div class="ai-modal__title" id="briefing-modal-title">
+          <span class="icon">📋</span> Syntéza Trhu — Top 3 Setupy
+        </div>
+        <button class="ai-modal__close" aria-label="Zavřít" data-close>&times;</button>
+      </div>
+      <div class="ai-modal__body" id="briefing-modal-body"></div>
+      <div class="ai-modal__footer">
+        <span class="ai-modal__meta" id="briefing-modal-meta"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- TERMINAL APP -->
+  <div id="terminal-app" style="display:none">
+    <div id="topbar">
+      <div class="logo">◈ SWING<span>TERMINAL V5</span></div>
+      
+      <div class="hotness-box" title="Logika: Hotness počítáme jako vážený průměr 24h Volume delty (váha 40 %), Open Interest delty (váha 40 %) a aktuální likvidity/spreadu (váha 20 %). Pokud je výsledek > 80, trh je 'EXTREME', pod 20 je 'DEAD'.">
+        <span class="hotness-label">MKT HOTNESS:</span>
+        <div class="hotness-bar"><div class="hotness-fill" id="hotness-fill"></div></div>
+        <span class="hotness-val" id="hotness-val">0</span>
+      </div>
+
+      <div id="regime-badge" class="regime-badge regime-normal" onclick="sv('regime')" title="Trzni rezim (volatilita a korelace)">
+        <div class="regime-dot"></div><span id="regime-text">NORMAL</span>
+      </div>
+
+      <!-- V5: Volatility / Panic Sentiment indicator (|1H %| > 5% AND vol > 2× avg) -->
+      <div id="volatility-badge" class="volatility-badge volatility-calm" title="Real-time volatility: počet coinů s |1H| > 5% a volume > 2× avg">
+        <span class="volatility-dot"></span><span id="volatility-text">VOL: 0</span>
+      </div>
+
+      <div style="width:1px;height:14px;background:var(--b2);margin:0 4px"></div>
+
+      <div class="ticker-wrap" id="tkr">
+        <div style="font-size:9px;color:var(--txt3);padding-top:2px">Nacitavam top data...</div>
+      </div>
+
+      <div class="hdr-right">
+        <button class="hbtn hbtn--mkt-briefing" id="mkt-briefing-trigger" title="AI Market Briefing — Macro / Meta / Opportunities (cache 45 min)">🌍 MARKET BRIEFING</button>
+        <button class="hbtn hbtn--briefing" id="briefing-trigger" title="AI syntéza trhu (top 3 setupy)">📋 SYNTÉZA TRHU</button>
+        <button class="hbtn" onclick="document.dispatchEvent(new Event('refresh_now'))">REFRESH</button>
+        <button class="hbtn" onclick="sv('manual', document.querySelector('[data-tab=\'manual\']'))" title="Interactive Manual — every signal explained">MANUAL</button>
+        <button class="user-badge" id="logout-btn" title="Odhlásit se">
+          <span id="user-email" class="user-badge__email">—</span>
+          <span style="font-size:10px">🚪</span>
+        </button>
+        <div class="dot-live"></div>
+        <span id="srcb" class="sbadge s-mock">LOADING</span>
+        <span id="last-update">--:--:--</span>
+      </div>
+    </div>
+
+    <!-- V4 PREMIUM: Market Briefing collapsible top panel.
+         Sits between the topbar and the tabs so it's always one scroll/click
+         away. Stays collapsed by default — opening it triggers the cached
+         briefing fetch and renders Macro / Meta / Opportunities inline. -->
+    <div id="mkt-briefing-panel" class="mkt-briefing" data-state="closed">
+      <div class="mkt-briefing__header" id="mkt-briefing-toggle" role="button" tabindex="0" aria-expanded="false" aria-controls="mkt-briefing-body">
+        <span class="mkt-briefing__chev">▸</span>
+        <span class="mkt-briefing__icon">🌍</span>
+        <span class="mkt-briefing__title">MARKET BRIEFING</span>
+        <span class="mkt-briefing__sub" id="mkt-briefing-sub">Macro · Meta · Opportunities — AI syntéza top 100 + news</span>
+        <span class="mkt-briefing__meta" id="mkt-briefing-meta-inline"></span>
+        <button class="mkt-briefing__refresh" id="mkt-briefing-refresh" title="Vynutit obnovu (ignoruje cache)" type="button">↻</button>
+        <button class="mkt-briefing__close" id="mkt-briefing-close" title="Zavřít briefing" type="button">×</button>
+      </div>
+      <div class="mkt-briefing__body" id="mkt-briefing-body" hidden>
+        <div class="ai-result__topline" id="mkt-briefing-topline"></div>
+        <div class="ai-result__content" id="mkt-briefing-content">
+          <div style="padding:24px;text-align:center;color:var(--txt3);font-size:11px">Klikni pro načtení briefingu (cachované 45 min globálně, neúčtuje se každému uživateli zvlášť).</div>
+        </div>
+        <div class="mkt-briefing__footer" id="mkt-briefing-footer"></div>
+      </div>
+    </div>
+
+    <!-- TABS -->
+    <div id="tabs">
+      <div class="tab on" onclick="sv('scanner',this)">SCANNER</div>
+      <div class="tab" onclick="sv('alerts',this)">ALERTS <span class="cnt" id="abadge"></span></div>
+      <div class="tab" onclick="sv('livefeed',this)">LIVE FEED <span class="lf-tab-badge" id="lf-unread"></span></div>
+      <div class="tab" onclick="sv('charts',this)">TOP CHARTS</div>
+      <div class="tab" onclick="sv('sectors',this)">SECTORS</div>
+      <div class="tab" onclick="sv('heatmap',this)">HEATMAP</div>
+      <div class="tab" onclick="sv('movers',this)">MOVERS</div>
+      <div class="tab" onclick="sv('calendar',this)">CALENDAR</div>
+      <div class="tab" onclick="sv('regime',this)">REGIME</div>
+      <div class="tab" data-tab="manual" onclick="sv('manual',this)" title="Interactive Manual — ELI5 explainer for every signal">MANUAL</div>
+    </div>
+
+    <!-- SCANNER -->
+    <div id="v-scanner" class="view on">
+      <div class="filter-bar">
+        <span style="font-size:9px;color:var(--txt3);margin-right:4px">STATUS: <b id="sts" style="color:var(--acc)">LOADING</b></span>
+        <span style="font-size:9px;color:var(--txt3);margin-right:10px" id="scnt">0 / 0</span>
+        
+        <input type="text" class="f-input" id="coin-search" placeholder="Hledat (např. btc, sol)" onkeyup="setFilter(currentFilter,null)">
+        
+        <div style="width:1px;height:12px;background:var(--b2);margin:0 4px"></div>
+        
+        <span class="f-chip on" onclick="setFilter('all',this)">ALL</span>
+        <span class="f-chip" onclick="setFilter('alerts',this)">ALERTS</span>
+        <span class="f-chip" style="color:var(--blu)" onclick="setFilter('L1',this)">L1</span>
+        <span class="f-chip" style="color:var(--blu)" onclick="setFilter('L2',this)">L2</span>
+        <span class="f-chip" style="color:var(--blu)" onclick="setFilter('DeFi',this)">DeFi</span>
+        <span class="f-chip" style="color:var(--blu)" onclick="setFilter('Meme',this)">MEME</span>
+        <span class="f-chip" style="color:var(--blu)" onclick="setFilter('AI',this)">AI</span>
+        <span class="f-chip" style="color:var(--blu)" onclick="setFilter('Gaming',this)">GAME</span>
+        <span class="f-chip" style="color:var(--blu)" onclick="setFilter('Infra',this)">INFRA</span>
+      </div>
+
+      <div class="scanner-3col">
+        <!-- LEFT PAN -->
+        <div class="scanner-left" style="overflow-y:auto">
+          <div class="ph" style="padding:0;background:none;border:none"><span class="pt">LIVE ALERTY</span></div>
+          <div id="alert-feed" style="display:flex;flex-direction:column;gap:4px">
+            <div style="padding:8px;font-size:9px;color:var(--txt3)">Nacitam alerty...</div>
+          </div>
+        </div>
+
+        <!-- CENTER PAN -->
+        <div class="scanner-center">
+          <div class="scan-wrap" style="flex:1">
+            <div class="thdr">
+              <span>#</span>
+              <span>COIN</span>
+              <span>SIGNAL</span>
+              <span class="tr">PRICE</span>
+              <span class="tr" title="1h price change %">1H %</span>
+              <span class="tr" title="4h price change % (derived from CoinGecko sparkline)">4H %</span>
+              <span class="tr" title="12h price change % (derived from CoinGecko sparkline)">12H %</span>
+              <span class="tr">24H %</span>
+              <span class="tr" title="7d price change %">7D %</span>
+              <span class="tr" title="24h Quote Volume (USD)">24H VOL</span>
+              <span class="tr" data-hot-tip title="">HOT</span>
+              <span class="tr" title="Signal Score 0-10">SCORE</span>
+              <span class="trow-toggle-hdr no-handle" aria-hidden="true">⋯</span>
+            </div>
+            <div id="clist"></div>
+          </div>
+          <div id="page-bar" style="display:flex;justify-content:center;align-items:center;padding:5px;background:var(--s1);border-top:1px solid var(--b1);gap:10px"></div>
+        </div>
+
+        <!-- RIGHT PAN -->
+        <div class="scanner-right">
+          <div class="ph"><span class="pt" id="dlbl">DETAIL COINU</span><span class="ps">Vyber coin vlevo</span></div>
+          <div id="dcon" style="flex:1">
+            <div style="padding:40px;text-align:center;color:var(--txt3)">Zvolte coin pro detail</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ALERTS -->
+    <div id="v-alerts" class="view" style="max-height:calc(100vh - 85px);overflow-y:auto">
+      <div class="filter-bar">
+        <span style="font-size:9px;color:var(--txt3);margin-right:10px" id="a-all-cnt">0 alertu</span>
+        <span class="f-chip on" onclick="setAlertFilter('all',this)">ALL</span>
+        <span class="f-chip" onclick="setAlertFilter('coin',this)">COIN</span>
+        <span class="f-chip" onclick="setAlertFilter('sector',this)">SECTOR</span>
+        <span class="f-chip" onclick="setAlertFilter('regime',this)">REGIME</span>
+      </div>
+      <div style="padding:10px 12px;max-width:800px;margin:0 auto">
+        <div class="ph" style="margin-bottom:8px;border-radius:var(--rad)"><span class="pt">HISTORIE ALERTU</span><span class="ps" id="acnt">0 aktivnich</span></div>
+        <div id="alerts-all" style="display:flex;flex-direction:column;gap:6px"></div>
+      </div>
+    </div>
+
+    <!-- CHARTS -->
+    <div id="v-charts" class="view" style="max-height:calc(100vh - 85px);overflow-y:auto">
+      <div class="filter-bar"><span style="font-size:9px;color:var(--txt3)">TOP 10 dle signal skore</span></div>
+      <div id="topcharts-grid" class="topcharts-grid"></div>
+    </div>
+
+    <!-- SECTORS -->
+    <div id="v-sectors" class="view" style="max-height:calc(100vh - 85px);overflow-y:auto">
+      <div class="filter-bar"><span style="font-size:9px;color:var(--txt3)">Souhrn sektoru a live alerty</span></div>
+      <div style="display:flex;gap:12px;padding:12px;align-items:flex-start;flex-wrap:wrap">
+        <div style="flex:1;min-width:300px">
+          <div class="ph" style="margin-bottom:8px;border-radius:var(--rad)"><span class="pt">SECTOR OVERVIEW</span></div>
+          <div id="sector-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px"></div>
+        </div>
+        <div style="width:300px;flex-shrink:0">
+          <div class="ph" style="margin-bottom:8px;border-radius:var(--rad)"><span class="pt">SECTOR ALERTY</span></div>
+          <div id="sector-alerts" style="display:flex;flex-direction:column;gap:4px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- HEATMAP -->
+    <div id="v-heatmap" class="view">
+      <div class="filter-bar">
+        <span data-tip="Every cell has identical pixel dimensions — the grid does NOT scale boxes by size. The sort order is the only ranking signal.">EQUAL GRID</span>
+        <span style="font-size:9px;color:var(--txt3)" data-tip="Color encodes the 24-hour price change. Green up, red down, deeper shade = bigger move.">· COLOR = 24h %</span>
+        <span style="font-size:9px;color:var(--txt3)" data-tip="Cells are filled row-major, top-left to bottom-right, sorted by market-cap rank ascending (CMC standard #1 → #500).">· SORT = MC RANK ASC</span>
+        <span style="font-size:9px;color:var(--txt3)" data-tip="Top 500 coins by market-cap rank, rendered to a single hardware-accelerated canvas. 60 FPS resize.">· TOP 500 · CANVAS</span>
+        <span style="margin-left:auto;font-size:9px;color:var(--txt3)" id="hm-count">—</span>
+      </div>
+      <div id="hm-grid" class="hm-canvas-wrap"></div>
+    </div>
+
+    <!-- MOVERS (V6.5 — Top 30 Gainers & Losers) -->
+    <div id="v-movers" class="view" style="max-height:calc(100vh - 85px);overflow-y:auto;padding:12px">
+      <div class="filter-bar"><span style="font-size:9px;color:var(--txt3)" id="movers-summary">Loading movers…</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:1200px;margin:0 auto">
+        <div>
+          <div class="ph" style="border-radius:var(--rad) var(--rad) 0 0"><span class="pt" style="color:var(--grn)">▲ TOP 30 GAINERS</span></div>
+          <div id="movers-gainers" class="movers-table movers-scroll" style="background:var(--s2);border:1px solid var(--b1);border-top:none;border-radius:0 0 var(--rad) var(--rad)"></div>
+        </div>
+        <div>
+          <div class="ph" style="border-radius:var(--rad) var(--rad) 0 0"><span class="pt" style="color:var(--red)">▼ TOP 30 LOSERS</span></div>
+          <div id="movers-losers" class="movers-table movers-scroll" style="background:var(--s2);border:1px solid var(--b1);border-top:none;border-radius:0 0 var(--rad) var(--rad)"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CALENDAR (V6.5 — Unlock Sync + Custom Events) -->
+    <div id="v-calendar" class="view" style="padding:0">
+      <div class="cal-ticker-wrap">
+        <div class="cal-ticker-label">📅 UPCOMING</div>
+        <div class="cal-ticker-track"><div id="cal-ticker" class="cal-ticker"></div></div>
+      </div>
+      <div class="cal-shell">
+        <div class="cal-form-card">
+          <div class="ph" style="border-radius:var(--rad) var(--rad) 0 0"><span class="pt">+ ADD EVENT</span></div>
+          <div class="cal-form">
+            <div class="cal-row">
+              <label class="cal-lbl">DATE</label>
+              <input type="date" id="cal-in-date" class="cal-in" />
+            </div>
+            <div class="cal-row">
+              <label class="cal-lbl">TIME</label>
+              <input type="time" id="cal-in-time" class="cal-in" value="12:00" />
+            </div>
+            <div class="cal-row">
+              <label class="cal-lbl">TOPIC</label>
+              <input type="text" id="cal-in-topic" class="cal-in" placeholder="e.g. FOMC, BTC ETF expiry, CPI release" maxlength="120" />
+            </div>
+            <div class="cal-row">
+              <label class="cal-lbl">COLOR</label>
+              <div class="cal-colors" id="cal-colors">
+                <span class="cal-color on" data-color="#00e8c8" style="background:#00e8c8"></span>
+                <span class="cal-color" data-color="#ff5577" style="background:#ff5577"></span>
+                <span class="cal-color" data-color="#ffb347" style="background:#ffb347"></span>
+                <span class="cal-color" data-color="#7c5cff" style="background:#7c5cff"></span>
+                <span class="cal-color" data-color="#5cb8ff" style="background:#5cb8ff"></span>
+                <span class="cal-color" data-color="#a0a0a0" style="background:#a0a0a0"></span>
+              </div>
+            </div>
+            <div class="cal-row" style="justify-content:flex-end">
+              <button class="cal-btn" onclick="calSaveEvent()">SAVE EVENT</button>
+            </div>
+          </div>
+        </div>
+        <div class="cal-list-card">
+          <div class="ph" style="border-radius:var(--rad) var(--rad) 0 0">
+            <span class="pt">EVENTS &amp; UNLOCKS</span>
+            <span class="ps" id="cal-count">0 items</span>
+          </div>
+          <div id="cal-list" class="cal-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- REGIME -->
+    <div id="v-regime" class="view" style="max-height:calc(100vh - 85px);overflow-y:auto;padding:12px">
+      <div style="max-width:800px;margin:0 auto;display:flex;flex-direction:column;gap:12px">
+        <div>
+          <div class="ph" style="border-radius:var(--rad) var(--rad) 0 0"><span class="pt">CURRENT REGIME</span></div>
+          <div id="regime-main" style="background:var(--s2);border:1px solid var(--b1);border-top:none;border-radius:0 0 var(--rad) var(--rad)"></div>
+        </div>
+        <div>
+          <div class="ph" style="border-radius:var(--rad) var(--rad) 0 0"><span class="pt">REGIME HISTORY</span></div>
+          <div id="regime-log" style="background:var(--s2);border:1px solid var(--b1);border-top:none;border-radius:0 0 var(--rad) var(--rad);padding:8px;display:flex;flex-direction:column;gap:4px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- INTERACTIVE MANUAL — ELI5 explainer for every signal on the terminal -->
+    <div id="v-manual" class="view">
+      <div class="manual-shell">
+        <aside class="manual-toc" aria-label="Manual chapters">
+          <div class="manual-toc__title">📖 MANUAL</div>
+          <a class="manual-toc__link" href="#m-intro">Why this terminal exists</a>
+          <a class="manual-toc__link" href="#m-sniper">🎯 Sniper Protocol</a>
+          <a class="manual-toc__link" href="#m-venue">🚪 Venue Gate</a>
+          <a class="manual-toc__link" href="#m-vol">🌊 Volatility &amp; Hotness</a>
+          <a class="manual-toc__link" href="#m-flush">💧 FLUSH</a>
+          <a class="manual-toc__link" href="#m-buy">🟢 BUY</a>
+          <a class="manual-toc__link" href="#m-short">🔴 SHORT</a>
+          <a class="manual-toc__link" href="#m-longshort">⚖️ LONGS vs SHORTS</a>
+          <a class="manual-toc__link" href="#m-regime">🌦️ Regime</a>
+          <a class="manual-toc__link" href="#m-heatmap">🗺️ Heatmap</a>
+          <a class="manual-toc__link" href="#m-cheats">📋 Cheat sheet</a>
+        </aside>
+
+        <div class="manual-doc" id="manual-doc">
+          <header class="manual-hero" data-reveal>
+            <div class="manual-hero__eyebrow">SWING TERMINAL · v5</div>
+            <h1 class="manual-hero__title">The Manual.</h1>
+            <p class="manual-hero__sub">Every signal on this terminal, explained like you're five.</p>
+          </header>
+
+          <section class="manual-section" id="m-intro" data-reveal>
+            <h2><span class="m-emoji">🧠</span>Why this terminal exists</h2>
+            <p>Imagine 500 candy stores. Each store sells the same kind of candy but the prices move every second. This terminal is a giant glass wall showing all 500 candy stores at once, with little lights that turn on when something fun is happening.</p>
+            <ul class="m-list">
+              <li><b data-tip="Coin = a kind of digital candy. Each row is one candy store.">COIN</b> = one of the cryptocurrencies we watch.</li>
+              <li><b data-tip="Signal = a colored sticker that says 'look here, something is happening'.">SIGNAL</b> = a label that says BUY / SHORT / FLUSH / WATCH.</li>
+              <li><b data-tip="Score = how loud the signal is. 10 = scream, 1 = whisper.">SCORE</b> = 0–10. Bigger = louder.</li>
+            </ul>
+          </section>
+
+          <section class="manual-section" id="m-sniper" data-reveal>
+            <h2><span class="m-emoji">🎯</span>Sniper Protocol</h2>
+            <div class="m-callout">
+              <b>ELI5:</b> A sniper is someone hiding with a really big toy buy-order. When they show up under the current price, it's like a giant trampoline: if the price falls there, it bounces back up.
+            </div>
+            <p>Technically: we scan the order book for unusually large <b data-tip="Bid wall = a stack of buy orders thick enough to absorb a lot of selling at one price.">bid walls</b> within striking distance of price. The terminal stamps the row with a 🎯 and tells you the wall size and distance.</p>
+            <ul class="m-list">
+              <li><b data-tip="The wall's USD size relative to recent volume — bigger = stronger support.">Wall depth</b> — how heavy the trampoline is.</li>
+              <li><b data-tip="How far below current price the wall sits, as a percentage.">Wall distance</b> — how far you fall before it catches you.</li>
+              <li><b data-tip="Sniper fires only when distance is small and depth is large.">Trigger</b> — close + heavy = green light.</li>
+            </ul>
+          </section>
+
+          <section class="manual-section" id="m-venue" data-reveal>
+            <h2><span class="m-emoji">🚪</span>Venue Gate</h2>
+            <div class="m-callout">
+              <b>ELI5:</b> Not every candy store is real. Some look real but the candy is plastic. Venue Gate is a bouncer who checks the ID of every coin before it gets into the club.
+            </div>
+            <p>Every coin gets a badge after the bouncer is done:</p>
+            <div class="m-badges">
+              <span class="m-badge m-badge--bin" data-tip="Listed on Binance Spot — deep, real, trusted.">BIN</span> Real candy, sold at Binance Spot. Deepest liquidity.
+            </div>
+            <div class="m-badges">
+              <span class="m-badge m-badge--alpha" data-tip="Listed on Binance USDⓈ-M Futures (perpetuals) but not Spot.">ALPHA</span> Sold only at the futures counter. Riskier but tradable.
+            </div>
+            <div class="m-badges">
+              <span class="m-badge m-badge--dex" data-tip="Off-exchange — only available on DEXes. Thin books, slippage risk.">DEX</span> Sold in the back-alley shop. Smaller and bumpier.
+            </div>
+            <p class="m-fineprint">The bouncer rejects a coin from BIN/ALPHA unless: symbol matches exactly, the pair is live in the ticker <i>right now</i>, prices on both sides line up within 1.5×, and market cap is ≥ $50M. Anyone failing any check → DEX.</p>
+          </section>
+
+          <section class="manual-section" id="m-vol" data-reveal>
+            <h2><span class="m-emoji">🌊</span>Volatility &amp; Hotness</h2>
+            <div class="m-callout">
+              <b>ELI5:</b> Volatility is how jumpy the room is. If kids are bouncing off walls, that's volatile. Hotness is how popular the room is right now — many kids running in.
+            </div>
+            <ul class="m-list">
+              <li><b data-tip="Hotness = weighted blend of 24h volume delta (40%) + open interest delta (40%) + spread/liquidity (20%).">Hotness</b> — 0 = empty room, 100 = packed. &gt;80 is EXTREME.</li>
+              <li><b data-tip="Volatility badge counts coins where |1H %| > 5% AND volume > 2× average.">Volatility badge</b> — counts how many coins are jumping unusually hard <i>right now</i>.</li>
+              <li><b data-tip="When volatility crosses a threshold the regime upgrades to ELEVATED / SHOCK.">Regime upgrade</b> — too much jumping = the whole market is shaky.</li>
+            </ul>
+          </section>
+
+          <section class="manual-section" id="m-flush" data-reveal>
+            <h2><span class="m-emoji">💧</span>FLUSH</h2>
+            <div class="m-callout">
+              <b>ELI5:</b> FLUSH = everyone is screaming and selling at the same time — like when one kid drops their candy and suddenly everyone drops theirs too.
+            </div>
+            <p>A coin is flagged FLUSH when:</p>
+            <ul class="m-list">
+              <li>24h change is deeply red (<b data-tip="Steep negative price move within a day.">strong drawdown</b>).</li>
+              <li>Volume is way above the recent average (<b data-tip="Volume > 2× the rolling baseline.">capitulation volume</b>).</li>
+              <li>1H is still falling — knife is not done falling yet.</li>
+            </ul>
+            <p class="m-fineprint">FLUSH is <b>not</b> a buy. It's a "step back, the knife is moving" warning. Snipers wait for it to <i>stop</i> falling before reaching in.</p>
+          </section>
+
+          <section class="manual-section" id="m-buy" data-reveal>
+            <h2><span class="m-emoji">🟢</span>BUY</h2>
+            <div class="m-callout">
+              <b>ELI5:</b> The candy got cheaper, more kids are showing up, and the line outside the shop is growing. The shop is opening, not closing.
+            </div>
+            <ul class="m-list">
+              <li>Price is <b data-tip="Higher than its short-term moving averages.">trending up</b> on multiple timeframes.</li>
+              <li>Volume is rising with the price (real demand).</li>
+              <li>Open interest is climbing — futures traders are leaning long.</li>
+              <li>Score ≥ 7 → STRONG BUY. Score 6 = WATCH.</li>
+            </ul>
+          </section>
+
+          <section class="manual-section" id="m-short" data-reveal>
+            <h2><span class="m-emoji">🔴</span>SHORT</h2>
+            <div class="m-callout">
+              <b>ELI5:</b> The shop owner is sneaking out the back door with all the candy. Everyone outside still thinks the shop is open, but it's about to close.
+            </div>
+            <ul class="m-list">
+              <li>Price is breaking <b data-tip="A recent support level — the floor that used to hold.">support</b>.</li>
+              <li>Volume is rising into the breakdown (not a fakeout).</li>
+              <li>Funding is positive but OI is dropping — longs giving up.</li>
+            </ul>
+            <p class="m-fineprint">SHORT = "betting price goes lower." You're renting candy, selling it, planning to buy it back cheaper.</p>
+          </section>
+
+          <section class="manual-section" id="m-longshort" data-reveal>
+            <h2><span class="m-emoji">⚖️</span>LONGS vs SHORTS</h2>
+            <div class="m-callout">
+              <b>ELI5:</b> LONGS bet candy goes up. SHORTS bet candy goes down. They sit on opposite ends of a seesaw and the price moves toward whoever is heavier.
+            </div>
+            <ul class="m-list">
+              <li><b data-tip="Open Interest = how much money is sitting on the seesaw, on both sides combined.">Open Interest (OI)</b> — total weight on the seesaw.</li>
+              <li><b data-tip="Funding rate = the toll the heavier side pays the lighter side every 8 hours.">Funding</b> — a tax that pushes the seesaw back toward balance.</li>
+              <li><b data-tip="Taker buy/sell ratio — who is the aggressor (paying the spread).">Taker ratio</b> — which side is impatient and slamming the market.</li>
+            </ul>
+            <p class="m-fineprint">When LONGS are crowded + funding is hot + price stops going up → squeeze risk. Same with SHORTS in reverse.</p>
+          </section>
+
+          <section class="manual-section" id="m-regime" data-reveal>
+            <h2><span class="m-emoji">🌦️</span>Regime</h2>
+            <div class="m-callout">
+              <b>ELI5:</b> The weather. Sunny = BULL. Rain = BEAR. Drizzle = CHOP. You wear different clothes in different weather. Same with trading.
+            </div>
+            <ul class="m-list">
+              <li><b data-tip="Bullish regime — most coins green, breadth positive, BTC trending up.">BULL / TREND</b> (score &gt; 65)</li>
+              <li><b data-tip="Choppy regime — split breadth, no clear direction.">CHOP</b> (35–65)</li>
+              <li><b data-tip="Bearish or flushing market — broad selling, falling breadth.">BEAR / FLUSH</b> (&lt; 35)</li>
+            </ul>
+          </section>
+
+          <section class="manual-section" id="m-heatmap" data-reveal>
+            <h2><span class="m-emoji">🗺️</span>Heatmap</h2>
+            <div class="m-callout">
+              <b>ELI5:</b> A map of the candy kingdom. Each rectangle is a candy store. Bigger rectangle = bigger store. Green = price went up today. Red = price went down today.
+            </div>
+            <ul class="m-list">
+              <li><b data-tip="Box size scales with market capitalization in USD.">Size</b> = market cap.</li>
+              <li><b data-tip="Color encodes 24h % price change — deeper shade = bigger move.">Color</b> = 24h move.</li>
+              <li><b data-tip="Hover any rectangle to see exact numbers; click to jump to the scanner row.">Hover</b> for details, <b>click</b> to drill in.</li>
+            </ul>
+          </section>
+
+          <section class="manual-section" id="m-cheats" data-reveal>
+            <h2><span class="m-emoji">📋</span>Cheat sheet</h2>
+            <div class="m-cheats">
+              <div class="m-cheat" data-tip="Big bid wall close to price — high-probability bounce zone."><span>🎯</span><div><b>SNIPER</b><div>Wall under price.</div></div></div>
+              <div class="m-cheat" data-tip="Strong upside conviction — multi-timeframe trend + volume."><span>🟢</span><div><b>BUY</b><div>Trend up + volume.</div></div></div>
+              <div class="m-cheat" data-tip="Downside conviction — breakdown of support on volume."><span>🔴</span><div><b>SHORT</b><div>Support broken.</div></div></div>
+              <div class="m-cheat" data-tip="Capitulation — heavy red on >2× volume. NOT a buy."><span>💧</span><div><b>FLUSH</b><div>Panic selling.</div></div></div>
+              <div class="m-cheat" data-tip="Watchlist — score 6, not yet a full signal."><span>👁️</span><div><b>WATCH</b><div>Brewing setup.</div></div></div>
+              <div class="m-cheat" data-tip="Listed on Binance Spot — deepest liquidity."><span>🅱️</span><div><b>BIN</b><div>Spot listed.</div></div></div>
+              <div class="m-cheat" data-tip="Binance Futures (perp) only — no spot listing."><span>🅰️</span><div><b>ALPHA</b><div>Perp only.</div></div></div>
+              <div class="m-cheat" data-tip="Not on Binance — DEX only. Thin books, slippage risk."><span>🌐</span><div><b>DEX</b><div>Off-exchange.</div></div></div>
+            </div>
+          </section>
+
+          <footer class="manual-foot" data-reveal>
+            <div>End of manual.</div>
+            <div class="m-fineprint">This terminal does not give financial advice. It surfaces evidence. You decide.</div>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- LIVE FEED (V4.1 — Full Tab View) — moved inside #terminal-app V6.2 -->
+    <div id="v-livefeed" class="view" style="max-height:calc(100vh - 85px);overflow-y:auto">
+      <div class="lf-view">
+        <div class="lf-view__header">
+          <div class="lf-view__title">
+            <span class="lf-view__dot"></span>
+            ◈ LIVE FEED
+          </div>
+          <div class="lf-view__stats">
+            <span id="lf-stats">0 events</span>
+            <span id="lf-news-status" style="color:var(--blu)">News: loading…</span>
+          </div>
+        </div>
+        <div class="lf-view__filters">
+          <span class="f-chip on" onclick="LiveFeed.setFilter('all',this)">ALL</span>
+          <span class="f-chip" onclick="LiveFeed.setFilter('news',this)">📰 NEWS</span>
+          <span class="f-chip" onclick="LiveFeed.setFilter('system',this)">⚙️ SYSTEM</span>
+          <span class="f-chip" onclick="LiveFeed.setFilter('ai',this)">🧠 AI</span>
+        </div>
+        <div class="lf-feed" id="live-feed-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/toast.js?v=6h8"></script>
+  <script type="module" src="/js/ai-analysis.js?v=6h8"></script>
+  <script src="js/terminal.js?v=6h8"></script>
+</body>
+</html>

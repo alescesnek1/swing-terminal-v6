@@ -1,0 +1,19 @@
+{
+  "name": "swing-terminal-ingest",
+  "version": "1.0.0",
+  "description": "24/7 WebSocket ingest worker for Swing Terminal — reads Binance USDC perpetuals and aggregates data into Upstash Redis",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "ccxt": "^4.4.0",
+    "express": "^4.21.0",
+    "ioredis": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

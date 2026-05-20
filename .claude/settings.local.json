@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -c \"C:\\\\Users\\\\Ales\\\\Desktop\\\\Bots\\\\terminal crypto\\\\terminal-v5\\\\apps\\\\edge\\\\public\\\\js\\\\terminal.js\")",
+      "Bash(node -c \"C:\\\\Users\\\\Ales\\\\Desktop\\\\Bots\\\\terminal crypto\\\\terminal-v5\\\\apps\\\\edge\\\\netlify\\\\edge-functions\\\\sniper-detect.js\")",
+      "Bash(echo \"exit:$?\")",
+      "Bash(node -c apps/edge/netlify/edge-functions/news.js)",
+      "Bash(node -c apps/edge/netlify/edge-functions/markets.js)",
+      "Bash(node -c apps/edge/netlify/edge-functions/sniper-detect.js)",
+      "Bash(node -c apps/edge/public/js/terminal.js)",
+      "Bash(git -C \"C:\\\\Users\\\\Ales\\\\Desktop\\\\Bots\\\\terminal crypto\\\\terminal-v5\" status)",
+      "Bash(git -C \"C:\\\\Users\\\\Ales\\\\Desktop\\\\Bots\\\\terminal crypto\\\\terminal-v5\" status --short)",
+      "Bash(git -C \"C:\\\\Users\\\\Ales\\\\Desktop\\\\Bots\\\\terminal crypto\\\\terminal-v5\" remote -v)",
+      "Bash(git -C \"C:\\\\Users\\\\Ales\\\\Desktop\\\\Bots\\\\terminal crypto\\\\terminal-v5\" add apps/edge/netlify/edge-functions/markets.js apps/edge/netlify/edge-functions/lib/tier.js apps/edge/public/css/terminal.css apps/edge/public/index.html apps/edge/public/js/terminal.js)",
+      "Bash(git -C 'C:\\\\Users\\\\Ales\\\\Desktop\\\\Bots\\\\terminal crypto\\\\terminal-v5' commit -m ' *)",
+      "Bash(git -C \"C:\\\\Users\\\\Ales\\\\Desktop\\\\Bots\\\\terminal crypto\\\\terminal-v5\" add apps/edge/netlify/edge-functions/lib/orchestrator.js apps/edge/netlify/edge-functions/market-briefing.js apps/edge/public/css/terminal.css apps/edge/public/index.html apps/edge/public/js/terminal.js)",
+      "Bash(git -C \"C:\\\\Users\\\\Ales\\\\Desktop\\\\Bots\\\\terminal crypto\\\\terminal-v5\" add apps/edge/netlify/edge-functions/lib/orchestrator.js apps/edge/netlify/edge-functions/market-briefing.js apps/edge/netlify/edge-functions/news.js apps/edge/public/index.html netlify/functions/cron-alerts.mjs)",
+      "Bash(node --check \"C:/Users/Ales/Desktop/Bots/terminal crypto/terminal-v5/apps/edge/public/js/terminal.js\")",
+      "Bash(node --check \"C:/Users/Ales/Desktop/Bots/terminal crypto/terminal-v5/apps/edge/netlify/edge-functions/markets.js\")",
+      "Bash(node -e \"const fs=require\\('fs'\\);const css=fs.readFileSync\\('C:/Users/Ales/Desktop/Bots/terminal crypto/terminal-v5/apps/edge/public/css/terminal.css','utf8'\\);let o=0,c=0;for\\(const ch of css\\){if\\(ch==='{'\\)o++;else if\\(ch==='}'\\)c++;}console.log\\('braces',o,c,o===c?'OK':'MISMATCH'\\);console.log\\('size',css.length,'bytes'\\)\")",
+      "Bash(node -c \"C:/Users/Ales/Desktop/Bots/terminal crypto/terminal-v6/apps/edge/public/js/terminal.js\")"
+    ]
+  }
+}
