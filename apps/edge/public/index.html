@@ -186,20 +186,21 @@
         <!-- CENTER PAN -->
         <div class="scanner-center">
           <div class="scan-wrap" style="flex:1">
+            <!-- V7.1: hyper-compact 9-column desktop chain. SCORE + PANIC
+                 are placed directly between SIGNAL and PRICE so the two
+                 composite metrics can be cross-examined without eye
+                 travel across volume / hotness columns. 1H / 4H / 12H /
+                 7D windows moved to the .trow-expand sub-row. -->
             <div class="thdr">
               <span>#</span>
               <span>COIN</span>
               <span>SIGNAL</span>
-              <span class="tr">PRICE</span>
-              <span class="tr" title="1h price change %">1H %</span>
-              <span class="tr" title="4h price change % (derived from CoinGecko sparkline)">4H %</span>
-              <span class="tr" title="12h price change % (derived from CoinGecko sparkline)">12H %</span>
-              <span class="tr">24H %</span>
-              <span class="tr" title="7d price change %">7D %</span>
-              <span class="tr" title="24h Quote Volume (USD)">24H VOL</span>
-              <span class="tr" data-hot-tip title="">HOT</span>
               <span class="tr" title="Signal Score 0-10">SCORE</span>
               <span class="tr" title="V7.0 Panic Indicator: -100 (Capitulation) … 0 (Neutral) … +100 (Extreme FOMO). Cross-reference with SCORE.">PANIC</span>
+              <span class="tr">PRICE</span>
+              <span class="tr">24H %</span>
+              <span class="tr" title="24h Quote Volume (USD)">24H VOL</span>
+              <span class="tr" data-hot-tip title="">HOT</span>
               <span class="trow-toggle-hdr no-handle" aria-hidden="true">⋯</span>
             </div>
             <div id="clist"></div>

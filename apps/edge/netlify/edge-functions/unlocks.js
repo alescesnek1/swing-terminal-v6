@@ -1,8 +1,7 @@
 // ─────────────────────────────────────────────────────────────
-// Swing Terminal V6.6 — /api/unlocks Edge Function (Deno)
+// Swing Terminal V7.1 — /api/unlocks Edge Function (Deno)
 //
 // REAL DYNAMIC UNLOCKS ENGINE
-// Replaces the static CAL_UNLOCK_SEED that was rejected by the user.
 // Pulls live token-unlock schedules from public, free endpoints that
 // do not require an API key, normalizes them into a single shape, and
 // merges multiple sources so newer / smaller-cap tokens (XPL, PUMP,
@@ -14,7 +13,10 @@
 // SECONDARY: CryptoRank public unlocks JSON
 //            (https://api.cryptorank.io/v0/unlocks/upcoming) — covers
 //            new listings DefiLlama may lag on.
-// FALLBACK : empty array (the UI handles 0 events gracefully).
+// FALLBACK : empty array — the client (terminal.js) owns the dynamic
+//            fallback generator (calGenerateDynamicFallback) so any
+//            DATA-active coin can be synthesized into a vesting event
+//            without a server roundtrip on cold-boot.
 //
 // Output schema — sorted by date ascending, deduped on (symbol|ts):
 //   { source, fetched_at, items: [

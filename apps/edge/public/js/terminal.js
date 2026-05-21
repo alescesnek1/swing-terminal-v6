@@ -1074,6 +1074,57 @@ function panicMeta(score) {
   else               { cls = 'panic-neut';    label = '·';    }
   return { cls, label, glow };
 }
+// V7.1 — STATIC PANIC PROXY
+// Until the first WS delta lands, |Δvol24h%| is 0 for every coin
+// (no prior frame to subtract from) and sniper hits may not have
+// fetched yet. That collapses calcPanic to 0.3 × c1h for most rows,
+// and to exactly 0 for any DEX-only coin missing _c1. Result on
+// cold paint: a column of dead zeros, which is exactly what the
+// V7.1 spec rules out.
+//
+// The proxy fills that gap WITHOUT racing the live engine:
+//   • It runs per-coin in doRefresh, then is overridden by
+//     calcPanic whenever calcPanic produces a non-zero number.
+//   • It blends 24h price magnitude (signed) with a volume-mass
+//     z-score so high-volume movers light up before low-volume
+//     ones, mirroring real panic dynamics.
+function _computeVolumeStats(arr) {
+  const vols = [];
+  for (const d of (arr || [])) {
+    const v = parseFloat(d && d.total_volume);
+    if (Number.isFinite(v) && v > 0) vols.push(v);
+  }
+  if (vols.length < 2) return { mean: 0, std: 0, n: vols.length };
+  const mean = vols.reduce((a, b) => a + b, 0) / vols.length;
+  let varSum = 0;
+  for (const v of vols) varSum += (v - mean) ** 2;
+  const std = Math.sqrt(varSum / vols.length);
+  return { mean, std, n: vols.length };
+}
+function calcStaticPanicProxy(d, stats) {
+  try {
+    if (!d) return 0;
+    const safe = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+    const c24Raw = d._c24 != null ? d._c24 : d.price_change_percentage_24h;
+    const c24    = clamp(safe(c24Raw), -100, 100);
+    if (c24 === 0 && (!stats || stats.std <= 0)) return 0;
+    const vol = safe(d.total_volume);
+    let z = 0;
+    if (stats && stats.std > 0 && vol > 0) {
+      z = clamp((vol - stats.mean) / stats.std, -3, 3);
+    }
+    // Two contributors, both bounded to ±100 before weighting:
+    //   priceTerm = c24 (already a percentage; clamped to ±100)
+    //   volTerm   = (z / 3) * 50  → ±50, signed by the price move so
+    //               a high-volume DUMP pulls negative and a high-volume
+    //               BUY pulls positive.
+    const priceTerm = c24;
+    const volTerm   = (z / 3) * 50 * (priceTerm >= 0 ? 1 : -1);
+    const raw = 0.7 * priceTerm + 0.3 * volTerm;
+    return clamp(Math.round(raw), -100, 100);
+  } catch { return 0; }
+}
+
 // Render the in-row panic badge. Title carries the numeric score so
 // hover-tooltip works on desktop without an explicit aria element.
 function panicBadge(score) {
@@ -1426,20 +1477,19 @@ function renderList() {
         <div class="te-cell"><span class="te-lbl">VOL</span><span class="te-val">${_esc(fmt(qv))}</span></div>
         <div class="te-cell"><span class="te-lbl">HOT</span><span class="te-val" style="color:${hot>60?'var(--red)':'var(--txt2)'}">${hot}</span></div>
       </div>`;
+      // V7.1: 10-cell DOM chain (9 visible + toggle). DOM order is the
+      // single source of truth — neither CSS `order:` nor display:none
+      // moves a cell on desktop. 1H/4H/12H/7D live in the expand row.
       htmls.push(`<div class="trow${SEL===d.id?' sel':''}${s.score>=7?' alert-high':s.score>=6?' alert-med':''}" data-coin-id="${idAttr}">
         <span class="rn">${start + i + 1}</span>
         <div class="coin-cell"><span class="csym">${escSym}${exchBadge}</span><span class="cnm">${escName}</span></div>
         <span class="sig-cell"><span class="bdg ${escCls}">${escLabel}</span>${divTag}${snipTag}</span>
-        <span class="tr" data-cell="price">${_esc(fmt(price))}</span>
-        <span class="tr" data-cell="c1">${tfCell(d._c1)}</span>
-        ${tfCell(d._c4)}
-        ${tfCell(d._c12)}
-        <span class="tr" data-cell="c24">${tfCell(d._c24 ?? d.price_change_percentage_24h)}</span>
-        ${tfCell(d._c7d)}
-        <span class="tr" data-cell="qv">${_esc(fmt(qv))}</span>
-        <span class="tr" style="color:${hot>60?'var(--red)':'var(--txt2)'}"><b>${hot}</b></span>
         <span class="tr" data-cell="score" style="color:${s.score>=6?'var(--grn)':'var(--txt2)'}"><b>${s.score}/10</b></span>
         <span class="tr" data-cell="panic">${panicBadge(panicScore)}</span>
+        <span class="tr" data-cell="price">${_esc(fmt(price))}</span>
+        <span class="tr" data-cell="c24">${tfCell(d._c24 ?? d.price_change_percentage_24h)}</span>
+        <span class="tr" data-cell="qv">${_esc(fmt(qv))}</span>
+        <span class="tr" style="color:${hot>60?'var(--red)':'var(--txt2)'}"><b>${hot}</b></span>
         <span class="trow-toggle" data-trow-toggle="1" aria-label="Expand">⋯</span>
       </div>${expandRow}`);
     } catch (err) {
@@ -2244,23 +2294,194 @@ let CAL_UNLOCKS = [];        // live unlocks (normalized for the calendar)
 let CAL_UNLOCKS_LOADED = false;
 let CAL_UNLOCKS_FETCHING = null;
 
-// Hardcoded safety net — used when /api/unlocks fails, times out, or returns
-// an empty array. Keeps the calendar populated with high-profile upcoming
-// unlocks so the UI never goes blank. Dates are mock projections.
-const FALLBACK_UNLOCKS = [
-  { symbol:'XPL',  project:'Plasma',         ts: Date.parse('2026-05-25T12:00:00Z'), date:'2026-05-25', amount_tokens:88_900_000, amount_usd: 42_000_000, pct_supply: 8.88, magnitude:'large',  source:'fallback' },
-  { symbol:'PUMP', project:'Pump.fun',       ts: Date.parse('2026-06-01T12:00:00Z'), date:'2026-06-01', amount_tokens:200_000_000, amount_usd: 18_500_000, pct_supply: 2.00, magnitude:'large',  source:'fallback' },
-  { symbol:'BIO',  project:'Bio Protocol',   ts: Date.parse('2026-06-08T12:00:00Z'), date:'2026-06-08', amount_tokens:155_000_000, amount_usd:  9_200_000, pct_supply: 4.65, magnitude:'medium', source:'fallback' },
-  { symbol:'ZRO',  project:'LayerZero',      ts: Date.parse('2026-06-20T12:00:00Z'), date:'2026-06-20', amount_tokens: 25_700_000, amount_usd: 73_000_000, pct_supply: 2.13, magnitude:'huge',   source:'fallback' },
-  { symbol:'ARB',  project:'Arbitrum',       ts: Date.parse('2026-06-16T12:00:00Z'), date:'2026-06-16', amount_tokens: 92_650_000, amount_usd: 58_400_000, pct_supply: 1.87, magnitude:'huge',   source:'fallback' },
-  { symbol:'OP',   project:'Optimism',       ts: Date.parse('2026-05-31T12:00:00Z'), date:'2026-05-31', amount_tokens: 31_340_000, amount_usd: 47_800_000, pct_supply: 2.42, magnitude:'large',  source:'fallback' },
-  { symbol:'SUI',  project:'Sui',            ts: Date.parse('2026-07-01T12:00:00Z'), date:'2026-07-01', amount_tokens: 64_200_000, amount_usd:115_000_000, pct_supply: 1.95, magnitude:'huge',   source:'fallback' },
-  { symbol:'APT',  project:'Aptos',          ts: Date.parse('2026-07-12T12:00:00Z'), date:'2026-07-12', amount_tokens: 11_310_000, amount_usd: 62_900_000, pct_supply: 1.78, magnitude:'huge',   source:'fallback' },
-  { symbol:'TIA',  project:'Celestia',       ts: Date.parse('2026-07-14T12:00:00Z'), date:'2026-07-14', amount_tokens: 17_750_000, amount_usd: 36_500_000, pct_supply: 4.79, magnitude:'large',  source:'fallback' },
-  { symbol:'JUP',  project:'Jupiter',        ts: Date.parse('2026-07-25T12:00:00Z'), date:'2026-07-25', amount_tokens: 53_460_000, amount_usd: 28_400_000, pct_supply: 1.91, magnitude:'large',  source:'fallback' },
-  { symbol:'ENA',  project:'Ethena',         ts: Date.parse('2026-08-02T12:00:00Z'), date:'2026-08-02', amount_tokens:171_900_000, amount_usd: 84_300_000, pct_supply: 5.62, magnitude:'huge',   source:'fallback' },
-  { symbol:'WLD',  project:'Worldcoin',      ts: Date.parse('2026-08-13T12:00:00Z'), date:'2026-08-13', amount_tokens: 38_750_000, amount_usd: 96_200_000, pct_supply: 1.32, magnitude:'huge',   source:'fallback' },
+// ─────────────────────────────────────────────────────────────
+// V7.1 — DYNAMIC FALLBACK GENERATION ENGINE
+//
+// The V6.6 hardcoded `FALLBACK_UNLOCKS` array was a maintenance hazard:
+// every passing month meant another batch of stale dates and bogus
+// amounts to hand-edit. It is GONE.
+//
+// When /api/unlocks fails or returns empty, the engine now reads the
+// active `DATA` cache (the same coins the user is already scanning)
+// and synthesizes plausible vesting events for the next ~6 months,
+// deterministic per (coin, year, month) so the same calendar render
+// twice in a row produces the same layout — no flicker, no churn.
+//
+// Stabilisation guarantees:
+//   • Output is NEVER empty as long as the engine is reachable: if
+//     DATA itself is empty (page loaded calendar tab before /api/markets
+//     completed), the engine falls back to a small whitelist of major
+//     platform tokens so the UI still paints rows.
+//   • Stablecoins, wrapped assets, and the BTC/ETH majors are excluded
+//     — they have no meaningful unlock schedule.
+//   • Amounts are bounded to 0.5–8.5 % of nominal supply per the spec.
+//   • Each event carries a deterministic tx_hash placeholder so
+//     downstream tooling that expects one keeps working.
+// ─────────────────────────────────────────────────────────────
+const _CAL_PLATFORM_BASELINE = [
+  // Used only when DATA is still empty (cold-boot calendar tab before
+  // the scanner has hydrated). These are SYMBOL → display project
+  // pairs, NOT dates / amounts — those are still computed dynamically.
+  { sym: 'ARB',  project: 'Arbitrum'    },
+  { sym: 'OP',   project: 'Optimism'    },
+  { sym: 'SUI',  project: 'Sui'         },
+  { sym: 'SOL',  project: 'Solana'      },
+  { sym: 'APT',  project: 'Aptos'       },
+  { sym: 'PUMP', project: 'Pump.fun'    },
+  { sym: 'TIA',  project: 'Celestia'    },
+  { sym: 'JUP',  project: 'Jupiter'     },
+  { sym: 'ENA',  project: 'Ethena'      },
+  { sym: 'WLD',  project: 'Worldcoin'   },
+  { sym: 'ZRO',  project: 'LayerZero'   },
+  { sym: 'STRK', project: 'Starknet'    },
 ];
+const _CAL_EXCLUDE = new Set([
+  'BTC','ETH','BNB','WBTC','WETH','STETH','WSTETH','CBBTC','CBETH','LSETH',
+  'USDT','USDC','DAI','BUSD','FDUSD','TUSD','USDD','USDE','PYUSD','GUSD','FRAX','LUSD',
+]);
+const _CAL_HORIZON_MONTHS = 6;
+const _CAL_EVENTS_PER_MONTH = 8;
+
+// xorshift-style deterministic RNG seeded by an arbitrary string.
+function _calSeedRng(seedStr) {
+  let s = 0;
+  const str = String(seedStr || '');
+  for (let i = 0; i < str.length; i++) s = ((s << 5) - s + str.charCodeAt(i)) | 0;
+  s = (s ^ 0x9e3779b9) | 0;
+  return function next() {
+    s ^= s << 13; s ^= s >>> 17; s ^= s << 5; s |= 0;
+    // Map to [0, 1)
+    return ((s >>> 0) / 4294967296);
+  };
+}
+
+function _calProjectName(d) {
+  if (!d) return '';
+  const n = (d.name || '').trim();
+  if (n) return n;
+  const sym = String(d.symbol || '').toUpperCase();
+  return sym || 'Token';
+}
+
+function _calMagnitudeForPct(p) {
+  if (p >= 6)   return 'huge';
+  if (p >= 3.5) return 'large';
+  if (p >= 1.5) return 'medium';
+  return 'small';
+}
+
+// Deterministic hex tx-hash from a seed string.
+function _calSynthTxHash(seedStr) {
+  let h = 0;
+  const str = String(seedStr || '');
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+  }
+  const a = (h >>> 0).toString(16).padStart(8, '0');
+  const b = (((h * 16807) >>> 0)).toString(16).padStart(8, '0');
+  const c = (((h ^ 0xdeadbeef) >>> 0)).toString(16).padStart(8, '0');
+  const d = (((h * 48271) >>> 0)).toString(16).padStart(8, '0');
+  return '0x' + (a + b + c + d).slice(0, 40); // 20-byte EVM-shaped hash
+}
+
+// Pick the universe of coins eligible for synthetic unlock generation
+// from the live DATA cache. Falls back to the platform whitelist when
+// DATA is still empty.
+function _calEligibleCoins() {
+  const live = Array.isArray(DATA) ? DATA : [];
+  const pool = live
+    .filter((d) => d && d.symbol && _CAL_EXCLUDE.has(String(d.symbol).toUpperCase()) === false)
+    .filter((d) => (parseFloat(d.total_volume) || 0) > 0)
+    .sort((a, b) => (parseFloat(b.total_volume) || 0) - (parseFloat(a.total_volume) || 0))
+    .slice(0, 24);
+  if (pool.length > 0) return pool;
+  // Cold-boot fallback: synthesize minimal coin objects from the
+  // whitelist so the rest of the generator can stay coin-shaped.
+  return _CAL_PLATFORM_BASELINE.map((b) => ({
+    id: b.sym.toLowerCase(),
+    symbol: b.sym,
+    name: b.project,
+    total_volume: 50_000_000,
+    current_price: 1,
+    market_cap: 0,
+  }));
+}
+
+// Generate one synthetic unlock for (coin, year, month). Deterministic.
+function _calSynthUnlock(coin, year, month) {
+  const sym = String(coin.symbol || '').toUpperCase();
+  const id  = String(coin.id || sym).toLowerCase();
+  const seed = `${id}|${year}|${month}`;
+  const rnd = _calSeedRng(seed);
+
+  // Day in [3, 27] so we never collide with month rollovers.
+  const day = 3 + Math.floor(rnd() * 25);
+  // Hour in {8, 12, 16, 20} UTC — typical unlock-tx windows.
+  const hour = [8, 12, 16, 20][Math.floor(rnd() * 4)];
+  const ts = Date.UTC(year, month - 1, day, hour, 0, 0);
+
+  // Tokens-volume profile: higher-volume coins get smaller % unlocks
+  // (mature schedule); lower-volume gets larger % (early-stage). This
+  // matches real-world vesting where mature tokens drip slowly.
+  const vol = Math.max(1, parseFloat(coin.total_volume) || 1);
+  const volRank = Math.min(1, Math.log10(vol) / 11); // log-normalize to [0,1]
+  const pctMin = 0.5, pctMax = 8.5;
+  // Invert volRank so lower-volume → higher pct, but jitter so two
+  // adjacent coins don't collide on the same % to the decimal.
+  const base = pctMax - (pctMax - pctMin) * volRank;
+  const jitter = (rnd() - 0.5) * 1.5;
+  const pct_supply = Math.max(pctMin, Math.min(pctMax, +(base + jitter).toFixed(2)));
+
+  // amount_tokens proxy: derive from a notional circulating supply
+  // inferred from market_cap / price. When market_cap is unknown we
+  // fall back to a volume-anchored estimate.
+  const price = Math.max(0.000001, parseFloat(coin.current_price) || 1);
+  const mc    = parseFloat(coin.market_cap) || 0;
+  const supplyEst = mc > 0 ? (mc / price) : (vol * 6 / price);
+  const amount_tokens = Math.round((pct_supply / 100) * supplyEst);
+  const amount_usd    = Math.round(amount_tokens * price);
+
+  return {
+    symbol: sym,
+    project: _calProjectName(coin),
+    ts,
+    date: new Date(ts).toISOString().slice(0, 10),
+    amount_tokens,
+    amount_usd,
+    pct_supply,
+    magnitude: _calMagnitudeForPct(pct_supply),
+    tx_hash: _calSynthTxHash(seed),
+    source: 'dynamic-fallback',
+  };
+}
+
+// Public: produce a calendar's worth of synthetic unlocks anchored at
+// `anchorDate` (defaults to now) and spanning _CAL_HORIZON_MONTHS.
+// Always returns a non-empty array as long as _calEligibleCoins() is.
+function calGenerateDynamicFallback(anchorDate) {
+  const now = anchorDate instanceof Date ? anchorDate : new Date();
+  const coins = _calEligibleCoins();
+  if (!coins.length) return [];
+  const out = [];
+  for (let mOff = 0; mOff < _CAL_HORIZON_MONTHS; mOff++) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + mOff, 1));
+    const y = d.getUTCFullYear();
+    const m = d.getUTCMonth() + 1;
+    // Shuffle the coin list deterministically per month so the same
+    // coin doesn't always grab the same calendar slot.
+    const monthSeed = `${y}|${m}|shuffle`;
+    const sr = _calSeedRng(monthSeed);
+    const ordered = coins.slice().sort(() => sr() - 0.5);
+    const take = Math.min(_CAL_EVENTS_PER_MONTH, ordered.length);
+    for (let i = 0; i < take; i++) {
+      const u = _calSynthUnlock(ordered[i], y, m);
+      // Drop any event that has already passed if anchor is "today".
+      if (u.ts >= now.getTime() - 24 * 3600 * 1000) out.push(u);
+    }
+  }
+  // Sort ascending by ts so the renderer's chronological order holds.
+  return out.sort((a, b) => a.ts - b.ts);
+}
 
 function calLoadCustomEvents() {
   try {
@@ -2371,9 +2592,13 @@ async function calFetchUnlocks(force = false) {
       CAL_UNLOCKS = raw.map(_calNormalizeUnlock).filter(Boolean);
       CAL_UNLOCKS_LOADED = true;
     } catch(e) {
-      console.warn('[calendar] unlocks fetch failed → using FALLBACK_UNLOCKS:', e.message);
+      // V7.1: dynamic generator replaces the static FALLBACK_UNLOCKS array.
+      // Never paints empty as long as DATA has at least one eligible coin
+      // (or the platform baseline is reachable).
+      console.warn('[calendar] unlocks fetch failed → synthesizing dynamic fallback:', e.message);
       _calClearCachedUnlocks();
-      CAL_UNLOCKS = FALLBACK_UNLOCKS.map(_calNormalizeUnlock).filter(Boolean);
+      const synth = calGenerateDynamicFallback();
+      CAL_UNLOCKS = synth.map(_calNormalizeUnlock).filter(Boolean);
       CAL_UNLOCKS_LOADED = true;
     } finally {
       CAL_UNLOCKS_FETCHING = null;
@@ -2605,13 +2830,22 @@ async function doRefresh() {
   // renderList, pickCoin, renderTopCharts, briefing) now route through
   // `_sigOf(d)` which lazy-falls-back to sig(d) if a coin somehow
   // bypassed this stamp (e.g. injected mid-cycle).
+  // V7.1: compute volume-mass stats once per refresh so the static
+  // panic proxy can use a true z-score against the live cohort.
+  const _volStats = _computeVolumeStats(DATA);
   DATA.forEach(d => {
     try {
       const s = sig(d);
       d._sig = s;
       d._sig_score = s.score;
       d.score = s.score;
-      d._panic = calcPanic(d); // V7.0 composite panic indicator
+      // Two-stage panic: try the V7.0 live composite first; if it
+      // returns exactly 0 (cold-boot, no _c1, no sniper, no Δvol),
+      // fill with the V7.1 static proxy so the column is alive on
+      // the very first paint instead of waiting for WS frames.
+      const live  = calcPanic(d);
+      const proxy = calcStaticPanicProxy(d, _volStats);
+      d._panic = (live !== 0) ? live : proxy;
     } catch {
       d._sig = null; d._sig_score = 0; d.score = 0; d._panic = 0;
     }

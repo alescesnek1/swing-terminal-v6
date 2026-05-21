@@ -79,14 +79,18 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .scan-wrap{overflow-x:auto;overflow-y:visible;white-space:nowrap;-webkit-overflow-scrolling:touch;position:relative;width:100%;padding-right:40px;}
 .scan-wrap .thdr,.scan-wrap .trow{white-space:nowrap;}
 @media(min-width:641px){
-  /* V7.0: +56px for the new PANIC column. */
-  .scan-wrap .thdr,.scan-wrap .trow{min-width:980px;}
+  /* V7.1: 10-col compact layout fits comfortably in 720px so the
+     scanner-center pane no longer needs horizontal scroll on common
+     desktop widths. */
+  .scan-wrap .thdr,.scan-wrap .trow{min-width:720px;}
 }
 .thdr, .trow{
   display:grid;
-  /* V7.0: 14 columns — PANIC (56px) inserted between SCORE (col 12)
-     and the mobile-only expand toggle (col 14, 0px on desktop). */
-  grid-template-columns:32px minmax(120px,1fr) 80px 80px 56px 56px 56px 60px 56px 90px 50px 64px 56px 0px;
+  /* V7.1 — 10 cells in this DOM order:
+     # · COIN · SIGNAL · SCORE · PANIC · PRICE · 24H% · 24H VOL · HOT · toggle
+     SCORE + PANIC sit side-by-side at cols 4-5 by spec.
+     The toggle is the mobile-only expand handle, 0px on desktop. */
+  grid-template-columns:32px minmax(120px,1fr) 80px 64px 56px 80px 60px 90px 50px 0px;
   gap:4px;
   padding:5px 10px;
   align-items:center;
@@ -442,21 +446,20 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   .scanner-3col{grid-template-columns:1fr !important;min-height:auto !important}
   .scanner-left{flex-direction:row;flex-wrap:wrap;border-right:none;border-bottom:1px solid var(--b1);padding:6px 8px;gap:4px;overflow-x:auto}
   .scan-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-  /* V7.0: +56px for the new PANIC column. */
-  .thdr,.trow{min-width:836px !important}
+  /* V7.1: matches the new 10-col compact min-width. */
+  .thdr,.trow{min-width:720px !important}
   .thdr > *:last-child,.trow > *:last-child{min-width:70px;flex-shrink:0}
 }
-/* ── V7.0 Mobile/Tablet UX (supersedes V6.9 Sprint 2) ──
-   Collapse the scanner table on phones (≤640px) down to the five
-   columns a trader actually scans on the go:
-     [Symbol · Price · Score · PANIC · Expand-toggle]
-   PANIC sits IMMEDIATELY adjacent to SCORE so the two composite
-   indicators can be cross-referenced without expanding the row.
-   Hidden cells (#/SIGNAL/1H/4H/12H/24H/7D/VOL/HOT) re-appear inside
-   the tap-toggled detail sub-row (.trow-expand).
-   Index map (matches the V7.0 14-col grid-template-columns):
-     1 #  · 2 COIN  · 3 SIGNAL · 4 PRICE · 5 1H% · 6 4H% · 7 12H%
-     8 24H% · 9 7D% · 10 VOL · 11 HOT · 12 SCORE · 13 PANIC · 14 toggle
+/* ── V7.1 Mobile/Tablet UX (supersedes V7.0) ──
+   On phones (≤640px) only five cells remain VISIBLE; CSS `order:`
+   reorders them to match the V7.0 mobile spec which the V7.1 desktop
+   reorder would otherwise scramble:
+     [COIN · PRICE · SCORE · PANIC · Expand-toggle]
+   PANIC stays IMMEDIATELY adjacent to SCORE for cross-examination.
+   Hidden cells re-appear inside the tap-toggled detail sub-row
+   (.trow-expand). Index map (matches the V7.1 10-col grid-template):
+     1 # · 2 COIN · 3 SIGNAL · 4 SCORE · 5 PANIC · 6 PRICE
+     7 24H% · 8 24H VOL · 9 HOT · 10 toggle
 */
 @media(max-width:640px){
   .scanner-3col{grid-template-columns:1fr !important;min-height:auto !important}
@@ -464,26 +467,31 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   .scan-wrap{overflow-x:hidden;padding-right:0}
   .thdr,.trow{
     display:grid !important;
-    /* 5 visible cells: COIN | PRICE | SCORE | PANIC | toggle */
+    /* 5 visible cells (slot order = visual order after `order:` rules):
+       COIN | PRICE | SCORE | PANIC | toggle */
     grid-template-columns:minmax(70px,1fr) 60px 44px 56px 24px !important;
     min-width:0 !important;
     gap:3px;padding:6px 6px;font-size:10px;
   }
-  /* Hide: # (1), SIGNAL (3), 1H (5), 4H (6), 12H (7),
-           24H% (8), 7D (9), VOL (10), HOT (11). */
+  /* Hide everything except COIN(2), SCORE(4), PANIC(5), PRICE(6), toggle(10) */
   .thdr > *:nth-child(1),.trow > *:nth-child(1),
   .thdr > *:nth-child(3),.trow > *:nth-child(3),
-  .thdr > *:nth-child(5),.trow > *:nth-child(5),
-  .thdr > *:nth-child(6),.trow > *:nth-child(6),
   .thdr > *:nth-child(7),.trow > *:nth-child(7),
   .thdr > *:nth-child(8),.trow > *:nth-child(8),
-  .thdr > *:nth-child(9),.trow > *:nth-child(9),
-  .thdr > *:nth-child(10),.trow > *:nth-child(10),
-  .thdr > *:nth-child(11),.trow > *:nth-child(11){display:none !important}
-  /* SCORE (12), PANIC (13), toggle (14) — keep visible */
-  .thdr > *:nth-child(12),.trow > *:nth-child(12),
-  .thdr > *:nth-child(13),.trow > *:nth-child(13),
-  .thdr > *:nth-child(14),.trow > *:nth-child(14){display:inline-block;min-width:0;flex-shrink:0}
+  .thdr > *:nth-child(9),.trow > *:nth-child(9){display:none !important}
+  /* Visible cells — explicit display + visual-order overrides.
+     order: defaults to 0, so a smaller order means earlier visual slot. */
+  .thdr > *:nth-child(2),.trow > *:nth-child(2),
+  .thdr > *:nth-child(4),.trow > *:nth-child(4),
+  .thdr > *:nth-child(5),.trow > *:nth-child(5),
+  .thdr > *:nth-child(6),.trow > *:nth-child(6),
+  .thdr > *:nth-child(10),.trow > *:nth-child(10){display:inline-block;min-width:0;flex-shrink:0}
+  /* Visual order on mobile: COIN(2) → PRICE(6) → SCORE(4) → PANIC(5) → toggle(10) */
+  .thdr > *:nth-child(2),.trow > *:nth-child(2)  {order:1}
+  .thdr > *:nth-child(6),.trow > *:nth-child(6)  {order:2}
+  .thdr > *:nth-child(4),.trow > *:nth-child(4)  {order:3}
+  .thdr > *:nth-child(5),.trow > *:nth-child(5)  {order:4}
+  .thdr > *:nth-child(10),.trow > *:nth-child(10){order:5}
   /* The expand toggle is appended by renderList as the last child after score */
   .trow .trow-toggle{
     display:inline-flex;align-items:center;justify-content:center;
