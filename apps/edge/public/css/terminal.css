@@ -93,31 +93,26 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
      left. This is the STATIC fallback template only. terminal.js
      injects a dynamic #dynamic-cols <style> tag whose
      grid-template-columns wins via !important. */
-  /* V7.4.7: 14 data + 3 ghost (1fr each) + 1 toggle = 18 slots. */
-  grid-template-columns:32px 160px 80px 64px 70px 80px 56px 56px 56px 60px 56px 90px 50px 1fr 1fr 1fr 0px;
+  /* V7.4.9: 13 data + 1 spacer (1fr) + 1 toggle = 15 slots. */
+  grid-template-columns:32px 160px 80px 64px 70px 80px 56px 56px 56px 60px 56px 90px 50px 1fr 0px;
   gap:4px;
   padding:5px 10px;
   align-items:center;
 }
-/* V7.4.7 — ghost spacer cells. Three of them (g1/g2/g3) tail the
-   default column order so spare viewport width splits three ways.
-   The user can drag them between data columns to insert arbitrary
-   gaps, and resize them via the standard right-edge handle.
-   Empty by design — only the resize handle is visible. Hover paints
-   a faint dotted underline so the ghost is discoverable. */
-.thdr > .thdr-ghost{
-  position:relative;
+/* V7.4.9 — single static spacer at the tail. Strictly inert: no
+   drag source, no drop target, no resize handle. Exists solely as
+   a 1fr grid track that absorbs all remaining horizontal slack so
+   the data columns stay tight on the left edge of the row. */
+.thdr > .thdr-spacer{
   padding:0;
   background:transparent;
-  border-bottom:1px dashed transparent;
-  cursor:grab;
-  transition:border-color .15s,background .15s;
+  border:none;
+  cursor:default;
 }
-.thdr > .thdr-ghost:hover{
-  background:rgba(0,232,200,.04);
-  border-bottom-color:rgba(0,232,200,.45);
+.thdr > .thdr-spacer:hover{
+  background:transparent;
+  border-bottom:none;
 }
-.thdr > .thdr-ghost:active{cursor:grabbing;}
 /* Desktop: the mobile expand-toggle column collapses to zero width
    so the layout matches the historical 12-column grid pixel-for-pixel. */
 @media(min-width:641px){
@@ -483,9 +478,8 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
     gap:3px;padding:6px 6px;font-size:10px;
   }
   /* Hide every column NOT in {coin, price, score, panic, toggle}.
-     V7.4.7: also kill the three ghost spacers on mobile — a touch
-     viewport can't usefully grab an empty 8px gap, and the 5-slot
-     mobile grid template can't budget for them. */
+     V7.4.9: also kill the trailing spacer so the 5-slot mobile grid
+     template doesn't have to budget for an invisible 1fr track. */
   .thdr > [data-col="rank"],   .trow > [data-col="rank"],
   .thdr > [data-col="signal"], .trow > [data-col="signal"],
   .thdr > [data-col="c1"],     .trow > [data-col="c1"],
@@ -495,9 +489,7 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   .thdr > [data-col="c7d"],    .trow > [data-col="c7d"],
   .thdr > [data-col="qv"],     .trow > [data-col="qv"],
   .thdr > [data-col="hot"],    .trow > [data-col="hot"],
-  .thdr > [data-col="g1"],     .trow > [data-col="g1"],
-  .thdr > [data-col="g2"],     .trow > [data-col="g2"],
-  .thdr > [data-col="g3"],     .trow > [data-col="g3"]{display:none !important}
+  .thdr > [data-col="spacer"], .trow > [data-col="spacer"]{display:none !important}
   /* Force visible cells back into inline-block context */
   .thdr > [data-col="coin"],  .trow > [data-col="coin"],
   .thdr > [data-col="price"], .trow > [data-col="price"],

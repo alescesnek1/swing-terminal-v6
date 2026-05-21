@@ -1582,11 +1582,9 @@ function renderList() {
         c7d:    `<span data-col="c7d" data-cell="c7d" class="tr">${tfCell(v_c7d)}</span>`,
         qv:     `<span data-col="qv"  data-cell="qv"  class="tr">${_esc(fmt(qv))}</span>`,
         hot:    `<span data-col="hot" class="tr" style="color:${hot>60?'var(--red)':'var(--txt2)'}"><b>${hot}</b></span>`,
-        // V7.4.7 — row-side mirrors of the three ghost cells so the
-        // grid column count stays aligned with the header DOM.
-        g1:     `<span data-col="g1" aria-hidden="true"></span>`,
-        g2:     `<span data-col="g2" aria-hidden="true"></span>`,
-        g3:     `<span data-col="g3" aria-hidden="true"></span>`,
+        // V7.4.9 — row-side mirror of the static spacer so the grid
+        // column count stays aligned with the header DOM.
+        spacer: `<span data-col="spacer" aria-hidden="true"></span>`,
       };
       // Fallback: any key in _columnOrder that has no cellHTML entry
       // (e.g. a future column added mid-session) gets an empty span
@@ -3643,22 +3641,24 @@ const COLUMN_DEFS = {
   qv:     { label: '24H VOL', width: 90,     tip: '24h Quote Volume (USD)',                                                 align: 'right', dragOK: true  },
   hot:    { label: 'HOT',     width: 50,     tip: '',                                                                       align: 'right', dragOK: true,
             tooltip: 'Real-time attention and volatility tracking index based on immediate trading frequency spikes.' },
-  // V7.4.7 — GHOST SPACERS (g1/g2/g3).
-  // Replace the single static spacer with THREE draggable+resizable
-  // ghost cells. Each defaults to `1fr` so they evenly absorb spare
-  // viewport width; the user can drag them between data columns to
-  // create arbitrary gaps in the grid layout, and resize them via
-  // the standard right-edge handle. Label is empty by design.
-  g1:     { label: '',        width: 'flex', tip: '',                                                                       align: 'left',  dragOK: true  },
-  g2:     { label: '',        width: 'flex', tip: '',                                                                       align: 'left',  dragOK: true  },
-  g3:     { label: '',        width: 'flex', tip: '',                                                                       align: 'left',  dragOK: true  },
+  // V7.4.9 — TERMINAL BLACK HOLE (spacer).
+  // The V7.4.7 g1/g2/g3 ghosts were removed — three drop-target
+  // grid cells in the middle of the row made drop targeting
+  // unpredictable (users tried to drop INTO the void, which CSS
+  // grid can't satisfy). Replaced by a single static spacer at the
+  // tail that absorbs all remaining horizontal slack.
+  //   • Not draggable (dragOK:false) — can't be moved.
+  //   • Not a drop target — _attachColumnDnD skips it explicitly.
+  //   • Not resizable — renderHeader emits no .col-resize-handle.
+  //   • Pinned to tail — drop handler re-asserts spacer at the end
+  //     after every reorder so it can never be displaced.
+  spacer: { label: '',        width: 'flex', tip: '',                                                                       align: 'left',  dragOK: false },
 };
 // Default visual sequence. The mobile-only expand toggle is appended
 // AFTER this chain in DOM order and never participates in reorder.
-// V7.4.7: three ghost cells tail the list — each 1fr — so any spare
-// pixels split three ways at the right edge until the user drags
-// them somewhere else.
-const DEFAULT_COLUMN_ORDER = ['rank','coin','signal','score','panic','price','c1','c4','c12','c24','c7d','qv','hot','g1','g2','g3'];
+// V7.4.9: `spacer` always tails the list and the drop handler
+// re-pins it on every reorder, so it never drifts.
+const DEFAULT_COLUMN_ORDER = ['rank','coin','signal','score','panic','price','c1','c4','c12','c24','c7d','qv','hot','spacer'];
 const COLUMN_ORDER_STORAGE_KEY = 'swing_col_order_v73';
 const COLUMN_WIDTHS_STORAGE_KEY = 'swing_col_widths_v74';
 const MIN_COL_PX = 36;     // hard floor — narrower than this and the label gets ellipsised away.
@@ -3672,13 +3672,23 @@ let _columnOrder = (() => {
     if (!Array.isArray(arr)) return DEFAULT_COLUMN_ORDER.slice();
     // Drop anything that doesn't map to a current COLUMN_DEFS entry —
     // protects against a column being removed in a future sprint
-    // while the user still has the old key cached.
+    // (e.g. V7.4.7's g1/g2/g3 ghosts, removed in V7.4.9) while the
+    // user still has the old key cached.
     const cleaned = arr.filter(k => COLUMN_DEFS[k]);
     // Append any defs the saved order didn't know about so a new
     // column added in a future release still shows up by default
     // rather than silently disappearing.
     const seen = new Set(cleaned);
     for (const k of DEFAULT_COLUMN_ORDER) if (!seen.has(k)) cleaned.push(k);
+    // V7.4.9 — defensive spacer-tail pin. A stale V7.4.6 save could
+    // have a column sitting after the spacer; this guarantees the
+    // void always closes the row regardless of how the order was
+    // serialised in a previous sprint.
+    const spIdx = cleaned.indexOf('spacer');
+    if (spIdx >= 0 && spIdx !== cleaned.length - 1) {
+      cleaned.splice(spIdx, 1);
+      cleaned.push('spacer');
+    }
     return cleaned.length ? cleaned : DEFAULT_COLUMN_ORDER.slice();
   } catch { return DEFAULT_COLUMN_ORDER.slice(); }
 })();
@@ -3720,18 +3730,14 @@ function _persistColumnWidths() {
   } catch {}
 }
 
-const MIN_GHOST_PX = 8; // ghosts can shrink below the regular column floor.
-function _isGhostKey(k) { return /^g\d+$/.test(k); }
 function _widthExpr(key) {
+  // V7.4.9 — spacer is a pure `1fr` with no minimum so it can
+  // shrink to zero on a narrow viewport without clamping any data
+  // column. (The old COIN-flex path used `minmax(MIN_COIN_PX, 1fr)`
+  // — that's kept as a defensive fallback for any FUTURE flex
+  // column that needs a floor.)
+  if (key === 'spacer') return '1fr';
   const w = _columnWidths[key];
-  // V7.4.7 — ghost cells (g1/g2/g3): default `1fr`, numeric only
-  // after the user explicitly resizes them. Floor at 8px so the
-  // resize handle stays grabbable but a ghost can still collapse
-  // to a near-zero gap.
-  if (_isGhostKey(key)) {
-    if (Number.isFinite(w)) return `${Math.max(MIN_GHOST_PX, Math.round(w))}px`;
-    return '1fr';
-  }
   if (w === 'flex') return `minmax(${MIN_COIN_PX}px, 1fr)`;
   const def = COLUMN_DEFS[key] || {};
   const fallback = Number.isFinite(def.width) ? def.width : MIN_COL_PX;
@@ -3776,13 +3782,11 @@ function renderHeader() {
   const cells = _columnOrder.map(k => {
     const def = COLUMN_DEFS[k];
     if (!def) return '';
-    // V7.4.7 — ghost cells are FULLY interactive: draggable, with a
-    // resize handle, but no label. They flow through the standard
-    // cell branch below; the .thdr-ghost class gives the user a
-    // subtle hover hint so an empty 1fr gap is still discoverable.
-    if (_isGhostKey(k)) {
-      const handle = '<span class="col-resize-handle" data-resize aria-hidden="true"></span>';
-      return `<span data-col="${k}" class="thdr-ghost" draggable="true" title="Ghost spacer — drag to reposition or resize" aria-hidden="true">${handle}</span>`;
+    // V7.4.9 — spacer: naked, no-drag, no-drop, no-resize, no-label.
+    // Just a 1fr grid track that absorbs every spare pixel on the
+    // right edge of the row.
+    if (k === 'spacer') {
+      return `<span data-col="spacer" class="thdr-spacer no-handle" aria-hidden="true"></span>`;
     }
     const tipAttr = def.tip ? ` title="${_esc(def.tip)}"` : '';
     const dragAttr = def.dragOK ? ' draggable="true"' : '';
@@ -3840,6 +3844,12 @@ function _attachColumnDnD() {
     const key = el.dataset.col;
     const def = COLUMN_DEFS[key];
     if (!def) return;
+    // V7.4.9 — the spacer is INERT: not a drag source AND not a
+    // drop target. Skipping it here means dragging a column onto
+    // the right-edge void simply does nothing (no flash, no move).
+    // Combined with the tail-pin below, this guarantees the spacer
+    // is always the last cell in _columnOrder.
+    if (key === 'spacer') return;
 
     // ── DRAG SOURCE — gated by dragOK ──
     if (def.dragOK) {
@@ -3882,6 +3892,16 @@ function _attachColumnDnD() {
       const to   = _columnOrder.indexOf(dk);
       if (from < 0 || to < 0) return;
       _columnOrder.splice(to, 0, _columnOrder.splice(from, 1)[0]);
+      // V7.4.9 — invariant enforcement: spacer is ALWAYS the last
+      // element of _columnOrder. If a user somehow lands a column
+      // after it (e.g. via a legacy saved order with a stale layout
+      // version), this re-pins the void to the tail without
+      // touching the user's chosen positions for the data columns.
+      const spIdx = _columnOrder.indexOf('spacer');
+      if (spIdx >= 0 && spIdx !== _columnOrder.length - 1) {
+        _columnOrder.splice(spIdx, 1);
+        _columnOrder.push('spacer');
+      }
       _persistColumnOrder();
       _applyGridTemplate();
       renderHeader();
