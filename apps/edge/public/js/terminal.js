@@ -3434,30 +3434,41 @@ document.getElementById('briefing-trigger')?.addEventListener('click', () => {
 // columns directly in the header. Order survives reloads via
 // `localStorage[COLUMN_ORDER_STORAGE_KEY]`.
 //
-// Single source of truth for column metadata. width values are CSS
-// grid track expressions — `minmax(120px, 1fr)` for the COIN cell
-// gives it the slack budget; everything else is a fixed pixel size.
-// `dragOK:false` pins a column (# and COIN) so dragging the rank
-// marker into the middle of the row stays impossible.
+// V7.4 — Single source of truth for column metadata.
+//   • `width` is the DEFAULT numeric pixel width OR the literal string
+//     'flex' for the COIN absorber. User-modified widths live in the
+//     parallel `_columnWidths` map below so the registry stays a pure
+//     constant (no hot mutation across reloads).
+//   • `dragOK:false` pins a column (# and COIN) so the user cannot
+//     drag the rank marker into the middle of the row.
+//   • `tooltip` (optional) is the hover-popup body — rendered through
+//     the V7.4 .header-tooltip engine. Differs from `tip` which only
+//     feeds the native browser title="".
 const COLUMN_DEFS = {
-  rank:   { label: '#',       width: '32px',              tip: '',                                                                                                  align: 'left',  dragOK: false },
-  coin:   { label: 'COIN',    width: 'minmax(120px,1fr)', tip: '',                                                                                                  align: 'left',  dragOK: false },
-  signal: { label: 'SIGNAL',  width: '80px',              tip: '',                                                                                                  align: 'left',  dragOK: true  },
-  score:  { label: 'SCORE',   width: '64px',              tip: 'Signal Score 0-10',                                                                                 align: 'right', dragOK: true  },
-  panic:  { label: 'PANIC',   width: '70px',              tip: 'V7.0 Panic Indicator: -100 (Capitulation) … 0 (Neutral) … +100 (Extreme FOMO). Click [?] for the manual.', align: 'right', dragOK: true  },
-  price:  { label: 'PRICE',   width: '80px',              tip: '',                                                                                                  align: 'right', dragOK: true  },
-  c1:     { label: '1H %',    width: '56px',              tip: '1h price change %',                                                                                 align: 'right', dragOK: true  },
-  c4:     { label: '4H %',    width: '56px',              tip: '4h price change % (derived from CoinGecko sparkline)',                                              align: 'right', dragOK: true  },
-  c12:    { label: '12H %',   width: '56px',              tip: '12h price change % (derived from CoinGecko sparkline)',                                             align: 'right', dragOK: true  },
-  c24:    { label: '24H %',   width: '60px',              tip: '',                                                                                                  align: 'right', dragOK: true  },
-  c7d:    { label: '7D %',    width: '56px',              tip: '7d price change %',                                                                                 align: 'right', dragOK: true  },
-  qv:     { label: '24H VOL', width: '90px',              tip: '24h Quote Volume (USD)',                                                                            align: 'right', dragOK: true  },
-  hot:    { label: 'HOT',     width: '50px',              tip: '',                                                                                                  align: 'right', dragOK: true  },
+  rank:   { label: '#',       width: 32,     tip: '',                                                                       align: 'left',  dragOK: false },
+  coin:   { label: 'COIN',    width: 'flex', tip: '',                                                                       align: 'left',  dragOK: false },
+  signal: { label: 'SIGNAL',  width: 80,     tip: '',                                                                       align: 'left',  dragOK: true  },
+  score:  { label: 'SCORE',   width: 64,     tip: 'Signal Score 0-10',                                                      align: 'right', dragOK: true,
+            tooltip: 'Primary algorithmic valuation engine. Scales 0 to 10/10 based on macro confluence indicators.' },
+  panic:  { label: 'PANIC',   width: 70,     tip: 'Click for the PANIC manual',                                             align: 'right', dragOK: true,
+            tooltip: 'Composite math blend of 24h Volume Delta (50%), 1h Price Velocity (30%), and Institutional Sniping (20%). High absolute values indicate retail extremes ( >+80 FOMO top risk · <-80 capitulation bounce zone ). Click to open the full manual.' },
+  price:  { label: 'PRICE',   width: 80,     tip: '',                                                                       align: 'right', dragOK: true  },
+  c1:     { label: '1H %',    width: 56,     tip: '1h price change %',                                                      align: 'right', dragOK: true  },
+  c4:     { label: '4H %',    width: 56,     tip: '4h price change % (derived from CoinGecko sparkline)',                   align: 'right', dragOK: true  },
+  c12:    { label: '12H %',   width: 56,     tip: '12h price change % (derived from CoinGecko sparkline)',                  align: 'right', dragOK: true  },
+  c24:    { label: '24H %',   width: 60,     tip: '',                                                                       align: 'right', dragOK: true  },
+  c7d:    { label: '7D %',    width: 56,     tip: '7d price change %',                                                      align: 'right', dragOK: true  },
+  qv:     { label: '24H VOL', width: 90,     tip: '24h Quote Volume (USD)',                                                 align: 'right', dragOK: true  },
+  hot:    { label: 'HOT',     width: 50,     tip: '',                                                                       align: 'right', dragOK: true,
+            tooltip: 'Real-time attention and volatility tracking index based on immediate trading frequency spikes.' },
 };
 // Default visual sequence. The mobile-only expand toggle is appended
 // AFTER this chain in DOM order and never participates in reorder.
 const DEFAULT_COLUMN_ORDER = ['rank','coin','signal','score','panic','price','c1','c4','c12','c24','c7d','qv','hot'];
 const COLUMN_ORDER_STORAGE_KEY = 'swing_col_order_v73';
+const COLUMN_WIDTHS_STORAGE_KEY = 'swing_col_widths_v74';
+const MIN_COL_PX = 36;     // hard floor — narrower than this and the label gets ellipsised away.
+const MIN_COIN_PX = 90;    // flex absorber needs a useful minimum.
 
 let _columnOrder = (() => {
   try {
@@ -3478,15 +3489,55 @@ let _columnOrder = (() => {
   } catch { return DEFAULT_COLUMN_ORDER.slice(); }
 })();
 
+let _columnWidths = (() => {
+  // Bootstrap from COLUMN_DEFS, then overlay any user-persisted widths.
+  const out = {};
+  for (const k of Object.keys(COLUMN_DEFS)) out[k] = COLUMN_DEFS[k].width;
+  try {
+    const raw = localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY);
+    if (raw) {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === 'object') {
+        for (const k of Object.keys(out)) {
+          const v = obj[k];
+          if (v === 'flex') { out[k] = 'flex'; }
+          else if (Number.isFinite(v)) { out[k] = Math.max(k === 'coin' ? MIN_COIN_PX : MIN_COL_PX, Math.round(v)); }
+        }
+      }
+    }
+  } catch {}
+  return out;
+})();
+
 function _persistColumnOrder() {
   try { localStorage.setItem(COLUMN_ORDER_STORAGE_KEY, JSON.stringify(_columnOrder)); } catch {}
+}
+function _persistColumnWidths() {
+  try {
+    const obj = {};
+    for (const k of Object.keys(_columnWidths)) {
+      const v = _columnWidths[k];
+      // Only persist user-divergent values; the default `'flex'` for
+      // COIN doesn't need to round-trip through storage.
+      if (v === 'flex') continue;
+      obj[k] = v;
+    }
+    localStorage.setItem(COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(obj));
+  } catch {}
+}
+
+function _widthExpr(key) {
+  const w = _columnWidths[key];
+  if (w === 'flex') return `minmax(${MIN_COIN_PX}px, 1fr)`;
+  const px = Math.max(key === 'coin' ? MIN_COIN_PX : MIN_COL_PX, Math.round(Number(w) || COLUMN_DEFS[key].width));
+  return `${px}px`;
 }
 
 function _gridTemplateFromOrder() {
   // Trailing 0px slot is the mobile expand toggle; it always closes
   // the row in DOM order so the mobile @media rule can show it as
   // 24px without recalculating its position.
-  return _columnOrder.map(k => COLUMN_DEFS[k]?.width || '60px').join(' ') + ' 0px';
+  return _columnOrder.map(_widthExpr).join(' ') + ' 0px';
 }
 
 function _applyGridTemplate() {
@@ -3507,9 +3558,12 @@ function _applyGridTemplate() {
   }`;
 }
 
-// Rebuild the header from _columnOrder. The PANIC header carries a
-// permanent [?] button — even after the user moves the column to a
-// different slot — because the manual modal needs a stable anchor.
+// V7.4 — Rebuild the header from _columnOrder. Each cell gets a
+// trailing absolute-positioned `.col-resize-handle` so the user can
+// drag the right edge to scale that column's pixel width directly.
+// The [?] button was retired in V7.4 — the PANIC header is now its
+// own clickable affordance (data-panic-help on the cell itself) so
+// the row stays visually quieter while the manual remains reachable.
 function renderHeader() {
   const hdr = document.querySelector('.thdr');
   if (!hdr) return;
@@ -3518,20 +3572,28 @@ function renderHeader() {
     if (!def) return '';
     const tipAttr = def.tip ? ` title="${_esc(def.tip)}"` : '';
     const dragAttr = def.dragOK ? ' draggable="true"' : '';
-    const noHandle = def.dragOK ? '' : ' class="no-handle"';
     const classes = [];
     if (def.align === 'right') classes.push('tr');
     if (!def.dragOK) classes.push('no-handle');
-    const classAttr = classes.length ? ` class="${classes.join(' ')}"` : '';
-    const help = k === 'panic'
-      ? ' <button type="button" class="panic-help-btn" data-panic-help aria-label="Open PANIC manual">?</button>'
-      : '';
+    // PANIC carries data-panic-help so a click on the label opens
+    // the manual (replaces the V7.3 inline [?] button).
+    if (k === 'panic') classes.push('panic-header');
+    const classAttr = ` class="${classes.join(' ')}"`;
+    const tooltipAttr = def.tooltip ? ` data-tooltip="${_esc(def.tooltip)}"` : '';
+    const panicAttr = k === 'panic' ? ' data-panic-help' : '';
     const hotTip = k === 'hot' ? ' data-hot-tip' : '';
-    return `<span data-col="${k}"${classAttr}${dragAttr}${tipAttr}${hotTip}>${_esc(def.label)}${help}</span>`;
+    // The resize handle is appended INSIDE the cell so the absolute-
+    // position anchor (the cell, which becomes position:relative via
+    // the .thdr > * rule) is correct on every reorder.
+    const handle = '<span class="col-resize-handle" data-resize aria-hidden="true"></span>';
+    return `<span data-col="${k}"${classAttr}${dragAttr}${tipAttr}${tooltipAttr}${panicAttr}${hotTip}>`
+         + `${_esc(def.label)}${handle}`
+         + `</span>`;
   }).join('');
   hdr.innerHTML = cells
     + '<span class="trow-toggle-hdr no-handle" aria-hidden="true">⋯</span>';
   _attachColumnDnD();
+  _attachColumnResize();
 }
 
 function _attachColumnDnD() {
