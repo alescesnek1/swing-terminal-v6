@@ -202,7 +202,10 @@
                  cell), and SCORE / PANIC / HOT carry data-tooltip
                  for the .header-tooltip popup engine. -->
             <div class="thdr" id="scanner-thdr">
-              <span data-col="rank" class="no-handle">#<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <!-- V7.4.8: rank is now fully draggable too (total grid
+                   mobility). The row marker re-numbers correctly even
+                   when the cell sits in the middle of the row. -->
+              <span data-col="rank" draggable="true">#<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
               <!-- V7.4.5: COIN is draggable AND a drop target so SIGNAL
                    can land before it (drop handlers wire on every cell). -->
               <span data-col="coin" draggable="true">COIN<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>

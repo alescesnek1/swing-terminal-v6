@@ -3338,6 +3338,13 @@ function _syncDetailFromPoll() {
 }
 
 async function _aggressivePollTick() {
+  // V7.4.8 — HARD guard: if the WS reconnected between the time the
+  // close handler armed this timer and the time the tick fires, abort
+  // immediately. A full doRefresh() blasts a fresh /api/markets payload
+  // through DATA + renderList(), which would visually flash-overwrite
+  // every cell the live WS just mutated and make the UI feel "batched"
+  // even though ticks ARE arriving in real time underneath.
+  if (_streamSocket && _streamSocket.readyState === 1 /* OPEN */) return;
   try { await doRefresh(); _rebuildSymbolIndex(); _syncDetailFromPoll(); }
   catch (e) { console.warn('[STREAM] aggressive poll failed:', e && e.message); }
 }
@@ -3613,14 +3620,14 @@ document.getElementById('briefing-trigger')?.addEventListener('click', () => {
 //     the V7.4 .header-tooltip engine. Differs from `tip` which only
 //     feeds the native browser title="".
 const COLUMN_DEFS = {
-  // V7.4.5: COIN is a fully reorderable column. RANK (#) stays
-  // non-draggable (row marker) but is still a valid drop target.
-  // V7.4.6: COIN is now a FIXED 160px wide. The 1fr-flex behaviour
-  // moved to the new `spacer` cell at the end of COLUMN_DEFS — a
-  // zero-content "black hole" that absorbs all remaining viewport
-  // width on wide displays, keeping the data columns tight on the
-  // left where the eye expects them.
-  rank:   { label: '#',       width: 32,     tip: '',                                                                       align: 'left',  dragOK: false },
+  // V7.4.8: EVERY column is now fully draggable — including RANK.
+  //   • Total array splicing freedom: the drag-and-drop engine has
+  //     no positional boundary checks; splice(from, to) accepts any
+  //     index pair within _columnOrder.length.
+  //   • The row marker (#) re-numbers from `start + i + 1` regardless
+  //     of where the rank cell ends up visually, so dragging it into
+  //     the middle of the row still produces correctly-numbered cells.
+  rank:   { label: '#',       width: 32,     tip: '',                                                                       align: 'left',  dragOK: true  },
   coin:   { label: 'COIN',    width: 160,    tip: '',                                                                       align: 'left',  dragOK: true  },
   signal: { label: 'SIGNAL',  width: 80,     tip: '',                                                                       align: 'left',  dragOK: true  },
   score:  { label: 'SCORE',   width: 64,     tip: 'Signal Score 0-10',                                                      align: 'right', dragOK: true,

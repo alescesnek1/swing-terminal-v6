@@ -54,10 +54,13 @@ export class Aggregator extends EventEmitter {
     this._flushInterval = null;
 
     /** Minimum ms between two consecutive emits for the same symbol.
-     *  Binance trade firehose can deliver dozens of updates per second
-     *  per pair; that's noise for a screener UI. 200ms cadence = up
-     *  to 5 frames/sec/symbol, still feels real-time. */
-    this._emitThrottleMs = 200;
+     *  V7.4.8: dropped from 200ms → 50ms so the client receives ticks
+     *  at the raw cadence of the upstream Binance feed (up to 20
+     *  frames/sec/symbol). Anything below 50ms starts to overwhelm
+     *  the DOM renderer with redundant repaints, but 50ms is the floor
+     *  where individual price ticks still register as discrete pulses
+     *  in the cell-flash animation (which is 900ms total). */
+    this._emitThrottleMs = 50;
   }
 
   /**
