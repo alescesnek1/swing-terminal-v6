@@ -23,12 +23,20 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js';
  * configured" and the request is denied (we explicitly do NOT
  * default to permissive in v3 — production must set APP_ORIGIN).
  */
+// Wildcard pattern: any subdomain of netlify.app (covers all deploy previews
+// and named sites without having to update APP_ORIGIN every time).
+const NETLIFY_APP_REGEX = /^https:\/\/[a-z0-9-]+\.netlify\.app$/i;
+
 function parseAllowlist() {
   const raw = (Deno.env.get('APP_ORIGIN') || '').trim();
   const list = (!raw || raw === '*') ? [] : raw.split(',').map((s) => s.trim()).filter(Boolean);
-  // Strictly allow the production origin to fix 403 CORS issues
-  if (!list.includes('https://swing-terminal-v4-ales.netlify.app')) {
-    list.push('https://swing-terminal-v4-ales.netlify.app');
+  // Hardcoded fallbacks so 403s never block known production sites even
+  // when APP_ORIGIN is misconfigured or unset on a fresh deploy.
+  for (const origin of [
+    'https://swing-terminal-v4-ales.netlify.app',
+    'https://swing-terminal-v6.netlify.app',
+  ]) {
+    if (!list.includes(origin)) list.push(origin);
   }
   return list;
 }
@@ -91,19 +99,25 @@ export function checkOrigin(request) {
     return { ok: false, origin: '', reason: 'No Origin or Referer header' };
   }
 
-  // Dev FIRST. The previous order checked APP_ORIGIN first; if
-  // APP_ORIGIN was unset (the default for many `netlify dev` runs)
-  // the function fell through to the dev regex — which works for
-  // most setups but was silently bypassed in at least one reported
-  // case. Putting dev first guarantees loopback always passes.
+  // 1. Dev loopback — always first so a broken APP_ORIGIN never locks
+  //    out local development.
   if (_isDevOrigin(candidate)) {
     return { ok: true, origin: candidate, dev: true };
   }
 
+  // 2. Exact-match against the hardcoded + env-var allowlist.
   const allowlist = parseAllowlist();
   if (allowlist.length && allowlist.includes(candidate)) {
     return { ok: true, origin: candidate };
   }
+
+  // 3. Wildcard: any *.netlify.app subdomain is trusted. This covers
+  //    deploy previews (branch--site.netlify.app) and new named sites
+  //    without requiring APP_ORIGIN to be updated on every deploy.
+  if (NETLIFY_APP_REGEX.test(candidate)) {
+    return { ok: true, origin: candidate, netlify: true };
+  }
+
   return { ok: false, origin: candidate, reason: 'Origin not on allowlist' };
 }
 

@@ -5,6 +5,7 @@
 // ─────────────────────────────────────────────────────────────
 
 import { startHealthServer } from './health.js';
+import { startStreamServer } from './stream.js';
 import { Aggregator } from './aggregator.js';
 import { TriggerEngine } from './trigger/engine.js';
 import { BinanceFeed } from './feeds/binance.js';
@@ -27,6 +28,7 @@ const TOP_N = parseInt(process.env.TOP_N_SYMBOLS || String(TOP_N_SYMBOLS), 10);
 let aggregator;
 let triggerEngine;
 let binanceFeed;
+let streamServer;
 let shuttingDown = false;
 
 // ─────────────────────────────────────────────────────────────
@@ -70,7 +72,7 @@ async function main() {
   });
 
   // ── Step 3: Start health server ──
-  startHealthServer({
+  const httpServer = startHealthServer({
     port: PORT,
     statusFn: () => ({
       ready: binanceFeed.running && binanceFeed.activeSymbols.length > 0,
@@ -79,8 +81,13 @@ async function main() {
       },
       trigger: triggerEngine.getStatus(),
       symbols: binanceFeed.activeSymbols.length,
+      stream_clients: streamServer ? streamServer.clientCount() : 0,
     }),
   });
+
+  // ── Step 3b (V7.0): attach /api/stream-markets WS server to the
+  // existing HTTP listener so Fly.io still exposes a single port.
+  streamServer = startStreamServer({ server: httpServer, aggregator });
 
   // ── Step 4: Start aggregator ──
   aggregator.start();
@@ -113,6 +120,11 @@ async function shutdown(signal) {
   try {
     // Stop feed first (closes WebSockets)
     if (binanceFeed) await binanceFeed.stop();
+
+    // Close client-facing stream server before tearing the aggregator
+    // down so listeners are detached cleanly and clients get a 1001
+    // (going away) instead of a 1006 (abnormal closure).
+    if (streamServer) await streamServer.close();
 
     // Stop trigger engine
     if (triggerEngine) triggerEngine.stop();

@@ -1,4 +1,4 @@
-console.log('TERMINAL_V4_LOADED');
+console.log('TERMINAL_V7_LOADED');
 
 // ─────────────────────────────────────────────────────────────
 // V6.8 Sprint 1 (FIX-3): GLOBAL XSS CLOSURE
@@ -1011,6 +1011,78 @@ function _sigOf(d) {
   catch { return { label:'NEUT', cls:'neut', score:0, reasons:[], pattern:null, whyTags:[] }; }
 }
 
+// ========== V7.0 COMPOSITE PANIC INDICATOR (-100 … +100) ==========
+// Algorithmic Panic Buy / Panic Sell composite, stamped on every coin
+// during the data normalization phase in doRefresh + on every WS
+// delta frame in connectStream. Final integer in [-100, +100]:
+//   -100 = Extreme Panic Sell / Capitulation
+//      0 = Neutral
+//   +100 = Extreme FOMO / Panic Buy
+//
+//   panic = α·sign(c1h)·|Δvol24h%|   ← spike magnitude, direction from price
+//         + β·c1h_velocity            ← signed 1h % change
+//         + γ·sniper_proximity_weight ← bid-wall buy pressure
+//
+//   α=0.5 (volume dominates), β=0.3, γ=0.2 — sums to 1.0 so a fully
+//   saturated input yields a fully saturated output.
+//
+// |Δvol24h%| is derived from `_PANIC_PREV_QV` (last-seen total_volume
+// per coin id). First-frame for a coin → 0 vol contribution, score
+// driven by price + sniper. Sniper weight maps proximity_pct (0…5)
+// and confidence (0…1) into [0, 100] — bid walls only push positive.
+const PANIC_ALPHA = 0.5;
+const PANIC_BETA  = 0.3;
+const PANIC_GAMMA = 0.2;
+const PANIC_GLOW_THRESHOLD = 80;
+const _PANIC_PREV_QV = new Map();
+function calcPanic(d) {
+  try {
+    const id = String(d && d.id || d && d.symbol || '').toLowerCase();
+    if (!id) return 0;
+    const safe = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+    const qvNow = safe(d.total_volume);
+    const qvPrev = _PANIC_PREV_QV.get(id);
+    let dvPct = 0;
+    if (qvPrev != null && qvPrev > 0) dvPct = ((qvNow - qvPrev) / qvPrev) * 100;
+    if (qvNow > 0) _PANIC_PREV_QV.set(id, qvNow);
+    const absVol = clamp(Math.abs(dvPct), 0, 100);
+    const c1h    = clamp(safe(d._c1), -100, 100);
+    const c24    = safe(d._c24 != null ? d._c24 : d.price_change_percentage_24h);
+    const dir    = c1h !== 0 ? Math.sign(c1h) : (c24 !== 0 ? Math.sign(c24) : 0);
+    let sniperW = 0;
+    const sym = String(d.symbol || '').toUpperCase();
+    const snip = (typeof SNIPER_MAP !== 'undefined') ? SNIPER_MAP.get(sym) : null;
+    if (snip) {
+      const prox = clamp(snip.proximity_pct == null ? 5 : Math.abs(snip.proximity_pct), 0, 5);
+      const conf = clamp(snip.confidence == null ? 0 : snip.confidence, 0, 1);
+      sniperW = (1 - prox / 5) * conf * 100;
+    }
+    const raw = PANIC_ALPHA * dir * absVol
+              + PANIC_BETA  * c1h
+              + PANIC_GAMMA * sniperW;
+    return clamp(Math.round(raw), -100, 100);
+  } catch { return 0; }
+}
+function panicMeta(score) {
+  const s = Number.isFinite(score) ? score : 0;
+  const glow = Math.abs(s) >= PANIC_GLOW_THRESHOLD;
+  let cls, label;
+  if (s >=  80) { cls = 'panic-buy-extreme';  label = 'FOMO'; }
+  else if (s >=  40) { cls = 'panic-buy';     label = 'BUY';  }
+  else if (s <= -80) { cls = 'panic-sell-extreme'; label = 'CAPI'; }
+  else if (s <= -40) { cls = 'panic-sell';    label = 'SELL'; }
+  else               { cls = 'panic-neut';    label = '·';    }
+  return { cls, label, glow };
+}
+// Render the in-row panic badge. Title carries the numeric score so
+// hover-tooltip works on desktop without an explicit aria element.
+function panicBadge(score) {
+  const m = panicMeta(score);
+  const s = Number.isFinite(score) ? score : 0;
+  const sign = s > 0 ? '+' : '';
+  return `<span class="panic-cell ${m.cls}${m.glow ? ' panic-glow' : ''}" title="Panic Score ${sign}${s} (${m.label})">${sign}${s}</span>`;
+}
+
 function getSetupValidity(d) {
   const s = _sigOf(d), c24 = d.price_change_percentage_24h || 0;
   if (s.label === 'RECLAIM') return { type: 'BREAKOUT RECLAIM', col: 'var(--cyan)', border: 'rgba(34,211,238,.3)', desc: 'Cena se vratila po sweepu.' };
@@ -1344,6 +1416,7 @@ function renderList() {
       const escCls = _esc(s.cls);
       const hot = safeNum(calcHotness(d));
       // Mobile-only sub-row carrying the columns hidden ≤640px.
+      const panicScore = Number.isFinite(d._panic) ? d._panic : calcPanic(d);
       const expandRow = `<div class="trow-expand" data-coin-id="${idAttr}">
         <div class="te-cell"><span class="te-lbl">SIG</span><span class="te-val"><span class="bdg ${escCls}">${escLabel}</span></span></div>
         <div class="te-cell"><span class="te-lbl">1H</span><span class="te-val">${tfCell(d._c1)}</span></div>
@@ -1357,15 +1430,16 @@ function renderList() {
         <span class="rn">${start + i + 1}</span>
         <div class="coin-cell"><span class="csym">${escSym}${exchBadge}</span><span class="cnm">${escName}</span></div>
         <span class="sig-cell"><span class="bdg ${escCls}">${escLabel}</span>${divTag}${snipTag}</span>
-        <span class="tr">${_esc(fmt(price))}</span>
-        ${tfCell(d._c1)}
+        <span class="tr" data-cell="price">${_esc(fmt(price))}</span>
+        <span class="tr" data-cell="c1">${tfCell(d._c1)}</span>
         ${tfCell(d._c4)}
         ${tfCell(d._c12)}
-        ${tfCell(d._c24 ?? d.price_change_percentage_24h)}
+        <span class="tr" data-cell="c24">${tfCell(d._c24 ?? d.price_change_percentage_24h)}</span>
         ${tfCell(d._c7d)}
-        <span class="tr">${_esc(fmt(qv))}</span>
+        <span class="tr" data-cell="qv">${_esc(fmt(qv))}</span>
         <span class="tr" style="color:${hot>60?'var(--red)':'var(--txt2)'}"><b>${hot}</b></span>
-        <span class="tr" style="color:${s.score>=6?'var(--grn)':'var(--txt2)'}"><b>${s.score}/10</b></span>
+        <span class="tr" data-cell="score" style="color:${s.score>=6?'var(--grn)':'var(--txt2)'}"><b>${s.score}/10</b></span>
+        <span class="tr" data-cell="panic">${panicBadge(panicScore)}</span>
         <span class="trow-toggle" data-trow-toggle="1" aria-label="Expand">⋯</span>
       </div>${expandRow}`);
     } catch (err) {
@@ -1424,6 +1498,7 @@ function pickCoin(id) {
     <div class="mgrid">
       <div class="mc"><div class="ml">SIGNAL</div><div class="mv"><span class="bdg ${_esc(s.cls)}">${_esc(s.label)}</span></div></div>
       <div class="mc"><div class="ml">SCORE</div><div class="mv">${s.score}/10</div></div>
+      <div class="mc"><div class="ml">PANIC</div><div class="mv">${panicBadge(Number.isFinite(d._panic) ? d._panic : calcPanic(d))}</div></div>
       <div class="mc"><div class="ml">24H VOL</div><div class="mv">${_esc(fmt(d.total_volume || 0))}</div></div>
       <div class="mc"><div class="ml">24H RANGE</div><div class="mv">${_esc(fmt(d.low_24h || 0))}–${_esc(fmt(d.high_24h || 0))}</div></div>
     </div>
@@ -2536,8 +2611,9 @@ async function doRefresh() {
       d._sig = s;
       d._sig_score = s.score;
       d.score = s.score;
+      d._panic = calcPanic(d); // V7.0 composite panic indicator
     } catch {
-      d._sig = null; d._sig_score = 0; d.score = 0;
+      d._sig = null; d._sig_score = 0; d.score = 0; d._panic = 0;
     }
   });
   DATA.sort((a, b) => (b._sig_score || 0) - (a._sig_score || 0));
@@ -2614,6 +2690,204 @@ async function doRefresh() {
   if (SEL) pickCoin(SEL);
 }
 
+// ─────────────────────────────────────────────────────────────
+// V7.0 — REAL-TIME WEBSOCKET STREAM PIPELINE
+//
+// Replaces the 120-second `setInterval(doRefresh, …)` poll with a
+// persistent WebSocket connection to the Fly.io ingest worker, which
+// proxies sub-second Binance ticker deltas. /api/markets is still hit
+// once at boot for the initial snapshot + non-Binance coins, and a
+// long fallback poll (5 min) covers the case where the WS drops for
+// longer than a reconnect can repair (e.g. user offline → online).
+//
+// Frame contract (matches apps/ingest/src/stream.js):
+//   { "t":"tick", "s":"BTC", "p":65432.10, "c24":2.51,
+//     "qv":4.21e10, "ts":1700000000000 }
+//   • s  = upper-case BASE symbol (BTC, not BTC/USDT:USDT)
+//   • p  = last trade price (USD)
+//   • c24= rolling 24h % change
+//   • qv = 24h quote volume
+//
+// Each frame triggers a SINGLE-COIN mutation: DATA[i] gets the new
+// price / 24h% / volume, _sig + _panic recompute, and ONLY the
+// affected cells are repainted via [data-coin-id="…"][data-cell="…"]
+// — no row reflow, no full renderList.
+// ─────────────────────────────────────────────────────────────
+const STREAM_DEFAULT_URL = 'wss://swing-terminal-ingest.fly.dev/api/stream-markets';
+const STREAM_BACKOFF_MIN_MS = 1000;
+const STREAM_BACKOFF_MAX_MS = 30000;
+const STREAM_FALLBACK_POLL_MS = 5 * 60 * 1000; // 5min — long-tail safety net
+let _streamSocket = null;
+let _streamBackoff = STREAM_BACKOFF_MIN_MS;
+let _streamReconnectTimer = null;
+let _streamClosedByUs = false;
+const _SYMBOL_INDEX = new Map(); // upper(base) -> DATA[] index
+
+function _rebuildSymbolIndex() {
+  _SYMBOL_INDEX.clear();
+  for (let i = 0; i < DATA.length; i++) {
+    const sym = String(DATA[i] && DATA[i].symbol || '').toUpperCase();
+    if (sym) _SYMBOL_INDEX.set(sym, i);
+  }
+}
+
+function _flashCell(rowEl, cellName, html, klass) {
+  if (!rowEl) return;
+  const el = rowEl.querySelector(`[data-cell="${cellName}"]`);
+  if (!el) return;
+  if (html != null) el.innerHTML = html;
+  // Re-trigger animation by toggling the class off and back on next frame.
+  el.classList.remove('cell-flash-up', 'cell-flash-down');
+  // eslint-disable-next-line no-unused-expressions
+  void el.offsetWidth;
+  if (klass) el.classList.add(klass);
+}
+
+function _applyTick(frame) {
+  try {
+    const sym = String(frame.s || '').toUpperCase();
+    if (!sym) return;
+    const idx = _SYMBOL_INDEX.get(sym);
+    if (idx == null) return;
+    const d = DATA[idx];
+    if (!d) return;
+
+    const prevPrice = parseFloat(d.current_price) || 0;
+    const newPrice  = (frame.p != null) ? Number(frame.p) : prevPrice;
+    const newC24    = (frame.c24 != null) ? Number(frame.c24) : null;
+    const newQv     = (frame.qv != null) ? Number(frame.qv) : null;
+
+    if (Number.isFinite(newPrice) && newPrice > 0) d.current_price = newPrice;
+    if (newC24 != null && Number.isFinite(newC24)) {
+      d.price_change_percentage_24h = newC24;
+      d._c24 = newC24;
+    }
+    if (newQv != null && Number.isFinite(newQv) && newQv > 0) {
+      d.total_volume = newQv;
+    }
+
+    // Re-stamp composite scores for THIS coin only (no DATA-wide loop).
+    try {
+      const s = sig(d);
+      d._sig = s; d._sig_score = s.score; d.score = s.score;
+    } catch {
+      d._sig = null; d._sig_score = 0; d.score = 0;
+    }
+    const prevPanic = d._panic;
+    d._panic = calcPanic(d);
+
+    // Targeted DOM mutation. data-coin-id is injected by renderList on
+    // every .trow — querying by it is O(1) for a small table and keeps
+    // the rest of the grid untouched.
+    const escId = String(d.id || '').replace(/"/g, '\\"');
+    const rowEl = document.querySelector(`.trow[data-coin-id="${escId}"]`);
+    if (rowEl) {
+      const priceDir = newPrice >= prevPrice ? 'cell-flash-up' : 'cell-flash-down';
+      _flashCell(rowEl, 'price', _esc(fmt(newPrice)), priceDir);
+      if (newC24 != null) {
+        const cls = newC24 >= 0 ? 'pos' : 'neg';
+        _flashCell(
+          rowEl, 'c24',
+          `<span class="tr ${cls}">${fp(newC24, 1)}</span>`,
+          newC24 >= 0 ? 'cell-flash-up' : 'cell-flash-down',
+        );
+      }
+      if (newQv != null) {
+        _flashCell(rowEl, 'qv', _esc(fmt(newQv)), null);
+      }
+      _flashCell(
+        rowEl, 'score',
+        `<b>${d._sig_score}/10</b>`,
+        (d._sig_score || 0) >= 6 ? 'cell-flash-up' : null,
+      );
+      const panicDir = (d._panic - (prevPanic || 0)) >= 0 ? 'cell-flash-up' : 'cell-flash-down';
+      _flashCell(rowEl, 'panic', panicBadge(d._panic), panicDir);
+      // SCORE cell color follows the score threshold — re-apply inline
+      // colour without touching the rest of the row.
+      const scoreEl = rowEl.querySelector('[data-cell="score"]');
+      if (scoreEl) scoreEl.style.color = (d._sig_score || 0) >= 6 ? 'var(--grn)' : 'var(--txt2)';
+    }
+  } catch (e) {
+    // Frame processing must never throw — a bad payload from upstream
+    // should drop the frame, not poison the rest of the stream.
+    console.warn('[STREAM] tick apply failed:', e && e.message);
+  }
+}
+
+async function connectStream() {
+  if (window.STREAM_DISABLED) return;
+  if (_streamSocket && (_streamSocket.readyState === 0 || _streamSocket.readyState === 1)) return;
+
+  const baseUrl = window.STREAM_URL || STREAM_DEFAULT_URL;
+  let token = '';
+  try {
+    const h = await _getAuthHeaders();
+    const auth = h && h.Authorization;
+    if (auth && /^Bearer\s+/.test(auth)) token = auth.replace(/^Bearer\s+/i, '').trim();
+  } catch { /* unauth → still connect (server may allow anon read) */ }
+
+  const url = token
+    ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+    : baseUrl;
+
+  let sock;
+  try { sock = new WebSocket(url); } catch (e) {
+    console.warn('[STREAM] WebSocket ctor failed:', e.message);
+    return _scheduleReconnect();
+  }
+  _streamSocket = sock;
+  _streamClosedByUs = false;
+
+  sock.addEventListener('open', () => {
+    _streamBackoff = STREAM_BACKOFF_MIN_MS;
+    try { LiveFeed.push('Real-time stream connected', 'info'); } catch {}
+    document.getElementById('sts') && (document.getElementById('sts').textContent = 'LIVE');
+  });
+
+  sock.addEventListener('message', (ev) => {
+    if (typeof ev.data !== 'string') return;
+    let frame;
+    try { frame = JSON.parse(ev.data); } catch { return; }
+    if (!frame || typeof frame !== 'object') return;
+    if (frame.t === 'tick') return _applyTick(frame);
+    if (frame.t === 'ping') {
+      try { sock.send('{"t":"pong"}'); } catch {}
+      return;
+    }
+    if (frame.t === 'hello') {
+      // Server greeting — ignore.
+      return;
+    }
+  });
+
+  sock.addEventListener('close', () => {
+    if (_streamClosedByUs) return;
+    document.getElementById('sts') && (document.getElementById('sts').textContent = 'RECONNECTING');
+    _scheduleReconnect();
+  });
+
+  sock.addEventListener('error', () => {
+    // 'close' will fire next; reconnect is handled there.
+  });
+}
+
+function _scheduleReconnect() {
+  if (_streamReconnectTimer) return;
+  const delay = _streamBackoff;
+  _streamBackoff = Math.min(_streamBackoff * 2, STREAM_BACKOFF_MAX_MS);
+  _streamReconnectTimer = setTimeout(() => {
+    _streamReconnectTimer = null;
+    connectStream();
+  }, delay);
+}
+
+// Pull a fresh /api/markets snapshot occasionally so non-Binance coins
+// (DEX-only, where the WS stream has nothing to push) don't go stale.
+async function _fallbackPollTick() {
+  try { await doRefresh(); _rebuildSymbolIndex(); }
+  catch (e) { console.warn('[STREAM] fallback poll failed:', e && e.message); }
+}
+
 // ========== INITIALIZATION & AUTH ==========
 let _appRunning = false;
 async function initTerminalApp() {
@@ -2625,7 +2899,12 @@ async function initTerminalApp() {
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
   fetchBinancePairs();
   await doRefresh();
-  window._refreshTimer = setInterval(doRefresh, REFRESH_INTERVAL * 1000);
+  _rebuildSymbolIndex();
+  // V7.0: open the live WebSocket stream and keep a long fallback
+  // poll as a safety net (was setInterval(doRefresh, 120s); now 5min
+  // because per-tick updates flow through the stream, not the poll).
+  connectStream();
+  window._refreshTimer = setInterval(_fallbackPollTick, STREAM_FALLBACK_POLL_MS);
   // Start crypto news feed (every 5 min)
   LiveFeed.init();
   LiveFeed.startNewsLoop();

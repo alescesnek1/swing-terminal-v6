@@ -1,5 +1,9 @@
 // ─────────────────────────────────────────────────────────────
-// Swing Terminal v4 — /api/markets Edge Function (Deno)
+// Swing Terminal v7.0 — /api/markets Edge Function (Deno)
+//
+// V7.0 adds a panic_score field per row (computed client-side; the
+// row shape is unchanged here but the schema version is bumped to
+// flush every v6_8 isolate cache on the first request).
 //
 // V4 BUSINESS LOGIC: the screener is no longer Binance-bound.
 // We pull the top-N coins by volume from CoinGecko (broader
@@ -64,7 +68,11 @@ const TOP_N = 1000;
 // floor) takes effect on the next request without a deploy-side flush.
 // V6.8 Sprint 1: bumped to v6_8 to nuke v6_7 entries that lacked the
 // pre-sliced free/pro string variants.
-const MARKETS_SCHEMA_VERSION = 'v6_8_dedup_memo';
+// V7.0: bumped to v7_0_panic_stream so every legacy v6_8 isolate cache
+// is invalidated on first hit after deploy — clients now compute a
+// panic_score per row and the row shape MAY pick up additional fields
+// at a later sprint. No upstream/shape change in this bump.
+const MARKETS_SCHEMA_VERSION = 'v7_0_panic_stream';
 
 // V6.8 Sprint 1 (FIX-6): _responseCache now carries the parsed array AND
 // two pre-sliced JSON strings (free / pro). Tier filter is computed once

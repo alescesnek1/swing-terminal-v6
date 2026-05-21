@@ -1,9 +1,15 @@
 // ─────────────────────────────────────────────────────────────
-// Swing Terminal v1.0 — Data Aggregator
+// Swing Terminal v7.0 — Data Aggregator
 // Receives raw WebSocket ticks, computes rolling metrics,
 // and writes aggregated snapshots to Redis.
+//
+// V7.0: Aggregator now extends EventEmitter and fires `tick` on every
+// onTicker call so the WS stream server (apps/ingest/src/stream.js)
+// can fan ticker deltas out to browser clients in real time without
+// polling Redis. Existing Redis flush path is untouched.
 // ─────────────────────────────────────────────────────────────
 
+import { EventEmitter } from 'node:events';
 import {
   REDIS_KEYS,
   TTL,
@@ -26,16 +32,32 @@ import { getRedis, redisMset } from '../../shared/redis-client.js';
  * @property {number} startTime
  */
 
-export class Aggregator {
+export class Aggregator extends EventEmitter {
   constructor() {
+    super();
+    // EventEmitter default is 10; one listener per WS client would
+    // cap us at 10 concurrent streamers. We use a single fan-out
+    // listener inside stream.js so the default is fine — but bump
+    // anyway to be defensive against future direct subscribers.
+    this.setMaxListeners(64);
+
     /** @type {Map<string, TickBucket>} current bucket per symbol */
     this._buckets = new Map();
 
     /** @type {Map<string, object>} previous snapshot per symbol (for delta calc) */
     this._prevSnapshots = new Map();
 
+    /** @type {Map<string, number>} ms timestamp of last 'tick' emit per symbol */
+    this._lastEmitAt = new Map();
+
     /** Flush interval handle */
     this._flushInterval = null;
+
+    /** Minimum ms between two consecutive emits for the same symbol.
+     *  Binance trade firehose can deliver dozens of updates per second
+     *  per pair; that's noise for a screener UI. 200ms cadence = up
+     *  to 5 frames/sec/symbol, still feels real-time. */
+    this._emitThrottleMs = 200;
   }
 
   /**
@@ -84,6 +106,24 @@ export class Aggregator {
     bucket.volume = ticker.baseVolume !== undefined ? ticker.baseVolume : bucket.volume;
     if (ticker.percentage !== undefined) bucket.percentage = ticker.percentage;
     if (ticker.quoteVolume !== undefined) bucket.quoteVolume = ticker.quoteVolume;
+
+    // V7.0: fan ticker deltas out to WS subscribers. Throttle per-symbol
+    // so a fast WS doesn't drown clients in 50 frames/sec/pair.
+    const now = Date.now();
+    const last = this._lastEmitAt.get(symbol) || 0;
+    if (now - last >= this._emitThrottleMs && Number.isFinite(bucket.closePrice) && bucket.closePrice > 0) {
+      this._lastEmitAt.set(symbol, now);
+      // ccxt symbol "BTC/USDT:USDT" → base "BTC"; for spot "BTC/USDT" → "BTC"
+      const base = String(symbol).split(/[\/:]/)[0] || symbol;
+      this.emit('tick', {
+        t: 'tick',
+        s: base.toUpperCase(),
+        p: bucket.closePrice,
+        c24: bucket.percentage != null ? Number(bucket.percentage) : null,
+        qv: bucket.quoteVolume != null ? Number(bucket.quoteVolume) : null,
+        ts: now,
+      });
+    }
   }
 
   /**

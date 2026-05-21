@@ -79,11 +79,14 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .scan-wrap{overflow-x:auto;overflow-y:visible;white-space:nowrap;-webkit-overflow-scrolling:touch;position:relative;width:100%;padding-right:40px;}
 .scan-wrap .thdr,.scan-wrap .trow{white-space:nowrap;}
 @media(min-width:641px){
-  .scan-wrap .thdr,.scan-wrap .trow{min-width:920px;}
+  /* V7.0: +56px for the new PANIC column. */
+  .scan-wrap .thdr,.scan-wrap .trow{min-width:980px;}
 }
 .thdr, .trow{
   display:grid;
-  grid-template-columns:32px minmax(120px,1fr) 80px 80px 56px 56px 56px 60px 56px 90px 50px 64px 0px;
+  /* V7.0: 14 columns — PANIC (56px) inserted between SCORE (col 12)
+     and the mobile-only expand toggle (col 14, 0px on desktop). */
+  grid-template-columns:32px minmax(120px,1fr) 80px 80px 56px 56px 56px 60px 56px 90px 50px 64px 56px 0px;
   gap:4px;
   padding:5px 10px;
   align-items:center;
@@ -439,19 +442,21 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   .scanner-3col{grid-template-columns:1fr !important;min-height:auto !important}
   .scanner-left{flex-direction:row;flex-wrap:wrap;border-right:none;border-bottom:1px solid var(--b1);padding:6px 8px;gap:4px;overflow-x:auto}
   .scan-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-  .thdr,.trow{min-width:780px !important}
+  /* V7.0: +56px for the new PANIC column. */
+  .thdr,.trow{min-width:836px !important}
   .thdr > *:last-child,.trow > *:last-child{min-width:70px;flex-shrink:0}
 }
-/* ── V6.9 Sprint 2: Mobile/Tablet UX ──
+/* ── V7.0 Mobile/Tablet UX (supersedes V6.9 Sprint 2) ──
    Collapse the scanner table on phones (≤640px) down to the five
    columns a trader actually scans on the go:
-     [Rank · Symbol · Price · 24h% · Score · Expand-toggle]
-   Hidden cells (1H/4H/12H/7D/HOT/SIGNAL/VOLUME) re-appear inside a
-   tap-toggled detail sub-row (.trow-expand). Eliminates the
-   horizontal scroll entirely — the row fits inside a 320px viewport.
-   Index map (matches the grid-template-columns order at line 83):
-     0 RANK · 1 COIN · 2 SIGNAL · 3 PRICE · 4 1H% · 5 4H% · 6 12H%
-     7 24H% · 8 7D% · 9 VOL · 10 HOT · 11 SCORE
+     [Symbol · Price · Score · PANIC · Expand-toggle]
+   PANIC sits IMMEDIATELY adjacent to SCORE so the two composite
+   indicators can be cross-referenced without expanding the row.
+   Hidden cells (#/SIGNAL/1H/4H/12H/24H/7D/VOL/HOT) re-appear inside
+   the tap-toggled detail sub-row (.trow-expand).
+   Index map (matches the V7.0 14-col grid-template-columns):
+     1 #  · 2 COIN  · 3 SIGNAL · 4 PRICE · 5 1H% · 6 4H% · 7 12H%
+     8 24H% · 9 7D% · 10 VOL · 11 HOT · 12 SCORE · 13 PANIC · 14 toggle
 */
 @media(max-width:640px){
   .scanner-3col{grid-template-columns:1fr !important;min-height:auto !important}
@@ -459,20 +464,26 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   .scan-wrap{overflow-x:hidden;padding-right:0}
   .thdr,.trow{
     display:grid !important;
-    grid-template-columns:24px minmax(70px,1fr) 60px 56px 44px 24px !important;
+    /* 5 visible cells: COIN | PRICE | SCORE | PANIC | toggle */
+    grid-template-columns:minmax(70px,1fr) 60px 44px 56px 24px !important;
     min-width:0 !important;
     gap:3px;padding:6px 6px;font-size:10px;
   }
-  /* Hide: SIGNAL(2) 1H(4) 4H(5) 12H(6) 7D(8) VOL(9) HOT(10) */
+  /* Hide: # (1), SIGNAL (3), 1H (5), 4H (6), 12H (7),
+           24H% (8), 7D (9), VOL (10), HOT (11). */
+  .thdr > *:nth-child(1),.trow > *:nth-child(1),
   .thdr > *:nth-child(3),.trow > *:nth-child(3),
   .thdr > *:nth-child(5),.trow > *:nth-child(5),
   .thdr > *:nth-child(6),.trow > *:nth-child(6),
   .thdr > *:nth-child(7),.trow > *:nth-child(7),
+  .thdr > *:nth-child(8),.trow > *:nth-child(8),
   .thdr > *:nth-child(9),.trow > *:nth-child(9),
   .thdr > *:nth-child(10),.trow > *:nth-child(10),
   .thdr > *:nth-child(11),.trow > *:nth-child(11){display:none !important}
-  /* Score column = nth-child(12) — keep it visible */
-  .thdr > *:nth-child(12),.trow > *:nth-child(12){display:inline-block;min-width:0;flex-shrink:0}
+  /* SCORE (12), PANIC (13), toggle (14) — keep visible */
+  .thdr > *:nth-child(12),.trow > *:nth-child(12),
+  .thdr > *:nth-child(13),.trow > *:nth-child(13),
+  .thdr > *:nth-child(14),.trow > *:nth-child(14){display:inline-block;min-width:0;flex-shrink:0}
   /* The expand toggle is appended by renderList as the last child after score */
   .trow .trow-toggle{
     display:inline-flex;align-items:center;justify-content:center;
@@ -1021,4 +1032,63 @@ html,body{overflow-x:hidden;max-width:100vw}
   .auth-field input{padding:10px 12px;font-size:13px}
   .auth-btn-submit{padding:11px;font-size:13px}
 }
+
+/* ─────────────────────────────────────────────────────────────
+   V7.0 — PANIC INDICATOR + LIVE CELL FLASH
+   ───────────────────────────────────────────────────────────── */
+.panic-cell{
+  display:inline-flex;align-items:center;justify-content:center;
+  padding:1px 6px;border-radius:3px;
+  font-family:var(--mono);font-weight:700;font-size:10px;
+  letter-spacing:.02em;line-height:1.35;
+  border:1px solid transparent;
+  min-width:36px;
+  transition:background .15s,box-shadow .25s,color .15s;
+}
+.panic-cell.panic-neut{
+  background:rgba(96,112,144,.10);color:var(--txt3);
+  border-color:rgba(96,112,144,.22);
+}
+.panic-cell.panic-buy{
+  background:linear-gradient(135deg,rgba(0,212,132,.10),rgba(0,212,132,.22));
+  color:var(--grn);border-color:rgba(0,212,132,.45);
+}
+.panic-cell.panic-buy-extreme{
+  background:linear-gradient(135deg,rgba(0,255,150,.18),rgba(0,212,132,.45));
+  color:#7CFFC0;border-color:rgba(0,255,170,.85);
+  text-shadow:0 0 6px rgba(0,255,170,.55);
+}
+.panic-cell.panic-sell{
+  background:linear-gradient(135deg,rgba(255,51,86,.10),rgba(255,51,86,.22));
+  color:var(--red);border-color:rgba(255,51,86,.45);
+}
+.panic-cell.panic-sell-extreme{
+  background:linear-gradient(135deg,rgba(255,30,60,.20),rgba(180,10,40,.55));
+  color:#FFB0C0;border-color:rgba(255,70,90,.85);
+  text-shadow:0 0 6px rgba(255,70,90,.55);
+}
+/* Glow ON when |panic| ≥ 80 — intense pulse so an extreme reading
+   is unmissable at the corner-of-the-eye glance level. */
+@keyframes panic-pulse-buy{
+  0%,100%{box-shadow:0 0 0 0 rgba(0,255,170,.55),0 0 8px rgba(0,255,170,.35);}
+  50%   {box-shadow:0 0 0 6px rgba(0,255,170,0),0 0 16px rgba(0,255,170,.85);}
+}
+@keyframes panic-pulse-sell{
+  0%,100%{box-shadow:0 0 0 0 rgba(255,70,90,.55),0 0 8px rgba(255,70,90,.35);}
+  50%   {box-shadow:0 0 0 6px rgba(255,70,90,0),0 0 16px rgba(255,70,90,.85);}
+}
+.panic-cell.panic-glow.panic-buy-extreme {animation:panic-pulse-buy 1.4s ease-in-out infinite}
+.panic-cell.panic-glow.panic-sell-extreme{animation:panic-pulse-sell 1.4s ease-in-out infinite}
+@media (prefers-reduced-motion: reduce){
+  .panic-cell.panic-glow.panic-buy-extreme,
+  .panic-cell.panic-glow.panic-sell-extreme{animation:none}
+}
+
+/* Live cell flash — applied by the WS client when a tick frame
+   mutates a single value. Short, neutral pulse so the eye catches
+   the change without the row reflowing. */
+@keyframes cell-flash-up   {0%{background:rgba(0,212,132,.35)}100%{background:transparent}}
+@keyframes cell-flash-down {0%{background:rgba(255,51,86,.35)}100%{background:transparent}}
+.cell-flash-up   {animation:cell-flash-up   .9s ease-out}
+.cell-flash-down {animation:cell-flash-down .9s ease-out}
 
