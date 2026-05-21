@@ -71,11 +71,25 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 /* SCANNER TABLE */
 .scan-wrap{overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch;position:relative}
 .scan-wrap .thdr,.scan-wrap .trow{white-space:nowrap}
-/* Two adjacent fixed columns: [sym+name] | [alert badge] — followed by metrics.
-   Column order: #  COIN  SIGNAL  PRICE  1H  4H  24H  7D  VOL%  HOT  SCORE */
-.thdr{display:grid;grid-template-columns:32px minmax(120px,1.6fr) 84px minmax(88px,1.1fr) 64px 64px 64px 64px 70px 54px 70px;gap:4px;padding:5px 10px;font-size:9px;color:var(--txt3);letter-spacing:.05em;border-bottom:1px solid var(--b1);background:var(--s1);min-width:820px;width:100%}
-.trow{display:grid;grid-template-columns:32px minmax(120px,1.6fr) 84px minmax(88px,1.1fr) 64px 64px 64px 64px 70px 54px 70px;gap:4px;padding:5px 10px;border-bottom:1px solid rgba(15,21,40,.9);cursor:pointer;transition:background .1s;align-items:center;font-size:10px;min-width:820px;width:100%}
+/* Column order: #  COIN  SIGNAL  PRICE  1H  4H  24H  7D  VOL%  PANIC  HOT  SCORE
+   Grid columns are dynamically injected via #dynamic-cols <style> tag by JS. */
+.thdr{display:grid;gap:4px;padding:5px 10px;font-size:9px;color:var(--txt3);letter-spacing:.05em;border-bottom:1px solid var(--b1);background:var(--s1);min-width:880px;width:100%}
+.trow{display:grid;gap:4px;padding:5px 10px;border-bottom:1px solid rgba(15,21,40,.9);cursor:pointer;transition:background .1s;align-items:center;font-size:10px;min-width:880px;width:100%}
 .trow:hover{background:var(--s2)}.trow.sel{background:rgba(0,232,200,.035);border-left:2px solid var(--acc);padding-left:8px}.trow:last-child{border-bottom:none}
+
+/* COLUMN RESIZE HANDLE */
+.thdr-cell{position:relative;user-select:none;cursor:grab;display:flex;align-items:center;white-space:nowrap}
+.thdr-cell.dragging{opacity:.5;cursor:grabbing}
+.thdr-cell.drag-over{border-left:2px solid var(--acc)}
+.col-resize-handle{position:absolute;right:-2px;top:0;bottom:0;width:5px;cursor:col-resize;z-index:5;background:transparent;transition:background .15s}
+.col-resize-handle:hover,.col-resize-handle.active{background:var(--acc);opacity:.6;border-radius:1px}
+body.col-resizing{cursor:col-resize!important;user-select:none!important}
+body.col-resizing *{cursor:col-resize!important}
+
+/* HEADER HOVER TOOLTIP */
+.thdr-cell .header-tooltip{position:absolute;top:calc(100% + 6px);left:50%;transform:translateX(-50%);background:var(--s3);color:var(--txt);font-size:9px;font-weight:400;letter-spacing:.02em;line-height:1.5;padding:8px 12px;border-radius:6px;border:1px solid var(--b3);box-shadow:0 8px 24px rgba(0,0,0,.55);white-space:normal;width:max-content;max-width:300px;z-index:200;pointer-events:none;opacity:0;visibility:hidden;transition:opacity .18s,visibility .18s}
+.thdr-cell .header-tooltip::before{content:'';position:absolute;top:-5px;left:50%;transform:translateX(-50%);border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:5px solid var(--b3)}
+.thdr-cell:hover .header-tooltip{opacity:1;visibility:visible}
 .trow.alert-high{background:rgba(255,51,86,.03)}.trow.alert-med{background:rgba(255,176,32,.02)}
 .rn{color:var(--txt3);font-size:9px}
 /* COIN cell: keep internal stack of symbol + name tight so it behaves as one column. */
@@ -264,7 +278,9 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   .f-chip{font-size:8px;padding:2px 5px}
 
   /* Table: compact columns for mobile — user horizontally scrolls to reach SCORE */
-  .thdr,.trow{grid-template-columns:22px 96px 60px 74px 46px 46px 46px 46px 48px 42px 52px;gap:3px;padding:3px 6px;font-size:9px;min-width:620px;width:max-content}
+  .thdr,.trow{grid-template-columns:22px 96px 60px 74px 46px 46px 46px 46px 48px 50px 42px 52px!important;gap:3px;padding:3px 6px;font-size:9px;min-width:680px;width:max-content}
+  .col-resize-handle{display:none!important}
+  .header-tooltip{display:none!important}
   .csym{font-size:10px}
   .cnm{font-size:7px}
   .bdg{font-size:7px;padding:1px 3px}
@@ -307,12 +323,16 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 }
 
 @media(max-width:380px){
-  /* Extra small: tighter columns but keep all 11 visible via horizontal swipe */
-  .thdr,.trow{grid-template-columns:20px 82px 54px 66px 40px 40px 40px 40px 42px 38px 46px;font-size:8px;min-width:560px;width:max-content}
+  /* Extra small: tighter columns but keep all 12 visible via horizontal swipe */
+  .thdr,.trow{grid-template-columns:20px 82px 54px 66px 40px 40px 40px 40px 42px 44px 38px 46px!important;font-size:8px;min-width:610px;width:max-content}
   .csym{font-size:9px}
   .tab{padding:5px 6px;font-size:8px}
   #topbar{padding:4px 6px}
 }
+</style>
+<style id="dynamic-cols">
+/* Default grid columns — will be overwritten by JS initColumnSystem() */
+.thdr,.trow{grid-template-columns:32px minmax(120px,1.6fr) 84px minmax(88px,1.1fr) 64px 64px 64px 64px 70px 60px 54px 70px}
 </style>
 </head>
 <body>
@@ -369,18 +389,8 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   <!-- PROSTŘEDNÍ SLOUPEC: TABULKA -->
   <div class="scanner-center">
     <div class="scan-wrap">
-      <div class="thdr">
-        <span>#</span>
-        <span>COIN</span>
-        <span>SIGNAL</span>
-        <span class="tr">PRICE</span>
-        <span class="tr">1H</span>
-        <span class="tr">4H</span>
-        <span class="tr">24H</span>
-        <span class="tr">7D</span>
-        <span class="tr">VOL%</span>
-        <span class="tr">HOT</span>
-        <span class="tr">SCORE</span>
+      <div class="thdr" id="thdr-row">
+        <!-- JS will render header cells with resize handles + tooltips -->
       </div>
       <div id="clist" style="max-height:calc(100vh - 230px);overflow-y:auto"></div>
     </div>
@@ -514,6 +524,183 @@ function getMinScoreFromStorage() {
     }
   } catch (e) {}
   return 6;
+}
+
+// ========== COLUMN DEFINITIONS & LAYOUT ENGINE (V7.4) ==========
+const COLUMN_DEFS = [
+  { key: 'rank',   label: '#',      width: 32,  align: '', flex: false },
+  { key: 'coin',   label: 'COIN',   width: null, align: '', flex: true  },  // fluid 1fr
+  { key: 'signal', label: 'SIGNAL', width: 84,  align: '', flex: false },
+  { key: 'price',  label: 'PRICE',  width: 88,  align: 'tr', flex: false },
+  { key: '1h',     label: '1H',     width: 64,  align: 'tr', flex: false },
+  { key: '4h',     label: '4H',     width: 64,  align: 'tr', flex: false },
+  { key: '24h',    label: '24H',    width: 64,  align: 'tr', flex: false },
+  { key: '7d',     label: '7D',     width: 64,  align: 'tr', flex: false },
+  { key: 'vol',    label: 'VOL%',   width: 70,  align: 'tr', flex: false },
+  { key: 'panic',  label: 'PANIC',  width: 60,  align: 'tr', flex: false,
+    tooltip: 'Composite math blend of 24h Volume Delta (50%), 1h Price Velocity (30%), and Institutional Sniping (20%). High absolute values indicate retail extremes (>+80 FOMO top risk, <-80 capitulation bounce zone).' },
+  { key: 'hot',    label: 'HOT',    width: 54,  align: 'tr', flex: false,
+    tooltip: 'Real-time attention and volatility tracking index based on immediate trading frequency spikes.' },
+  { key: 'score',  label: 'SCORE',  width: 70,  align: 'tr', flex: false,
+    tooltip: 'Primary algorithmic valuation engine. Scales 0 to 10/10 based on macro confluence indicators.' }
+];
+
+// Column order and widths persisted to localStorage
+let COL_ORDER = COLUMN_DEFS.map((_, i) => i); // indices into COLUMN_DEFS
+let COL_WIDTHS = {}; // key -> px width override (null/absent = default)
+
+function loadColumnLayout() {
+  try {
+    const savedOrder = JSON.parse(localStorage.getItem('swing_col_order_v74'));
+    if (Array.isArray(savedOrder) && savedOrder.length === COLUMN_DEFS.length) {
+      // Validate all indices present
+      const sorted = [...savedOrder].sort((a,b) => a-b);
+      if (sorted.every((v,i) => v === i)) COL_ORDER = savedOrder;
+    }
+  } catch(e) {}
+  try {
+    const savedWidths = JSON.parse(localStorage.getItem('swing_col_widths_v74'));
+    if (savedWidths && typeof savedWidths === 'object') COL_WIDTHS = savedWidths;
+  } catch(e) {}
+}
+
+function saveColumnLayout() {
+  localStorage.setItem('swing_col_order_v74', JSON.stringify(COL_ORDER));
+  localStorage.setItem('swing_col_widths_v74', JSON.stringify(COL_WIDTHS));
+}
+
+function getColWidth(def) {
+  if (def.flex) return 'minmax(120px,1.6fr)';
+  const w = COL_WIDTHS[def.key];
+  return (w != null ? w : def.width) + 'px';
+}
+
+function buildGridTemplate() {
+  return COL_ORDER.map(i => getColWidth(COLUMN_DEFS[i])).join(' ');
+}
+
+function applyGridTemplate() {
+  const tpl = buildGridTemplate();
+  const styleEl = document.getElementById('dynamic-cols');
+  styleEl.textContent = `.thdr,.trow{grid-template-columns:${tpl}}`;
+}
+
+// ========== PANIC METRIC (-100 to +100) ==========
+function calcPanic(d) {
+  const c24 = d.price_change_percentage_24h || 0;
+  const h1 = get1h(d);
+  const v = getVolPct(d);
+  // 24h Volume Delta component (50%): high volume + positive price = FOMO, high vol + negative = capitulation
+  const volDelta = clamp((v - 5) * (c24 > 0 ? 1 : -1) * 4, -100, 100) * 0.5;
+  // 1h Price Velocity (30%): rapid moves amplify panic
+  const velocity = clamp(h1 * 8, -100, 100) * 0.3;
+  // Institutional Sniping proxy (20%): OI divergence from price
+  const oi = getOiPct(d);
+  const sniping = clamp((oi - 15) * (c24 < 0 ? -3 : 2), -100, 100) * 0.2;
+  return Math.round(clamp(volDelta + velocity + sniping, -100, 100));
+}
+
+// ========== HEADER RENDER WITH RESIZE HANDLES + DRAG + TOOLTIPS ==========
+let _resizeState = null; // { colIdx, startX, startWidth }
+let _dragState = null;   // { fromOrderIdx, el }
+
+function renderHeader() {
+  const hdr = document.getElementById('thdr-row');
+  if (!hdr) return;
+  hdr.innerHTML = '';
+  COL_ORDER.forEach((defIdx, orderIdx) => {
+    const def = COLUMN_DEFS[defIdx];
+    const cell = document.createElement('div');
+    cell.className = 'thdr-cell' + (def.align ? ' ' + def.align : '');
+    cell.dataset.orderIdx = orderIdx;
+    cell.dataset.defIdx = defIdx;
+    cell.draggable = true;
+    cell.textContent = def.label;
+
+    // Tooltip
+    if (def.tooltip) {
+      const tip = document.createElement('div');
+      tip.className = 'header-tooltip';
+      tip.textContent = def.tooltip;
+      cell.appendChild(tip);
+    }
+
+    // Resize handle (not on fluid column)
+    if (!def.flex) {
+      const handle = document.createElement('div');
+      handle.className = 'col-resize-handle';
+      handle.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const currentW = COL_WIDTHS[def.key] != null ? COL_WIDTHS[def.key] : def.width;
+        _resizeState = { key: def.key, defWidth: def.width, startX: e.clientX, startWidth: currentW };
+        handle.classList.add('active');
+        document.body.classList.add('col-resizing');
+      });
+      cell.appendChild(handle);
+    }
+
+    // Drag events for reordering
+    cell.addEventListener('dragstart', (e) => {
+      if (_resizeState) { e.preventDefault(); return; }
+      _dragState = { fromOrderIdx: orderIdx, el: cell };
+      cell.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', orderIdx);
+    });
+    cell.addEventListener('dragend', () => {
+      cell.classList.remove('dragging');
+      document.querySelectorAll('.thdr-cell.drag-over').forEach(c => c.classList.remove('drag-over'));
+      _dragState = null;
+    });
+    cell.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      if (_dragState && _dragState.fromOrderIdx !== orderIdx) {
+        cell.classList.add('drag-over');
+      }
+    });
+    cell.addEventListener('dragleave', () => { cell.classList.remove('drag-over'); });
+    cell.addEventListener('drop', (e) => {
+      e.preventDefault();
+      cell.classList.remove('drag-over');
+      if (!_dragState) return;
+      const from = _dragState.fromOrderIdx;
+      const to = orderIdx;
+      if (from === to) return;
+      // Reorder: remove from old position, insert at new
+      const moved = COL_ORDER.splice(from, 1)[0];
+      COL_ORDER.splice(to, 0, moved);
+      saveColumnLayout();
+      applyGridTemplate();
+      renderHeader();
+      renderList();
+    });
+
+    hdr.appendChild(cell);
+  });
+}
+
+// Global mousemove/mouseup for resize
+document.addEventListener('mousemove', (e) => {
+  if (!_resizeState) return;
+  const delta = e.clientX - _resizeState.startX;
+  const newW = Math.max(28, _resizeState.startWidth + delta);
+  COL_WIDTHS[_resizeState.key] = newW;
+  applyGridTemplate();
+});
+document.addEventListener('mouseup', () => {
+  if (!_resizeState) return;
+  document.body.classList.remove('col-resizing');
+  document.querySelectorAll('.col-resize-handle.active').forEach(h => h.classList.remove('active'));
+  saveColumnLayout();
+  _resizeState = null;
+});
+
+function initColumnSystem() {
+  loadColumnLayout();
+  applyGridTemplate();
+  renderHeader();
 }
 
 // ========== SECTOR MAPPING ==========
@@ -1037,27 +1224,34 @@ function renderList() {
     return;
   }
 
+  // Build cell data keyed by column key so we can emit in COL_ORDER
   document.getElementById('clist').innerHTML = page.map((d, i) => {
     const s = sig(d), c24 = d.price_change_percentage_24h || 0;
-    const h1 = get1h(d), h4 = get4h(d), v = getVolPct(d), f = getFunding(d);
+    const h1 = get1h(d), h4 = get4h(d), v = getVolPct(d);
     const c7 = d.price_change_percentage_7d_in_currency || 0;
     const hot = calcHotness(d);
+    const panic = calcPanic(d);
     const sym = (d.symbol || '').toUpperCase();
     const rowCls = s.score >= 7 ? ' alert-high' : s.score >= 6 ? ' alert-med' : '';
+    const panicCol = panic > 50 ? 'var(--red)' : panic > 20 ? 'var(--amb)' : panic < -50 ? 'var(--grn)' : panic < -20 ? 'var(--cyan)' : 'var(--txt2)';
 
-    return `<div class="trow${SEL===d.id?' sel':''}${rowCls}" onclick="pickCoin('${d.id}')">
-      <span class="rn">${start + i + 1}</span>
-      <div class="coin-cell"><span class="csym">${sym}</span><span class="cnm">${d.name || d.id}</span></div>
-      <span class="sig-cell"><span class="bdg ${s.cls}">${s.label}</span></span>
-      <span class="tr" style="font-weight:500">${fmt(d.current_price)}</span>
-      <span class="tr ${h1>=0?'pos':'neg'}">${fp(h1,1)}</span>
-      <span class="tr ${h4>=0?'pos':'neg'}">${fp(h4,1)}</span>
-      <span class="tr ${c24>=0?'pos':'neg'}">${fp(c24,1)}</span>
-      <span class="tr ${c7>=0?'pos':'neg'}">${fp(c7,1)}</span>
-      <span class="tr" style="color:${v>7?'var(--amb)':'var(--txt2)'}">${v.toFixed(1)}</span>
-      <span class="tr" style="color:${hot>60?'var(--red)':hot>30?'var(--amb)':'var(--txt2)'}"><b>${hot}</b></span>
-      <span class="tr" style="color:${s.score>=5?'var(--grn)':s.score>=3?'var(--amb)':'var(--txt2)'};font-weight:700">${s.score}/10</span>
-    </div>`;
+    const cellMap = {
+      rank:   `<span class="rn">${start + i + 1}</span>`,
+      coin:   `<div class="coin-cell"><span class="csym">${sym}</span><span class="cnm">${d.name || d.id}</span></div>`,
+      signal: `<span class="sig-cell"><span class="bdg ${s.cls}">${s.label}</span></span>`,
+      price:  `<span class="tr" style="font-weight:500">${fmt(d.current_price)}</span>`,
+      '1h':   `<span class="tr ${h1>=0?'pos':'neg'}">${fp(h1,1)}</span>`,
+      '4h':   `<span class="tr ${h4>=0?'pos':'neg'}">${fp(h4,1)}</span>`,
+      '24h':  `<span class="tr ${c24>=0?'pos':'neg'}">${fp(c24,1)}</span>`,
+      '7d':   `<span class="tr ${c7>=0?'pos':'neg'}">${fp(c7,1)}</span>`,
+      vol:    `<span class="tr" style="color:${v>7?'var(--amb)':'var(--txt2)'}">${v.toFixed(1)}</span>`,
+      panic:  `<span class="tr" style="color:${panicCol};font-weight:600">${panic > 0 ? '+' : ''}${panic}</span>`,
+      hot:    `<span class="tr" style="color:${hot>60?'var(--red)':hot>30?'var(--amb)':'var(--txt2)'}"><b>${hot}</b></span>`,
+      score:  `<span class="tr" style="color:${s.score>=5?'var(--grn)':s.score>=3?'var(--amb)':'var(--txt2)'};font-weight:700">${s.score}/10</span>`
+    };
+
+    const cells = COL_ORDER.map(idx => cellMap[COLUMN_DEFS[idx].key]).join('');
+    return `<div class="trow${SEL===d.id?' sel':''}${rowCls}" onclick="pickCoin('${d.id}')">${cells}</div>`;
   }).join('');
 
   // Pagination
@@ -1087,6 +1281,9 @@ function pickCoin(id) {
   const fc = f < -0.005 ? 'var(--red)' : f > 0.035 ? 'var(--amb)' : 'var(--grn)';
   const sc = s.score >= 5 ? 'var(--grn)' : s.score >= 3 ? 'var(--amb)' : 'var(--txt2)';
   const hotCol = hot > 60 ? 'var(--red)' : hot > 30 ? 'var(--amb)' : 'var(--grn)';
+  const panic = calcPanic(d);
+  const panicCol = panic > 50 ? 'var(--red)' : panic > 20 ? 'var(--amb)' : panic < -50 ? 'var(--grn)' : panic < -20 ? 'var(--cyan)' : 'var(--txt2)';
+  const panicLabel = panic > 80 ? 'EXTREME FOMO' : panic > 50 ? 'HIGH FOMO' : panic < -80 ? 'CAPITULATION' : panic < -50 ? 'EXTREME FEAR' : panic < -20 ? 'BEARISH' : panic > 20 ? 'BULLISH' : 'NEUTRAL';
 
   document.getElementById('dlbl').textContent = sym;
   document.getElementById('dcon').innerHTML = `
@@ -1114,6 +1311,7 @@ function pickCoin(id) {
     <div class="mgrid">
       <div class="mc"><div class="ml">SIGNAL</div><div class="mv"><span class="bdg ${s.cls}">${s.label}</span></div></div>
       <div class="mc"><div class="ml">SCORE / HOTNESS</div><div class="mv"><span style="color:${sc}">${s.score}/10</span> · <span style="color:${hotCol}">${hot}</span></div></div>
+      <div class="mc"><div class="ml">PANIC INDEX</div><div class="mv" style="color:${panicCol};font-weight:600">${panic > 0 ? '+' : ''}${panic}</div><div class="ms">${panicLabel}</div></div>
       <div class="mc"><div class="ml">1H / 4H</div><div class="mv" style="font-size:11px"><span class="${h1>=0?'pos':'neg'}">${fp(h1,1)}</span> / <span class="${h4>=0?'pos':'neg'}">${fp(h4,1)}</span></div></div>
       <div class="mc"><div class="ml">7D</div><div class="mv ${c7>=0?'pos':'neg'}">${fp(c7)}</div></div>
       <div class="mc"><div class="ml">FUNDING</div><div class="mv" style="color:${fc}">${(f*100).toFixed(3)}%</div><div class="ms">${f<-0.01?'SHORT overload':f>0.04?'LONG prehrity':'neutralni'}</div></div>
@@ -1544,6 +1742,7 @@ async function doRefresh() {
 // ========== INIT ==========
 async function init() {
   loadTgConfig();
+  initColumnSystem();
 
   // Request notification permission
   if ('Notification' in window && Notification.permission === 'default') {
