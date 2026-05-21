@@ -1063,16 +1063,19 @@ function calcPanic(d) {
     return clamp(Math.round(raw), -100, 100);
   } catch { return 0; }
 }
+// V7.3 retiered bands:
+//   ≥ +80  Extreme FOMO          — neon green bg + .panic-glow-buy pulse
+//   +20..+79 Mild Buy Pressure   — soft green text, no glow
+//   −19..+19 Neutral             — muted gray text
+//   −20..−79 Mild Panic Sell     — soft red text, no glow
+//   ≤ −80  Capitulation          — crimson bg + .panic-glow-sell flash
 function panicMeta(score) {
   const s = Number.isFinite(score) ? score : 0;
-  const glow = Math.abs(s) >= PANIC_GLOW_THRESHOLD;
-  let cls, label;
-  if (s >=  80) { cls = 'panic-buy-extreme';  label = 'FOMO'; }
-  else if (s >=  40) { cls = 'panic-buy';     label = 'BUY';  }
-  else if (s <= -80) { cls = 'panic-sell-extreme'; label = 'CAPI'; }
-  else if (s <= -40) { cls = 'panic-sell';    label = 'SELL'; }
-  else               { cls = 'panic-neut';    label = '·';    }
-  return { cls, label, glow };
+  if (s >= 80)                 return { cls: 'panic-tier-extreme-buy',  label: 'FOMO', glow: true,  glowCls: 'panic-glow-buy'  };
+  if (s >= 20)                 return { cls: 'panic-tier-buy',          label: 'BUY',  glow: false, glowCls: ''                 };
+  if (s <= -80)                return { cls: 'panic-tier-extreme-sell', label: 'CAPI', glow: true,  glowCls: 'panic-glow-sell' };
+  if (s <= -20)                return { cls: 'panic-tier-sell',         label: 'SELL', glow: false, glowCls: ''                 };
+  return                            { cls: 'panic-tier-neutral',         label: '·',    glow: false, glowCls: ''                 };
 }
 // V7.1 — STATIC PANIC PROXY
 // Until the first WS delta lands, |Δvol24h%| is 0 for every coin
@@ -1131,7 +1134,62 @@ function panicBadge(score) {
   const m = panicMeta(score);
   const s = Number.isFinite(score) ? score : 0;
   const sign = s > 0 ? '+' : '';
-  return `<span class="panic-cell ${m.cls}${m.glow ? ' panic-glow' : ''}" title="Panic Score ${sign}${s} (${m.label})">${sign}${s}</span>`;
+  const glow = m.glow ? ` ${m.glowCls}` : '';
+  return `<span class="panic-cell ${m.cls}${glow}" title="Panic Score ${sign}${s} (${m.label}) — click the [?] in the header for the manual.">${sign}${s}</span>`;
+}
+
+// ─────────────────────────────────────────────────────────────
+// V7.3 — PANIC MANUAL MODAL
+// Lightweight overlay; markup lives in index.html and stays hidden
+// until openPanicManual() flips the `is-open` class. No framework,
+// no portals — opens / closes by class toggle so the rest of the
+// app keeps running underneath.
+// ─────────────────────────────────────────────────────────────
+function openPanicManual() {
+  const el = document.getElementById('panic-manual');
+  if (!el) return;
+  el.classList.add('is-open');
+  el.setAttribute('aria-hidden', 'false');
+  // Defer focus so the close button is reachable by keyboard users
+  // without scrolling the page (focus moves the viewport on Chrome
+  // when the target has not yet been laid out).
+  requestAnimationFrame(() => {
+    const closeBtn = el.querySelector('[data-panic-close]');
+    if (closeBtn && typeof closeBtn.focus === 'function') closeBtn.focus();
+  });
+}
+function closePanicManual() {
+  const el = document.getElementById('panic-manual');
+  if (!el) return;
+  el.classList.remove('is-open');
+  el.setAttribute('aria-hidden', 'true');
+}
+function initPanicManual() {
+  // Global keyboard close (Escape). Single global listener avoids
+  // re-binding on every modal open/close cycle.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const el = document.getElementById('panic-manual');
+      if (el && el.classList.contains('is-open')) closePanicManual();
+    }
+  });
+  // Single delegated click listener for BOTH open ([data-panic-help])
+  // and close ([data-panic-close]) actions. Delegation means the
+  // SSR-fallback [?] button works immediately on first paint, before
+  // renderHeader() has had a chance to attach per-button listeners.
+  document.addEventListener('click', (e) => {
+    const target = e.target;
+    if (!target || !target.closest) return;
+    if (target.closest('[data-panic-close]')) {
+      e.preventDefault();
+      closePanicManual();
+      return;
+    }
+    if (target.closest('[data-panic-help]')) {
+      e.preventDefault();
+      openPanicManual();
+    }
+  });
 }
 
 function getSetupValidity(d) {
@@ -1477,19 +1535,29 @@ function renderList() {
         <div class="te-cell"><span class="te-lbl">VOL</span><span class="te-val">${_esc(fmt(qv))}</span></div>
         <div class="te-cell"><span class="te-lbl">HOT</span><span class="te-val" style="color:${hot>60?'var(--red)':'var(--txt2)'}">${hot}</span></div>
       </div>`;
-      // V7.1: 10-cell DOM chain (9 visible + toggle). DOM order is the
-      // single source of truth — neither CSS `order:` nor display:none
-      // moves a cell on desktop. 1H/4H/12H/7D live in the expand row.
+      // V7.3: cell content built from the live _columnOrder registry
+      // so a user reorder repaints with zero template edits. Every
+      // visible cell carries a `data-col` attribute (mobile @media
+      // rules + WS flash selectors target it) plus the legacy
+      // `data-cell` alias for cells the stream pipeline mutates.
+      const cellHTML = {
+        rank:   `<span data-col="rank" class="rn">${start + i + 1}</span>`,
+        coin:   `<div data-col="coin" class="coin-cell"><span class="csym">${escSym}${exchBadge}</span><span class="cnm">${escName}</span></div>`,
+        signal: `<span data-col="signal" class="sig-cell"><span class="bdg ${escCls}">${escLabel}</span>${divTag}${snipTag}</span>`,
+        score:  `<span data-col="score" data-cell="score" class="tr" style="color:${s.score>=6?'var(--grn)':'var(--txt2)'}"><b>${s.score}/10</b></span>`,
+        panic:  `<span data-col="panic" data-cell="panic" class="tr">${panicBadge(panicScore)}</span>`,
+        price:  `<span data-col="price" data-cell="price" class="tr">${_esc(fmt(price))}</span>`,
+        c1:     `<span data-col="c1"  data-cell="c1"  class="tr">${tfCell(d._c1)}</span>`,
+        c4:     `<span data-col="c4"  data-cell="c4"  class="tr">${tfCell(d._c4)}</span>`,
+        c12:    `<span data-col="c12" data-cell="c12" class="tr">${tfCell(d._c12)}</span>`,
+        c24:    `<span data-col="c24" data-cell="c24" class="tr">${tfCell(d._c24 ?? d.price_change_percentage_24h)}</span>`,
+        c7d:    `<span data-col="c7d" data-cell="c7d" class="tr">${tfCell(d._c7d)}</span>`,
+        qv:     `<span data-col="qv"  data-cell="qv"  class="tr">${_esc(fmt(qv))}</span>`,
+        hot:    `<span data-col="hot" class="tr" style="color:${hot>60?'var(--red)':'var(--txt2)'}"><b>${hot}</b></span>`,
+      };
+      const cells = _columnOrder.map(k => cellHTML[k] || '').join('');
       htmls.push(`<div class="trow${SEL===d.id?' sel':''}${s.score>=7?' alert-high':s.score>=6?' alert-med':''}" data-coin-id="${idAttr}">
-        <span class="rn">${start + i + 1}</span>
-        <div class="coin-cell"><span class="csym">${escSym}${exchBadge}</span><span class="cnm">${escName}</span></div>
-        <span class="sig-cell"><span class="bdg ${escCls}">${escLabel}</span>${divTag}${snipTag}</span>
-        <span class="tr" data-cell="score" style="color:${s.score>=6?'var(--grn)':'var(--txt2)'}"><b>${s.score}/10</b></span>
-        <span class="tr" data-cell="panic">${panicBadge(panicScore)}</span>
-        <span class="tr" data-cell="price">${_esc(fmt(price))}</span>
-        <span class="tr" data-cell="c24">${tfCell(d._c24 ?? d.price_change_percentage_24h)}</span>
-        <span class="tr" data-cell="qv">${_esc(fmt(qv))}</span>
-        <span class="tr" style="color:${hot>60?'var(--red)':'var(--txt2)'}"><b>${hot}</b></span>
+        ${cells}
         <span class="trow-toggle" data-trow-toggle="1" aria-label="Expand">⋯</span>
       </div>${expandRow}`);
     } catch (err) {
@@ -3128,7 +3196,8 @@ async function initTerminalApp() {
   if (_appRunning) return;
   _appRunning = true;
   loadTgConfig();
-  initResizableColumns();
+  initColumnDnD();           // V7.3 — drag-to-reorder header
+  initPanicManual();         // V7.3 — [?] info modal
   initHotnessTooltip();
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
   fetchBinancePairs();
@@ -3353,154 +3422,188 @@ document.getElementById('briefing-trigger')?.addEventListener('click', () => {
   });
 })();
 
-// ========== TARGET 3: RESIZABLE COLUMNS ==========
+// ─────────────────────────────────────────────────────────────
+// V7.3 — COLUMN REGISTRY + HTML5 DRAG-TO-REORDER ENGINE
 //
-// Design notes (V4):
-//   • Handles always sit on the LEFT edge of col[i] — dragging the
-//     handle moves the seam between col[i-1] and col[i]. Visually
-//     consistent because every handle uses the same anchor.
-//   • The first two cells (# and COIN) are explicitly opted out:
-//     resizing the row-number col has no value, and the user
-//     wants COIN's left edge to stay flush against the row marker.
-//   • Saved widths are validated against the live column count — a
-//     stale localStorage entry from a different layout is discarded
-//     instead of being smeared across the wrong columns.
-//   • Drag math is purely local (only the two adjacent columns
-//     change), so total row width never grows from a drag — that
-//     prevents the SCORE column from being shoved past the right
-//     edge of the container.
-const MIN_COL_PX = 50;
+// The V4 mousedown column-resize handle was purged in V7.3 because
+// it surfaced as a dead-looking 1px vertical seam in the header until
+// the user happened to hover the exact right pixel. It also forced
+// the row template to hard-code column order, which made adding a
+// new column a 3-file edit. V7.3 unifies header + row rendering
+// behind a single COLUMN_DEFS map and lets the user drag-reorder
+// columns directly in the header. Order survives reloads via
+// `localStorage[COLUMN_ORDER_STORAGE_KEY]`.
+//
+// Single source of truth for column metadata. width values are CSS
+// grid track expressions — `minmax(120px, 1fr)` for the COIN cell
+// gives it the slack budget; everything else is a fixed pixel size.
+// `dragOK:false` pins a column (# and COIN) so dragging the rank
+// marker into the middle of the row stays impossible.
+const COLUMN_DEFS = {
+  rank:   { label: '#',       width: '32px',              tip: '',                                                                                                  align: 'left',  dragOK: false },
+  coin:   { label: 'COIN',    width: 'minmax(120px,1fr)', tip: '',                                                                                                  align: 'left',  dragOK: false },
+  signal: { label: 'SIGNAL',  width: '80px',              tip: '',                                                                                                  align: 'left',  dragOK: true  },
+  score:  { label: 'SCORE',   width: '64px',              tip: 'Signal Score 0-10',                                                                                 align: 'right', dragOK: true  },
+  panic:  { label: 'PANIC',   width: '70px',              tip: 'V7.0 Panic Indicator: -100 (Capitulation) … 0 (Neutral) … +100 (Extreme FOMO). Click [?] for the manual.', align: 'right', dragOK: true  },
+  price:  { label: 'PRICE',   width: '80px',              tip: '',                                                                                                  align: 'right', dragOK: true  },
+  c1:     { label: '1H %',    width: '56px',              tip: '1h price change %',                                                                                 align: 'right', dragOK: true  },
+  c4:     { label: '4H %',    width: '56px',              tip: '4h price change % (derived from CoinGecko sparkline)',                                              align: 'right', dragOK: true  },
+  c12:    { label: '12H %',   width: '56px',              tip: '12h price change % (derived from CoinGecko sparkline)',                                             align: 'right', dragOK: true  },
+  c24:    { label: '24H %',   width: '60px',              tip: '',                                                                                                  align: 'right', dragOK: true  },
+  c7d:    { label: '7D %',    width: '56px',              tip: '7d price change %',                                                                                 align: 'right', dragOK: true  },
+  qv:     { label: '24H VOL', width: '90px',              tip: '24h Quote Volume (USD)',                                                                            align: 'right', dragOK: true  },
+  hot:    { label: 'HOT',     width: '50px',              tip: '',                                                                                                  align: 'right', dragOK: true  },
+};
+// Default visual sequence. The mobile-only expand toggle is appended
+// AFTER this chain in DOM order and never participates in reorder.
+const DEFAULT_COLUMN_ORDER = ['rank','coin','signal','score','panic','price','c1','c4','c12','c24','c7d','qv','hot'];
+const COLUMN_ORDER_STORAGE_KEY = 'swing_col_order_v73';
 
-function initResizableColumns() {
-  const STORAGE_KEY = 'swing_col_widths';
-  // The COIN column (index 1) is the "flex" cell — it absorbs slack
-  // via minmax(width, 1fr). Every other column is a fixed pixel width.
-  const FLEX_COL = 1;
-  // Cells we never attach a drag handle to. # is the row marker, COIN
-  // is the first content column whose left edge we want flush.
-  const NO_HANDLE_INDICES = new Set([0, 1]);
+let _columnOrder = (() => {
+  try {
+    const raw = localStorage.getItem(COLUMN_ORDER_STORAGE_KEY);
+    if (!raw) return DEFAULT_COLUMN_ORDER.slice();
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return DEFAULT_COLUMN_ORDER.slice();
+    // Drop anything that doesn't map to a current COLUMN_DEFS entry —
+    // protects against a column being removed in a future sprint
+    // while the user still has the old key cached.
+    const cleaned = arr.filter(k => COLUMN_DEFS[k]);
+    // Append any defs the saved order didn't know about so a new
+    // column added in a future release still shows up by default
+    // rather than silently disappearing.
+    const seen = new Set(cleaned);
+    for (const k of DEFAULT_COLUMN_ORDER) if (!seen.has(k)) cleaned.push(k);
+    return cleaned.length ? cleaned : DEFAULT_COLUMN_ORDER.slice();
+  } catch { return DEFAULT_COLUMN_ORDER.slice(); }
+})();
 
-  const readSaved = () => {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)); }
-    catch { return null; }
-  };
-
-  function applyWidths(widths) {
-    if (!Array.isArray(widths) || !widths.length) return;
-    const tpl = widths
-      .map((w, i) => {
-        const px = Math.max(MIN_COL_PX, Math.round(Number(w) || MIN_COL_PX));
-        return i === FLEX_COL ? `minmax(${px}px, 1fr)` : `${px}px`;
-      })
-      .join(' ');
-    let styleEl = document.getElementById('dynamic-cols');
-    if (!styleEl) {
-      styleEl = document.createElement('style');
-      styleEl.id = 'dynamic-cols';
-      document.head.appendChild(styleEl);
-    }
-    styleEl.textContent = `#v-scanner .thdr, #v-scanner .trow, #clist .trow { grid-template-columns: ${tpl} !important; }`;
-  }
-
-  function getColWidths() {
-    const hdr = document.querySelector('.thdr');
-    if (!hdr) return null;
-    return Array.from(hdr.children).map(c => c.offsetWidth);
-  }
-
-  // Apply saved widths if their length matches the current header.
-  // A mismatch (e.g. 10-col layout cached, 12-col layout live) means
-  // a layout migration happened — we drop the stale entry rather
-  // than apply a misaligned template.
-  function maybeApplySaved() {
-    const hdr = document.querySelector('.thdr');
-    if (!hdr) return;
-    const expected = hdr.children.length;
-    const saved = readSaved();
-    if (Array.isArray(saved) && saved.length === expected) {
-      applyWidths(saved);
-    } else if (saved) {
-      console.info('[RESIZE] Discarding stale saved widths (expected', expected, 'got', saved.length, ')');
-      try { localStorage.removeItem(STORAGE_KEY); } catch {}
-    }
-  }
-
-  // Observe the header row and attach drag handles when it appears.
-  const observer = _ObserverRegistry.add(new MutationObserver(() => {
-    const hdr = document.querySelector('.thdr');
-    if (!hdr || hdr.dataset.resizable === '1') return;
-    hdr.dataset.resizable = '1';
-    flagNoHandleCells(hdr);
-    attachHandles(hdr);
-    maybeApplySaved();
-  }));
-  observer.observe(document.body, { childList: true, subtree: true });
-
-  function flagNoHandleCells(hdr) {
-    Array.from(hdr.children).forEach((col, i) => {
-      if (NO_HANDLE_INDICES.has(i)) col.classList.add('no-handle');
-      else col.classList.remove('no-handle');
-    });
-  }
-
-  function attachHandles(hdr) {
-    const cols = Array.from(hdr.children);
-    // Remove any old handles before adding fresh ones.
-    cols.forEach(col => {
-      const existing = col.querySelector('.col-resize-handle');
-      if (existing) existing.remove();
-    });
-
-    cols.forEach((col, i) => {
-      if (NO_HANDLE_INDICES.has(i)) return;
-      col.style.position = 'relative';
-      const handle = document.createElement('div');
-      handle.className = 'col-resize-handle';
-      col.appendChild(handle);
-
-      handle.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const startX = e.clientX;
-        const prevW = cols[i - 1]?.offsetWidth || MIN_COL_PX;
-        const startW = col.offsetWidth;
-        document.body.style.cursor = 'col-resize';
-        document.body.style.userSelect = 'none';
-
-        const onMove = (ev) => {
-          const dx = ev.clientX - startX;
-          // Clamp so neither neighbor can shrink below MIN_COL_PX.
-          let validDx = dx;
-          if (prevW + validDx < MIN_COL_PX) validDx = MIN_COL_PX - prevW;
-          if (startW - validDx < MIN_COL_PX) validDx = startW - MIN_COL_PX;
-
-          const widths = getColWidths();
-          if (!widths) return;
-          widths[i - 1] = prevW + validDx;
-          widths[i] = startW - validDx;
-          applyWidths(widths);
-        };
-        const onUp = () => {
-          document.body.style.cursor = '';
-          document.body.style.userSelect = '';
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-          const widths = getColWidths();
-          if (Array.isArray(widths) && widths.length) {
-            try { localStorage.setItem(STORAGE_KEY, JSON.stringify(widths)); } catch {}
-          }
-        };
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-      });
-    });
-  }
+function _persistColumnOrder() {
+  try { localStorage.setItem(COLUMN_ORDER_STORAGE_KEY, JSON.stringify(_columnOrder)); } catch {}
 }
 
-// Global utility to reset the terminal layout if columns are broken
+function _gridTemplateFromOrder() {
+  // Trailing 0px slot is the mobile expand toggle; it always closes
+  // the row in DOM order so the mobile @media rule can show it as
+  // 24px without recalculating its position.
+  return _columnOrder.map(k => COLUMN_DEFS[k]?.width || '60px').join(' ') + ' 0px';
+}
+
+function _applyGridTemplate() {
+  let el = document.getElementById('dynamic-cols');
+  if (!el) {
+    el = document.createElement('style');
+    el.id = 'dynamic-cols';
+    document.head.appendChild(el);
+  }
+  const tpl = _gridTemplateFromOrder();
+  // Desktop-only override; the mobile @media block keeps full control
+  // below 640px. `!important` defeats the static base rule in
+  // terminal.css so a user reorder always wins.
+  el.textContent = `@media(min-width:641px){
+    .scan-wrap .thdr, .scan-wrap .trow {
+      grid-template-columns: ${tpl} !important;
+    }
+  }`;
+}
+
+// Rebuild the header from _columnOrder. The PANIC header carries a
+// permanent [?] button — even after the user moves the column to a
+// different slot — because the manual modal needs a stable anchor.
+function renderHeader() {
+  const hdr = document.querySelector('.thdr');
+  if (!hdr) return;
+  const cells = _columnOrder.map(k => {
+    const def = COLUMN_DEFS[k];
+    if (!def) return '';
+    const tipAttr = def.tip ? ` title="${_esc(def.tip)}"` : '';
+    const dragAttr = def.dragOK ? ' draggable="true"' : '';
+    const noHandle = def.dragOK ? '' : ' class="no-handle"';
+    const classes = [];
+    if (def.align === 'right') classes.push('tr');
+    if (!def.dragOK) classes.push('no-handle');
+    const classAttr = classes.length ? ` class="${classes.join(' ')}"` : '';
+    const help = k === 'panic'
+      ? ' <button type="button" class="panic-help-btn" data-panic-help aria-label="Open PANIC manual">?</button>'
+      : '';
+    const hotTip = k === 'hot' ? ' data-hot-tip' : '';
+    return `<span data-col="${k}"${classAttr}${dragAttr}${tipAttr}${hotTip}>${_esc(def.label)}${help}</span>`;
+  }).join('');
+  hdr.innerHTML = cells
+    + '<span class="trow-toggle-hdr no-handle" aria-hidden="true">⋯</span>';
+  _attachColumnDnD();
+}
+
+function _attachColumnDnD() {
+  const hdr = document.querySelector('.thdr');
+  if (!hdr) return;
+  let srcKey = null;
+
+  hdr.querySelectorAll('[data-col]').forEach(el => {
+    const key = el.dataset.col;
+    const def = COLUMN_DEFS[key];
+    if (!def || !def.dragOK) return;
+
+    el.addEventListener('dragstart', (e) => {
+      srcKey = key;
+      el.classList.add('col-dragging');
+      try {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', key);
+      } catch {}
+    });
+    el.addEventListener('dragend', () => {
+      hdr.querySelectorAll('.col-drop-target').forEach(n => n.classList.remove('col-drop-target'));
+      el.classList.remove('col-dragging');
+      srcKey = null;
+    });
+    el.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = 'move'; } catch {}
+      hdr.querySelectorAll('.col-drop-target').forEach(n => n.classList.remove('col-drop-target'));
+      el.classList.add('col-drop-target');
+    });
+    el.addEventListener('dragleave', () => {
+      el.classList.remove('col-drop-target');
+    });
+    el.addEventListener('drop', (e) => {
+      e.preventDefault();
+      el.classList.remove('col-drop-target');
+      const sk = srcKey || (e.dataTransfer && e.dataTransfer.getData && e.dataTransfer.getData('text/plain'));
+      const dk = key;
+      if (!sk || !dk || sk === dk) return;
+      const from = _columnOrder.indexOf(sk);
+      const to   = _columnOrder.indexOf(dk);
+      if (from < 0 || to < 0) return;
+      _columnOrder.splice(to, 0, _columnOrder.splice(from, 1)[0]);
+      _persistColumnOrder();
+      _applyGridTemplate();
+      renderHeader();
+      try { renderList(); } catch {}
+    });
+  });
+
+  // The [?] help button uses global delegation (see initPanicManual)
+  // — no per-button binding needed, so a header rebuild never has to
+  // re-attach a click handler for it.
+}
+
+// One-time bootstrap of the V7.3 column engine. Safe to call before
+// the header DOM is in the document — renderHeader() looks up the
+// element lazily and bails if absent.
+function initColumnDnD() {
+  _applyGridTemplate();
+  renderHeader();
+}
+
+// Reset action exposed for the user-facing "reset layout" footer link
+// so a broken order can be flushed without devtools.
 window.resetLayout = function() {
-  localStorage.removeItem('swing_col_widths');
-  location.reload();
+  try { localStorage.removeItem(COLUMN_ORDER_STORAGE_KEY); } catch {}
+  _columnOrder = DEFAULT_COLUMN_ORDER.slice();
+  _applyGridTemplate();
+  renderHeader();
+  try { renderList(); } catch {}
 };
 
 // ========== TARGET 4: HOTNESS TOOLTIP ==========

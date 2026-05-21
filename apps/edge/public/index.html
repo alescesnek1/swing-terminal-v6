@@ -186,21 +186,27 @@
         <!-- CENTER PAN -->
         <div class="scanner-center">
           <div class="scan-wrap" style="flex:1">
-            <!-- V7.1: hyper-compact 9-column desktop chain. SCORE + PANIC
-                 are placed directly between SIGNAL and PRICE so the two
-                 composite metrics can be cross-examined without eye
-                 travel across volume / hotness columns. 1H / 4H / 12H /
-                 7D windows moved to the .trow-expand sub-row. -->
-            <div class="thdr">
-              <span>#</span>
-              <span>COIN</span>
-              <span>SIGNAL</span>
-              <span class="tr" title="Signal Score 0-10">SCORE</span>
-              <span class="tr" title="V7.0 Panic Indicator: -100 (Capitulation) … 0 (Neutral) … +100 (Extreme FOMO). Cross-reference with SCORE.">PANIC</span>
-              <span class="tr">PRICE</span>
-              <span class="tr">24H %</span>
-              <span class="tr" title="24h Quote Volume (USD)">24H VOL</span>
-              <span class="tr" data-hot-tip title="">HOT</span>
+            <!-- V7.3: header is populated by renderHeader() from the
+                 COLUMN_DEFS registry — DOM order = _columnOrder. The
+                 user can drag headers to reorder; default chain is
+                 [# | COIN | SIGNAL | SCORE | PANIC | PRICE | 1H | 4H
+                  | 12H | 24H | 7D | 24H VOL | HOT]. Inline children
+                 below are a static SSR fallback so the page is not
+                 visibly blank between markup parse and JS boot. -->
+            <div class="thdr" id="scanner-thdr">
+              <span data-col="rank" class="no-handle">#</span>
+              <span data-col="coin" class="no-handle">COIN</span>
+              <span data-col="signal" draggable="true">SIGNAL</span>
+              <span data-col="score" class="tr" draggable="true" title="Signal Score 0-10">SCORE</span>
+              <span data-col="panic" class="tr" draggable="true" title="V7.0 Panic Indicator: -100 (Capitulation) … 0 (Neutral) … +100 (Extreme FOMO).">PANIC <button type="button" class="panic-help-btn" data-panic-help aria-label="Open PANIC manual">?</button></span>
+              <span data-col="price" class="tr" draggable="true">PRICE</span>
+              <span data-col="c1"  class="tr" draggable="true" title="1h price change %">1H %</span>
+              <span data-col="c4"  class="tr" draggable="true" title="4h price change % (derived from CoinGecko sparkline)">4H %</span>
+              <span data-col="c12" class="tr" draggable="true" title="12h price change % (derived from CoinGecko sparkline)">12H %</span>
+              <span data-col="c24" class="tr" draggable="true">24H %</span>
+              <span data-col="c7d" class="tr" draggable="true" title="7d price change %">7D %</span>
+              <span data-col="qv"  class="tr" draggable="true" title="24h Quote Volume (USD)">24H VOL</span>
+              <span data-col="hot" class="tr" draggable="true" data-hot-tip>HOT</span>
               <span class="trow-toggle-hdr no-handle" aria-hidden="true">⋯</span>
             </div>
             <div id="clist"></div>
@@ -540,6 +546,66 @@
           <span class="f-chip" onclick="LiveFeed.setFilter('ai',this)">🧠 AI</span>
         </div>
         <div class="lf-feed" id="live-feed-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- V7.3 — PANIC MANUAL MODAL (toggled by the [?] button next to
+       the PANIC header). The backdrop and the close X both carry
+       data-panic-close, picked up by a single delegated listener
+       inside initPanicManual() in terminal.js. -->
+  <div id="panic-manual" class="panic-modal" role="dialog" aria-modal="true" aria-labelledby="panic-modal-title" aria-hidden="true">
+    <div class="panic-modal__backdrop" data-panic-close></div>
+    <div class="panic-modal__sheet" role="document">
+      <header class="panic-modal__hd">
+        <h2 id="panic-modal-title">PANIC INDICATOR — MANUAL</h2>
+        <button type="button" class="panic-modal__x" data-panic-close aria-label="Close manual">×</button>
+      </header>
+      <div class="panic-modal__body">
+        <section>
+          <h3>How it is calculated</h3>
+          <p>Composite mathematical blend of three orthogonal pressure signals:</p>
+          <ul>
+            <li><b>50&nbsp;%</b> — 24-hour rolling <em>Volume Delta</em> (cohort-relative spike magnitude, signed by price direction).</li>
+            <li><b>30&nbsp;%</b> — 1-hour <em>Price Velocity</em> (signed percentage change over the last hour).</li>
+            <li><b>20&nbsp;%</b> — Institutional <em>Orderbook Sniping</em> anomalies (bid-wall proximity × wall confidence).</li>
+          </ul>
+          <p class="panic-modal__formula"><code>panic = 0.5 · sign(c<sub>1h</sub>) · |Δvol<sub>24h</sub>|  +  0.3 · c<sub>1h</sub>  +  0.2 · sniper<sub>prox</sub></code></p>
+          <p>Result clamps to <code>−100 … +100</code>. <code>0</code> = neutral, no quantitative edge. Until live WebSocket frames arrive, a static proxy seeded from cohort-relative 24h volatility and volume z-score keeps the column populated.</p>
+        </section>
+
+        <section>
+          <h3>How to trade it</h3>
+
+          <div class="panic-modal__band panic-modal__band--extreme-buy">
+            <b>+80 … +100&nbsp;&nbsp;·&nbsp;&nbsp;Extreme FOMO</b>
+            <p>Peak retail FOMO. High risk of an immediate local blow-off top. Consider taking profits or scaling out of leveraged longs. Do NOT chase market-orders here.</p>
+          </div>
+
+          <div class="panic-modal__band panic-modal__band--buy">
+            <b>+20 … +79&nbsp;&nbsp;·&nbsp;&nbsp;Mild Buying Pressure</b>
+            <p>Crowd is bid-side. Trend-follow only with confirmation from SCORE ≥ 6 (BUY label) and a supportive market REGIME.</p>
+          </div>
+
+          <div class="panic-modal__band panic-modal__band--neutral">
+            <b>−19 … +19&nbsp;&nbsp;·&nbsp;&nbsp;Neutral</b>
+            <p>No quantitative panic edge. Trade on structure, not on this number.</p>
+          </div>
+
+          <div class="panic-modal__band panic-modal__band--sell">
+            <b>−79 … −20&nbsp;&nbsp;·&nbsp;&nbsp;Mild Panic Selling</b>
+            <p>Crowd is dumping. SHORT setups valid with SCORE ≥ 6 (SHORT label). Do NOT catch a falling knife on spot.</p>
+          </div>
+
+          <div class="panic-modal__band panic-modal__band--extreme-sell">
+            <b>−100 … −80&nbsp;&nbsp;·&nbsp;&nbsp;Capitulation / Panic Sell</b>
+            <p>Blood in the streets. High statistical probability of a sharp mean-reversion bounce. Prime zone for sniper long entries or staged spot accumulation — size with the regime-appropriate risk envelope.</p>
+          </div>
+        </section>
+
+        <footer class="panic-modal__ft">
+          <small>Press <kbd>Esc</kbd> or click outside this card to close.</small>
+        </footer>
       </div>
     </div>
   </div>

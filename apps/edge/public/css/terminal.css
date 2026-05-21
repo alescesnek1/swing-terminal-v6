@@ -79,18 +79,18 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .scan-wrap{overflow-x:auto;overflow-y:visible;white-space:nowrap;-webkit-overflow-scrolling:touch;position:relative;width:100%;padding-right:40px;}
 .scan-wrap .thdr,.scan-wrap .trow{white-space:nowrap;}
 @media(min-width:641px){
-  /* V7.1: 10-col compact layout fits comfortably in 720px so the
-     scanner-center pane no longer needs horizontal scroll on common
-     desktop widths. */
-  .scan-wrap .thdr,.scan-wrap .trow{min-width:720px;}
+  /* V7.3 — full 13-column chain + toggle. */
+  .scan-wrap .thdr,.scan-wrap .trow{min-width:980px;}
 }
 .thdr, .trow{
   display:grid;
-  /* V7.1 — 10 cells in this DOM order:
-     # · COIN · SIGNAL · SCORE · PANIC · PRICE · 24H% · 24H VOL · HOT · toggle
-     SCORE + PANIC sit side-by-side at cols 4-5 by spec.
-     The toggle is the mobile-only expand handle, 0px on desktop. */
-  grid-template-columns:32px minmax(120px,1fr) 80px 64px 56px 80px 60px 90px 50px 0px;
+  /* V7.3 — 14 cells in DEFAULT DOM order:
+     # | COIN | SIGNAL | SCORE | PANIC | PRICE | 1H% | 4H% | 12H%
+     | 24H% | 7D% | 24H VOL | HOT | toggle
+     This is the STATIC fallback template only. terminal.js injects a
+     dynamic #dynamic-cols <style> tag whose grid-template-columns
+     wins via !important — that's how user reorder works. */
+  grid-template-columns:32px minmax(120px,1fr) 80px 64px 70px 80px 56px 56px 56px 60px 56px 90px 50px 0px;
   gap:4px;
   padding:5px 10px;
   align-items:center;
@@ -104,11 +104,31 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .thdr{
   font-size:9px;color:var(--txt3);letter-spacing:.05em;border-bottom:1px solid var(--b1);background:var(--s1);
 }
-/* Header cells reserve room for the LEFT-edge drag handle (8px) but
-   only on cells that actually have one; the first two are flagged
-   no-handle so we don't leak visual padding for a phantom element. */
-.thdr > * { position: relative; padding-left: 10px; }
+/* V7.3 — header cells are flat (no phantom resize-handle padding).
+   Draggable cells get a grab cursor + subtle border-bottom hover hint
+   so the affordance is obvious without an extra widget. */
+.thdr > * { position: relative; padding-left: 4px; padding-right: 4px; }
 .thdr > .no-handle { padding-left: 0; }
+.thdr > [draggable="true"] {
+  cursor: grab;
+  border-bottom: 1px solid transparent;
+  transition: background .15s, border-color .15s;
+}
+.thdr > [draggable="true"]:hover {
+  background: rgba(0,232,200,.06);
+  border-bottom-color: rgba(0,232,200,.40);
+}
+.thdr > [draggable="true"]:active { cursor: grabbing; }
+.thdr > .col-dragging {
+  opacity: .55;
+  background: rgba(0,232,200,.15) !important;
+  border-bottom-color: rgba(0,232,200,.85) !important;
+}
+.thdr > .col-drop-target {
+  background: rgba(0,232,200,.10) !important;
+  outline: 1px dashed rgba(0,232,200,.60);
+  outline-offset: -2px;
+}
 .trow{
   border-bottom:1px solid rgba(255,255,255,.02);
   font-size:11px;transition:background .1s
@@ -116,34 +136,6 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .trow:hover{background:rgba(255,255,255,.03)}
 .trow.sel{background:rgba(255,255,255,.05);border-left:2px solid var(--acc);padding-left:8px}
 .trow>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:6px}
-
-/* Resizable columns — handles always sit on the LEFT edge of the
-   target cell (so the boundary the user drags is the seam between
-   col[i-1] and col[i]). Idle: subtle dark green hairline. Hover:
-   crisper green + soft halo. The first two cells (# and COIN) are
-   explicitly opted out via .no-handle so the user can't grab a
-   phantom handle on the row-number column. */
-.col-resize-handle {
-    position: absolute;
-    left: 0;
-    top: 18%;
-    bottom: 18%;
-    width: 8px;
-    cursor: col-resize;
-    border-left: 1px solid rgba(0, 136, 0, 0.35);
-    background: transparent;
-    z-index: 5;
-    transition: border-color .15s ease, box-shadow .15s ease, border-left-width .15s ease;
-}
-.col-resize-handle:hover {
-    border-left: 2px solid #00aa44;
-    box-shadow: -1px 0 6px rgba(0, 200, 80, 0.35);
-}
-.col-resize-handle:active {
-    border-left: 2px solid #00cc55;
-    box-shadow: -1px 0 8px rgba(0, 220, 90, 0.5);
-}
-.thdr > .no-handle .col-resize-handle { display: none; }
 .trow.alert-high{background:rgba(255,51,86,.03)}.trow.alert-med{background:rgba(255,176,32,.02)}
 .rn{color:var(--txt3);font-size:9px}
 .coin-cell{display:flex;flex-direction:column;align-items:flex-start;gap:0;min-width:0;overflow:hidden}
@@ -446,52 +438,49 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   .scanner-3col{grid-template-columns:1fr !important;min-height:auto !important}
   .scanner-left{flex-direction:row;flex-wrap:wrap;border-right:none;border-bottom:1px solid var(--b1);padding:6px 8px;gap:4px;overflow-x:auto}
   .scan-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-  /* V7.1: matches the new 10-col compact min-width. */
-  .thdr,.trow{min-width:720px !important}
+  /* V7.3 — matches the 14-col chain min-width. */
+  .thdr,.trow{min-width:980px !important}
   .thdr > *:last-child,.trow > *:last-child{min-width:70px;flex-shrink:0}
 }
-/* ── V7.1 Mobile/Tablet UX (supersedes V7.0) ──
-   On phones (≤640px) only five cells remain VISIBLE; CSS `order:`
-   reorders them to match the V7.0 mobile spec which the V7.1 desktop
-   reorder would otherwise scramble:
-     [COIN · PRICE · SCORE · PANIC · Expand-toggle]
-   PANIC stays IMMEDIATELY adjacent to SCORE for cross-examination.
-   Hidden cells re-appear inside the tap-toggled detail sub-row
-   (.trow-expand). Index map (matches the V7.1 10-col grid-template):
-     1 # · 2 COIN · 3 SIGNAL · 4 SCORE · 5 PANIC · 6 PRICE
-     7 24H% · 8 24H VOL · 9 HOT · 10 toggle
-*/
+/* ── V7.3 Mobile/Tablet UX (supersedes V7.1) ──
+   Phones (≤640px) keep only five cells VISIBLE: [COIN · PRICE ·
+   SCORE · PANIC · Expand-toggle]. Selectors are ATTRIBUTE-BASED
+   (`[data-col="..."]`) so an arbitrary user reorder of the desktop
+   grid never breaks the mobile layout — the mobile rule maps each
+   cell directly to its identity, not its position. */
 @media(max-width:640px){
   .scanner-3col{grid-template-columns:1fr !important;min-height:auto !important}
   .scanner-left{flex-direction:row;flex-wrap:wrap;border-right:none;border-bottom:1px solid var(--b1);padding:6px 8px;gap:4px;overflow-x:auto}
   .scan-wrap{overflow-x:hidden;padding-right:0}
   .thdr,.trow{
     display:grid !important;
-    /* 5 visible cells (slot order = visual order after `order:` rules):
-       COIN | PRICE | SCORE | PANIC | toggle */
+    /* 5 explicit visible slots, ordered by CSS `order:` rules below */
     grid-template-columns:minmax(70px,1fr) 60px 44px 56px 24px !important;
     min-width:0 !important;
     gap:3px;padding:6px 6px;font-size:10px;
   }
-  /* Hide everything except COIN(2), SCORE(4), PANIC(5), PRICE(6), toggle(10) */
-  .thdr > *:nth-child(1),.trow > *:nth-child(1),
-  .thdr > *:nth-child(3),.trow > *:nth-child(3),
-  .thdr > *:nth-child(7),.trow > *:nth-child(7),
-  .thdr > *:nth-child(8),.trow > *:nth-child(8),
-  .thdr > *:nth-child(9),.trow > *:nth-child(9){display:none !important}
-  /* Visible cells — explicit display + visual-order overrides.
-     order: defaults to 0, so a smaller order means earlier visual slot. */
-  .thdr > *:nth-child(2),.trow > *:nth-child(2),
-  .thdr > *:nth-child(4),.trow > *:nth-child(4),
-  .thdr > *:nth-child(5),.trow > *:nth-child(5),
-  .thdr > *:nth-child(6),.trow > *:nth-child(6),
-  .thdr > *:nth-child(10),.trow > *:nth-child(10){display:inline-block;min-width:0;flex-shrink:0}
-  /* Visual order on mobile: COIN(2) → PRICE(6) → SCORE(4) → PANIC(5) → toggle(10) */
-  .thdr > *:nth-child(2),.trow > *:nth-child(2)  {order:1}
-  .thdr > *:nth-child(6),.trow > *:nth-child(6)  {order:2}
-  .thdr > *:nth-child(4),.trow > *:nth-child(4)  {order:3}
-  .thdr > *:nth-child(5),.trow > *:nth-child(5)  {order:4}
-  .thdr > *:nth-child(10),.trow > *:nth-child(10){order:5}
+  /* Hide every column NOT in {coin, price, score, panic, toggle} */
+  .thdr > [data-col="rank"],   .trow > [data-col="rank"],
+  .thdr > [data-col="signal"], .trow > [data-col="signal"],
+  .thdr > [data-col="c1"],     .trow > [data-col="c1"],
+  .thdr > [data-col="c4"],     .trow > [data-col="c4"],
+  .thdr > [data-col="c12"],    .trow > [data-col="c12"],
+  .thdr > [data-col="c24"],    .trow > [data-col="c24"],
+  .thdr > [data-col="c7d"],    .trow > [data-col="c7d"],
+  .thdr > [data-col="qv"],     .trow > [data-col="qv"],
+  .thdr > [data-col="hot"],    .trow > [data-col="hot"]{display:none !important}
+  /* Force visible cells back into inline-block context */
+  .thdr > [data-col="coin"],  .trow > [data-col="coin"],
+  .thdr > [data-col="price"], .trow > [data-col="price"],
+  .thdr > [data-col="score"], .trow > [data-col="score"],
+  .thdr > [data-col="panic"], .trow > [data-col="panic"],
+  .thdr .trow-toggle-hdr,     .trow .trow-toggle {display:inline-block;min-width:0;flex-shrink:0}
+  /* Visual order on mobile: COIN → PRICE → SCORE → PANIC → toggle */
+  .thdr > [data-col="coin"],  .trow > [data-col="coin"]  {order:1}
+  .thdr > [data-col="price"], .trow > [data-col="price"] {order:2}
+  .thdr > [data-col="score"], .trow > [data-col="score"] {order:3}
+  .thdr > [data-col="panic"], .trow > [data-col="panic"] {order:4}
+  .thdr .trow-toggle-hdr,     .trow .trow-toggle         {order:5}
   /* The expand toggle is appended by renderList as the last child after score */
   .trow .trow-toggle{
     display:inline-flex;align-items:center;justify-content:center;
@@ -515,12 +504,8 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   .thdr .trow-toggle-hdr{font-size:8px;color:var(--txt3);text-align:center}
 }
 
-/* ========== V4: COLUMN RESIZE HANDLES ========== */
-.col-resize-handle{
-  position:absolute;right:-2px;top:0;bottom:0;width:5px;cursor:col-resize;
-  background:transparent;z-index:10;transition:background .15s
-}
-.col-resize-handle:hover,.col-resize-handle:active{background:rgba(0,232,200,.35)}
+/* V4 column-resize handles purged in V7.3 — replaced by the
+   drag-to-reorder engine in terminal.js (no handles needed). */
 
 /* ========== V4: HOTNESS TOOLTIP ========== */
 .hotness-tooltip{
@@ -1042,7 +1027,11 @@ html,body{overflow-x:hidden;max-width:100vw}
 }
 
 /* ─────────────────────────────────────────────────────────────
-   V7.0 — PANIC INDICATOR + LIVE CELL FLASH
+   V7.3 — PANIC HEATMAP (5 tiers) + LIVE CELL FLASH
+   Tiers match panicMeta() in terminal.js. Two extreme bands use
+   intense pulsing keyframes so a CAPI or FOMO reading is the first
+   thing the eye lands on — the mid bands are kept text-only so the
+   row scan remains scannable when many coins sit in BUY/SELL.
    ───────────────────────────────────────────────────────────── */
 .panic-cell{
   display:inline-flex;align-items:center;justify-content:center;
@@ -1050,46 +1039,71 @@ html,body{overflow-x:hidden;max-width:100vw}
   font-family:var(--mono);font-weight:700;font-size:10px;
   letter-spacing:.02em;line-height:1.35;
   border:1px solid transparent;
-  min-width:36px;
-  transition:background .15s,box-shadow .25s,color .15s;
+  min-width:42px;
+  transition:background .18s,box-shadow .25s,color .18s;
 }
-.panic-cell.panic-neut{
-  background:rgba(96,112,144,.10);color:var(--txt3);
-  border-color:rgba(96,112,144,.22);
+/* Neutral — muted gray, almost background-color, very calm */
+.panic-cell.panic-tier-neutral{
+  background:transparent;color:var(--txt3);
+  border-color:rgba(96,112,144,.18);
 }
-.panic-cell.panic-buy{
-  background:linear-gradient(135deg,rgba(0,212,132,.10),rgba(0,212,132,.22));
-  color:var(--grn);border-color:rgba(0,212,132,.45);
+/* Mild Buying Pressure — soft green text on faint tint */
+.panic-cell.panic-tier-buy{
+  background:rgba(0,212,132,.06);color:#4FE3A8;
+  border-color:rgba(0,212,132,.28);
 }
-.panic-cell.panic-buy-extreme{
-  background:linear-gradient(135deg,rgba(0,255,150,.18),rgba(0,212,132,.45));
-  color:#7CFFC0;border-color:rgba(0,255,170,.85);
-  text-shadow:0 0 6px rgba(0,255,170,.55);
+/* EXTREME FOMO — neon green BACKGROUND + pulsing glow */
+.panic-cell.panic-tier-extreme-buy{
+  background:linear-gradient(135deg,rgba(0,255,150,.30),rgba(0,212,132,.62));
+  color:#06140C;
+  border-color:rgba(0,255,170,.95);
+  text-shadow:0 0 6px rgba(255,255,255,.45);
+  font-weight:800;
 }
-.panic-cell.panic-sell{
-  background:linear-gradient(135deg,rgba(255,51,86,.10),rgba(255,51,86,.22));
-  color:var(--red);border-color:rgba(255,51,86,.45);
+/* Mild Panic Sell — soft red text on faint tint */
+.panic-cell.panic-tier-sell{
+  background:rgba(255,51,86,.06);color:#FF7A8F;
+  border-color:rgba(255,51,86,.28);
 }
-.panic-cell.panic-sell-extreme{
-  background:linear-gradient(135deg,rgba(255,30,60,.20),rgba(180,10,40,.55));
-  color:#FFB0C0;border-color:rgba(255,70,90,.85);
-  text-shadow:0 0 6px rgba(255,70,90,.55);
+/* CAPITULATION — deep crimson BACKGROUND + flashing alert */
+.panic-cell.panic-tier-extreme-sell{
+  background:linear-gradient(135deg,rgba(255,30,60,.45),rgba(150,8,30,.85));
+  color:#FFF3F5;
+  border-color:rgba(255,70,90,.95);
+  text-shadow:0 0 6px rgba(255,255,255,.35);
+  font-weight:800;
 }
-/* Glow ON when |panic| ≥ 80 — intense pulse so an extreme reading
-   is unmissable at the corner-of-the-eye glance level. */
-@keyframes panic-pulse-buy{
-  0%,100%{box-shadow:0 0 0 0 rgba(0,255,170,.55),0 0 8px rgba(0,255,170,.35);}
-  50%   {box-shadow:0 0 0 6px rgba(0,255,170,0),0 0 16px rgba(0,255,170,.85);}
+/* Glow classes — applied only when |panic| ≥ 80. Keep them as
+   separate state classes so panicMeta() can withdraw the pulse
+   instantly when the score drops back below 80 on a WS tick. */
+@keyframes panic-glow-buy{
+  0%,100%{box-shadow:0 0 0 0 rgba(0,255,170,.65),0 0 10px rgba(0,255,170,.45);}
+  50%   {box-shadow:0 0 0 8px rgba(0,255,170,0),0 0 22px rgba(0,255,170,.95);}
 }
-@keyframes panic-pulse-sell{
-  0%,100%{box-shadow:0 0 0 0 rgba(255,70,90,.55),0 0 8px rgba(255,70,90,.35);}
-  50%   {box-shadow:0 0 0 6px rgba(255,70,90,0),0 0 16px rgba(255,70,90,.85);}
+@keyframes panic-glow-sell{
+  0%,100%{box-shadow:0 0 0 0 rgba(255,70,90,.65),0 0 10px rgba(255,70,90,.45);}
+  35%    {box-shadow:0 0 0 8px rgba(255,70,90,0),0 0 24px rgba(255,70,90,.95);}
+  65%    {box-shadow:0 0 0 4px rgba(255,30,60,.30),0 0 18px rgba(255,30,60,.90);}
 }
-.panic-cell.panic-glow.panic-buy-extreme {animation:panic-pulse-buy 1.4s ease-in-out infinite}
-.panic-cell.panic-glow.panic-sell-extreme{animation:panic-pulse-sell 1.4s ease-in-out infinite}
+.panic-cell.panic-glow-buy {animation:panic-glow-buy 1.4s ease-in-out infinite}
+.panic-cell.panic-glow-sell{animation:panic-glow-sell 1.0s ease-in-out infinite}
 @media (prefers-reduced-motion: reduce){
-  .panic-cell.panic-glow.panic-buy-extreme,
-  .panic-cell.panic-glow.panic-sell-extreme{animation:none}
+  .panic-cell.panic-glow-buy, .panic-cell.panic-glow-sell{animation:none}
+}
+
+/* PANIC manual [?] button — sits inline next to the PANIC header. */
+.panic-help-btn{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:14px;height:14px;margin-left:5px;padding:0;
+  background:transparent;color:var(--acc);
+  border:1px solid rgba(0,232,200,.55);border-radius:50%;
+  font-size:9px;font-weight:700;line-height:1;cursor:pointer;
+  transition:all .15s;
+  vertical-align:middle;
+}
+.panic-help-btn:hover,.panic-help-btn:focus-visible{
+  background:rgba(0,232,200,.22);color:#fff;
+  box-shadow:0 0 10px rgba(0,232,200,.65);outline:none;
 }
 
 /* Live cell flash — applied by the WS client when a tick frame
@@ -1099,4 +1113,46 @@ html,body{overflow-x:hidden;max-width:100vw}
 @keyframes cell-flash-down {0%{background:rgba(255,51,86,.35)}100%{background:transparent}}
 .cell-flash-up   {animation:cell-flash-up   .9s ease-out}
 .cell-flash-down {animation:cell-flash-down .9s ease-out}
+
+/* ─────────────────────────────────────────────────────────────
+   V7.3 — PANIC MANUAL MODAL
+   ───────────────────────────────────────────────────────────── */
+.panic-modal{position:fixed;inset:0;z-index:9999;display:none;font-family:var(--mono);}
+.panic-modal.is-open{display:block;}
+.panic-modal__backdrop{position:absolute;inset:0;background:rgba(0,4,12,.78);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);}
+.panic-modal__sheet{
+  position:relative;margin:6vh auto;max-width:640px;max-height:88vh;
+  overflow:auto;background:var(--bg);
+  border:1px solid rgba(0,232,200,.40);border-radius:10px;
+  box-shadow:0 8px 60px rgba(0,232,200,.22),0 0 0 1px rgba(0,0,0,.4);
+}
+.panic-modal__hd{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--b1);}
+.panic-modal__hd h2{font-size:13px;letter-spacing:.18em;color:var(--acc);margin:0;}
+.panic-modal__x{background:transparent;border:0;color:var(--txt2);font-size:22px;line-height:1;padding:0 4px;cursor:pointer;}
+.panic-modal__x:hover{color:var(--red);}
+.panic-modal__body{padding:18px;font-size:12px;color:var(--txt2);line-height:1.55;}
+.panic-modal__body h3{font-size:11px;letter-spacing:.14em;color:var(--txt);margin:18px 0 8px;}
+.panic-modal__body section:first-of-type h3{margin-top:0;}
+.panic-modal__body ul{margin:6px 0 0;padding-left:18px;}
+.panic-modal__body li{margin:4px 0;}
+.panic-modal__body code{background:rgba(255,255,255,.05);padding:1px 5px;border-radius:3px;color:var(--acc);font-size:11px;}
+.panic-modal__body kbd{background:var(--s2);border:1px solid var(--b1);border-radius:3px;padding:1px 5px;color:var(--txt);font-size:10px;}
+.panic-modal__formula{
+  background:rgba(0,232,200,.05);border-left:2px solid var(--acc);
+  padding:8px 10px;margin:10px 0;font-size:11px;color:var(--txt);
+}
+.panic-modal__band{padding:8px 12px;border-radius:5px;border:1px solid transparent;margin:8px 0;}
+.panic-modal__band b{display:block;font-size:11px;letter-spacing:.06em;margin-bottom:3px;}
+.panic-modal__band p{margin:0;font-size:11px;color:var(--txt2);line-height:1.5;}
+.panic-modal__band--extreme-buy {border-color:rgba(0,255,170,.55);background:linear-gradient(135deg,rgba(0,255,150,.10),rgba(0,212,132,.18));}
+.panic-modal__band--extreme-buy b {color:#7CFFC0;}
+.panic-modal__band--buy          {border-color:rgba(0,212,132,.30);background:rgba(0,212,132,.06);}
+.panic-modal__band--buy b        {color:#4FE3A8;}
+.panic-modal__band--neutral      {border-color:rgba(96,112,144,.30);background:rgba(96,112,144,.05);}
+.panic-modal__band--neutral b    {color:var(--txt3);}
+.panic-modal__band--sell         {border-color:rgba(255,51,86,.30);background:rgba(255,51,86,.06);}
+.panic-modal__band--sell b       {color:#FF7A8F;}
+.panic-modal__band--extreme-sell {border-color:rgba(255,70,90,.55);background:linear-gradient(135deg,rgba(255,30,60,.10),rgba(180,10,40,.22));}
+.panic-modal__band--extreme-sell b {color:#FFB0C0;}
+.panic-modal__ft{padding:10px 18px;border-top:1px solid var(--b1);color:var(--txt3);font-size:10px;}
 
