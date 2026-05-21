@@ -217,6 +217,14 @@
               <span data-col="c7d" class="tr" draggable="true" title="7d price change %">7D %<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
               <span data-col="qv"  class="tr" draggable="true" title="24h Quote Volume (USD)">24H VOL<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
               <span data-col="hot" class="tr" draggable="true" data-hot-tip data-tooltip="Real-time attention and volatility tracking index based on immediate trading frequency spikes.">HOT<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <!-- V7.4.7: three draggable+resizable ghost spacers.
+                   Each defaults to 1fr so spare viewport width splits
+                   three ways at the right edge until the user grabs
+                   one and drops it between data columns to create an
+                   arbitrary gap. Re-rendered by renderHeader(). -->
+              <span data-col="g1" class="thdr-ghost" draggable="true" aria-hidden="true"><span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="g2" class="thdr-ghost" draggable="true" aria-hidden="true"><span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="g3" class="thdr-ghost" draggable="true" aria-hidden="true"><span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
               <span class="trow-toggle-hdr no-handle" aria-hidden="true">⋯</span>
             </div>
             <div id="clist"></div>

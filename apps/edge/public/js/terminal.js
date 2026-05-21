@@ -1582,8 +1582,16 @@ function renderList() {
         c7d:    `<span data-col="c7d" data-cell="c7d" class="tr">${tfCell(v_c7d)}</span>`,
         qv:     `<span data-col="qv"  data-cell="qv"  class="tr">${_esc(fmt(qv))}</span>`,
         hot:    `<span data-col="hot" class="tr" style="color:${hot>60?'var(--red)':'var(--txt2)'}"><b>${hot}</b></span>`,
+        // V7.4.7 — row-side mirrors of the three ghost cells so the
+        // grid column count stays aligned with the header DOM.
+        g1:     `<span data-col="g1" aria-hidden="true"></span>`,
+        g2:     `<span data-col="g2" aria-hidden="true"></span>`,
+        g3:     `<span data-col="g3" aria-hidden="true"></span>`,
       };
-      const cells = _columnOrder.map(k => cellHTML[k] || '').join('');
+      // Fallback: any key in _columnOrder that has no cellHTML entry
+      // (e.g. a future column added mid-session) gets an empty span
+      // so the grid layout doesn't desync.
+      const cells = _columnOrder.map(k => cellHTML[k] || `<span data-col="${_esc(k)}" aria-hidden="true"></span>`).join('');
       htmls.push(`<div class="trow${SEL===d.id?' sel':''}${s.score>=7?' alert-high':s.score>=6?' alert-med':''}" data-coin-id="${idAttr}">
         ${cells}
         <span class="trow-toggle" data-trow-toggle="1" aria-label="Expand">⋯</span>
@@ -1604,8 +1612,15 @@ function renderList() {
 
 function pickCoin(id) {
   SEL = id;
+  // V7.4.6: surface the active detail coin on `window` so the WS
+  // tick pipeline (_applyTick) can decide whether to live-update
+  // the right-hand pane. We track BOTH the CoinGecko id (used by
+  // SEL/_currentDetailCoinId) AND the upper-case base symbol — the
+  // WS frame carries the symbol, the DOM/state carries the id.
+  window._currentDetailCoinId = id;
   const d = DATA.find(x => x.id === id);
-  if (!d) return;
+  if (!d) { window._currentDetailCoinSym = null; return; }
+  window._currentDetailCoinSym = String(d.symbol || '').toUpperCase();
 
   const s = _sigOf(d), f = getFunding(d), ls = getLsRatio(d), op = getOiPct(d);
   const sym = (d.symbol || '').toUpperCase();
@@ -1622,7 +1637,7 @@ function pickCoin(id) {
   document.getElementById('dcon').innerHTML = `
     <div class="dhead">
       <div><div class="dsym">${_esc(sym)}</div><div class="dname">${_esc(d.name)} · ${_esc(getSector(d.id))}</div></div>
-      <div><div class="dprc">${_esc(fmt(d.current_price))}</div><div class="dchg ${(d.price_change_percentage_24h||0)>=0?'pos':'neg'}">${_esc(fp(d.price_change_percentage_24h||0))}</div></div>
+      <div><div class="dprc" data-detail="price">${_esc(fmt(d.current_price))}</div><div class="dchg ${(d.price_change_percentage_24h||0)>=0?'pos':'neg'}" data-detail="c24">${_esc(fp(d.price_change_percentage_24h||0))}</div></div>
     </div>
 
     <button id="ai-analyze-btn"
@@ -1642,10 +1657,10 @@ function pickCoin(id) {
     </div>
 
     <div class="mgrid">
-      <div class="mc"><div class="ml">SIGNAL</div><div class="mv"><span class="bdg ${_esc(s.cls)}">${_esc(s.label)}</span></div></div>
-      <div class="mc"><div class="ml">SCORE</div><div class="mv">${s.score}/10</div></div>
-      <div class="mc"><div class="ml">PANIC</div><div class="mv">${panicBadge(Number.isFinite(d._panic) ? d._panic : calcPanic(d))}</div></div>
-      <div class="mc"><div class="ml">24H VOL</div><div class="mv">${_esc(fmt(d.total_volume || 0))}</div></div>
+      <div class="mc"><div class="ml">SIGNAL</div><div class="mv"><span class="bdg ${_esc(s.cls)}" data-detail="signal">${_esc(s.label)}</span></div></div>
+      <div class="mc"><div class="ml">SCORE</div><div class="mv" data-detail="score">${s.score}/10</div></div>
+      <div class="mc"><div class="ml">PANIC</div><div class="mv" data-detail="panic">${panicBadge(Number.isFinite(d._panic) ? d._panic : calcPanic(d))}</div></div>
+      <div class="mc"><div class="ml">24H VOL</div><div class="mv" data-detail="qv">${_esc(fmt(d.total_volume || 0))}</div></div>
       <div class="mc"><div class="ml">24H RANGE</div><div class="mv">${_esc(fmt(d.low_24h || 0))}–${_esc(fmt(d.high_24h || 0))}</div></div>
     </div>
 
@@ -3073,6 +3088,57 @@ function _flashCell(rowEl, cellName, html, klass) {
   if (klass) el.classList.add(klass);
 }
 
+// V7.4.6 — live mutate the right-hand detail panel whenever a WS tick
+// arrives for the currently selected coin. Only the cells that can
+// change between ticks (price, 24h%, score, panic, volume) are touched
+// — the structural template (button, validity, momentum) is left in
+// place so the panel never re-renders or flickers.
+function _updateDetailPanel(d, newPrice, prevPrice, prevPanic) {
+  const dcon = document.getElementById('dcon');
+  if (!dcon) return;
+
+  // PRICE — text mutate + flash
+  const priceEl = dcon.querySelector('[data-detail="price"]');
+  if (priceEl && Number.isFinite(newPrice) && newPrice > 0) {
+    priceEl.textContent = fmt(newPrice);
+    const dir = newPrice >= (prevPrice || 0) ? 'cell-flash-up' : 'cell-flash-down';
+    priceEl.classList.remove('cell-flash-up', 'cell-flash-down');
+    void priceEl.offsetWidth;
+    priceEl.classList.add(dir);
+  }
+
+  // 24H % — text mutate + class swap (pos/neg) so the existing colour
+  // tone follows the latest sign.
+  const c24Val = (d && d._c24 != null) ? d._c24 : (d && d.price_change_percentage_24h) || 0;
+  const c24El = dcon.querySelector('[data-detail="c24"]');
+  if (c24El && Number.isFinite(c24Val)) {
+    c24El.textContent = fp(c24Val);
+    c24El.classList.toggle('pos', c24Val >= 0);
+    c24El.classList.toggle('neg', c24Val < 0);
+  }
+
+  // SCORE — re-apply the integer + threshold-coloured tone.
+  const scoreVal = (d && d._sig_score) || 0;
+  const scoreEl = dcon.querySelector('[data-detail="score"]');
+  if (scoreEl) scoreEl.textContent = `${scoreVal}/10`;
+
+  // PANIC — full badge replacement (the colour tier + glow class
+  // come from panicBadge() so a tier-crossing tick repaints both).
+  const panicEl = dcon.querySelector('[data-detail="panic"]');
+  if (panicEl && d) {
+    panicEl.innerHTML = panicBadge(d._panic);
+    const dir = (d._panic - (prevPanic || 0)) >= 0 ? 'cell-flash-up' : 'cell-flash-down';
+    panicEl.classList.remove('cell-flash-up', 'cell-flash-down');
+    void panicEl.offsetWidth;
+    panicEl.classList.add(dir);
+  }
+
+  // 24H VOL — silent text mutate (no flash; volume churn is constant
+  // and the visual noise would be more distracting than informative).
+  const qvEl = dcon.querySelector('[data-detail="qv"]');
+  if (qvEl && d) qvEl.textContent = fmt(d.total_volume || 0);
+}
+
 function _applyTick(frame) {
   try {
     const sym = String(frame.s || '').toUpperCase();
@@ -3137,6 +3203,14 @@ function _applyTick(frame) {
       const scoreEl = rowEl.querySelector('[data-cell="score"]');
       if (scoreEl) scoreEl.style.color = (d._sig_score || 0) >= 6 ? 'var(--grn)' : 'var(--txt2)';
     }
+
+    // V7.4.6 — if the active detail coin matches this tick, live-flash
+    // the right-hand pane too. Comparison uses the CoinGecko id (the
+    // ground truth) rather than the symbol so listings with duplicate
+    // tickers (e.g. wrapped/native pairs) don't cross-talk.
+    if (window._currentDetailCoinId && d.id === window._currentDetailCoinId) {
+      _updateDetailPanel(d, newPrice, prevPrice, prevPanic);
+    }
   } catch (e) {
     // Frame processing must never throw — a bad payload from upstream
     // should drop the frame, not poison the rest of the stream.
@@ -3171,7 +3245,14 @@ async function connectStream() {
   sock.addEventListener('open', () => {
     _streamBackoff = STREAM_BACKOFF_MIN_MS;
     try { LiveFeed.push('Real-time stream connected', 'info'); } catch {}
-    document.getElementById('sts') && (document.getElementById('sts').textContent = 'LIVE');
+    const sts = document.getElementById('sts');
+    if (sts) {
+      sts.textContent = 'LIVE';
+      sts.classList.remove('status-reconnecting-pulse');
+    }
+    // V7.4.7 — WS healthy: stop the aggressive 10s poll, the regular
+    // 5min safety-net interval is enough for non-Binance coins.
+    _disableAggressivePoll();
   });
 
   sock.addEventListener('message', (ev) => {
@@ -3192,8 +3273,15 @@ async function connectStream() {
 
   sock.addEventListener('close', () => {
     if (_streamClosedByUs) return;
-    document.getElementById('sts') && (document.getElementById('sts').textContent = 'RECONNECTING');
+    const sts = document.getElementById('sts');
+    if (sts) {
+      sts.textContent = 'RECONNECTING';
+      sts.classList.add('status-reconnecting-pulse');
+    }
     _scheduleReconnect();
+    // V7.4.7 — WS dead: kick the aggressive 10s poll so the user sees
+    // fresh data within seconds instead of the 5min fallback interval.
+    _enableAggressivePoll();
   });
 
   sock.addEventListener('error', () => {
@@ -3213,9 +3301,61 @@ function _scheduleReconnect() {
 
 // Pull a fresh /api/markets snapshot occasionally so non-Binance coins
 // (DEX-only, where the WS stream has nothing to push) don't go stale.
+// V7.4.7 — also pushes a synthetic detail-panel sync so the right-
+// hand pane updates even when no WS frame is arriving.
 async function _fallbackPollTick() {
-  try { await doRefresh(); _rebuildSymbolIndex(); }
+  try { await doRefresh(); _rebuildSymbolIndex(); _syncDetailFromPoll(); }
   catch (e) { console.warn('[STREAM] fallback poll failed:', e && e.message); }
+}
+
+// ─────────────────────────────────────────────────────────────
+// V7.4.7 — AGGRESSIVE FALLBACK POLLING
+//
+// When the WS drops, the regular 5-minute safety-net poll is too
+// slow to keep the UI feeling alive. Aggressive mode kicks in
+// immediately on close: full /api/markets refresh every 10 seconds,
+// including a forced detail-panel sync. As soon as the WS comes
+// back, aggressive mode steps down and the safety-net interval
+// resumes the long cadence.
+// ─────────────────────────────────────────────────────────────
+const STREAM_AGGRESSIVE_POLL_MS = 10 * 1000;
+let _aggressivePollTimer = null;
+// Last-seen detail-panel snapshot so the poll path can compute the
+// directional flash for price / panic on every refresh.
+let _lastDetailSnapshot = null;
+
+function _syncDetailFromPoll() {
+  const id = window._currentDetailCoinId;
+  if (!id) { _lastDetailSnapshot = null; return; }
+  const d = (Array.isArray(DATA) ? DATA : []).find(x => x && x.id === id);
+  if (!d) return;
+  const newPrice = parseFloat(d.current_price) || 0;
+  const prev = (_lastDetailSnapshot && _lastDetailSnapshot.id === id) ? _lastDetailSnapshot : null;
+  const prevPrice = prev ? prev.price : newPrice;
+  const prevPanic = prev ? prev.panic : (Number.isFinite(d._panic) ? d._panic : 0);
+  try { _updateDetailPanel(d, newPrice, prevPrice, prevPanic); } catch {}
+  _lastDetailSnapshot = { id, price: newPrice, panic: Number.isFinite(d._panic) ? d._panic : 0 };
+}
+
+async function _aggressivePollTick() {
+  try { await doRefresh(); _rebuildSymbolIndex(); _syncDetailFromPoll(); }
+  catch (e) { console.warn('[STREAM] aggressive poll failed:', e && e.message); }
+}
+
+function _enableAggressivePoll() {
+  if (_aggressivePollTimer) return;
+  // Fire immediately so the user sees fresh data within ~1 RTT of
+  // the WS drop, not after a full STREAM_AGGRESSIVE_POLL_MS wait.
+  _aggressivePollTick();
+  _aggressivePollTimer = setInterval(_aggressivePollTick, STREAM_AGGRESSIVE_POLL_MS);
+}
+
+function _disableAggressivePoll() {
+  if (_aggressivePollTimer) {
+    clearInterval(_aggressivePollTimer);
+    _aggressivePollTimer = null;
+  }
+  _lastDetailSnapshot = null;
 }
 
 // ========== INITIALIZATION & AUTH ==========
@@ -3473,14 +3613,15 @@ document.getElementById('briefing-trigger')?.addEventListener('click', () => {
 //     the V7.4 .header-tooltip engine. Differs from `tip` which only
 //     feeds the native browser title="".
 const COLUMN_DEFS = {
-  // V7.4.5: COIN is now a fully reorderable column (the user must
-  // be able to drag SIGNAL onto it and have COIN bump right). RANK
-  // (#) stays non-draggable because it's a row marker, not a data
-  // column — but it IS still a valid DROP target (see _attachColumnDnD
-  // below: dragover + drop are wired on every cell regardless of
-  // dragOK, so signal can land at index 0 if the user really wants it).
+  // V7.4.5: COIN is a fully reorderable column. RANK (#) stays
+  // non-draggable (row marker) but is still a valid drop target.
+  // V7.4.6: COIN is now a FIXED 160px wide. The 1fr-flex behaviour
+  // moved to the new `spacer` cell at the end of COLUMN_DEFS — a
+  // zero-content "black hole" that absorbs all remaining viewport
+  // width on wide displays, keeping the data columns tight on the
+  // left where the eye expects them.
   rank:   { label: '#',       width: 32,     tip: '',                                                                       align: 'left',  dragOK: false },
-  coin:   { label: 'COIN',    width: 'flex', tip: '',                                                                       align: 'left',  dragOK: true  },
+  coin:   { label: 'COIN',    width: 160,    tip: '',                                                                       align: 'left',  dragOK: true  },
   signal: { label: 'SIGNAL',  width: 80,     tip: '',                                                                       align: 'left',  dragOK: true  },
   score:  { label: 'SCORE',   width: 64,     tip: 'Signal Score 0-10',                                                      align: 'right', dragOK: true,
             tooltip: 'Primary algorithmic valuation engine. Scales 0 to 10/10 based on macro confluence indicators.' },
@@ -3495,10 +3636,22 @@ const COLUMN_DEFS = {
   qv:     { label: '24H VOL', width: 90,     tip: '24h Quote Volume (USD)',                                                 align: 'right', dragOK: true  },
   hot:    { label: 'HOT',     width: 50,     tip: '',                                                                       align: 'right', dragOK: true,
             tooltip: 'Real-time attention and volatility tracking index based on immediate trading frequency spikes.' },
+  // V7.4.7 — GHOST SPACERS (g1/g2/g3).
+  // Replace the single static spacer with THREE draggable+resizable
+  // ghost cells. Each defaults to `1fr` so they evenly absorb spare
+  // viewport width; the user can drag them between data columns to
+  // create arbitrary gaps in the grid layout, and resize them via
+  // the standard right-edge handle. Label is empty by design.
+  g1:     { label: '',        width: 'flex', tip: '',                                                                       align: 'left',  dragOK: true  },
+  g2:     { label: '',        width: 'flex', tip: '',                                                                       align: 'left',  dragOK: true  },
+  g3:     { label: '',        width: 'flex', tip: '',                                                                       align: 'left',  dragOK: true  },
 };
 // Default visual sequence. The mobile-only expand toggle is appended
 // AFTER this chain in DOM order and never participates in reorder.
-const DEFAULT_COLUMN_ORDER = ['rank','coin','signal','score','panic','price','c1','c4','c12','c24','c7d','qv','hot'];
+// V7.4.7: three ghost cells tail the list — each 1fr — so any spare
+// pixels split three ways at the right edge until the user drags
+// them somewhere else.
+const DEFAULT_COLUMN_ORDER = ['rank','coin','signal','score','panic','price','c1','c4','c12','c24','c7d','qv','hot','g1','g2','g3'];
 const COLUMN_ORDER_STORAGE_KEY = 'swing_col_order_v73';
 const COLUMN_WIDTHS_STORAGE_KEY = 'swing_col_widths_v74';
 const MIN_COL_PX = 36;     // hard floor — narrower than this and the label gets ellipsised away.
@@ -3560,10 +3713,22 @@ function _persistColumnWidths() {
   } catch {}
 }
 
+const MIN_GHOST_PX = 8; // ghosts can shrink below the regular column floor.
+function _isGhostKey(k) { return /^g\d+$/.test(k); }
 function _widthExpr(key) {
   const w = _columnWidths[key];
+  // V7.4.7 — ghost cells (g1/g2/g3): default `1fr`, numeric only
+  // after the user explicitly resizes them. Floor at 8px so the
+  // resize handle stays grabbable but a ghost can still collapse
+  // to a near-zero gap.
+  if (_isGhostKey(key)) {
+    if (Number.isFinite(w)) return `${Math.max(MIN_GHOST_PX, Math.round(w))}px`;
+    return '1fr';
+  }
   if (w === 'flex') return `minmax(${MIN_COIN_PX}px, 1fr)`;
-  const px = Math.max(key === 'coin' ? MIN_COIN_PX : MIN_COL_PX, Math.round(Number(w) || COLUMN_DEFS[key].width));
+  const def = COLUMN_DEFS[key] || {};
+  const fallback = Number.isFinite(def.width) ? def.width : MIN_COL_PX;
+  const px = Math.max(key === 'coin' ? MIN_COIN_PX : MIN_COL_PX, Math.round(Number(w) || fallback));
   return `${px}px`;
 }
 
@@ -3604,6 +3769,14 @@ function renderHeader() {
   const cells = _columnOrder.map(k => {
     const def = COLUMN_DEFS[k];
     if (!def) return '';
+    // V7.4.7 — ghost cells are FULLY interactive: draggable, with a
+    // resize handle, but no label. They flow through the standard
+    // cell branch below; the .thdr-ghost class gives the user a
+    // subtle hover hint so an empty 1fr gap is still discoverable.
+    if (_isGhostKey(k)) {
+      const handle = '<span class="col-resize-handle" data-resize aria-hidden="true"></span>';
+      return `<span data-col="${k}" class="thdr-ghost" draggable="true" title="Ghost spacer — drag to reposition or resize" aria-hidden="true">${handle}</span>`;
+    }
     const tipAttr = def.tip ? ` title="${_esc(def.tip)}"` : '';
     const dragAttr = def.dragOK ? ' draggable="true"' : '';
     const classes = [];
