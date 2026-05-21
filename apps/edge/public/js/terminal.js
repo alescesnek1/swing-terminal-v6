@@ -3593,8 +3593,12 @@ function renderHeader() {
   hdr.innerHTML = cells
     + '<span class="trow-toggle-hdr no-handle" aria-hidden="true">⋯</span>';
   _attachColumnDnD();
-  _attachColumnResize();
 }
+
+// V7.4: while a column resize is in flight we must block HTML5 drag
+// from kicking in — otherwise dragging the right-edge handle would
+// also trigger the reorder gesture on the parent draggable cell.
+let _isResizing = false;
 
 function _attachColumnDnD() {
   const hdr = document.querySelector('.thdr');
@@ -3607,6 +3611,8 @@ function _attachColumnDnD() {
     if (!def || !def.dragOK) return;
 
     el.addEventListener('dragstart', (e) => {
+      // V7.4: suppress reorder while the mouse-resize engine is active.
+      if (_isResizing) { e.preventDefault(); return; }
       srcKey = key;
       el.classList.add('col-dragging');
       try {
@@ -3650,19 +3656,165 @@ function _attachColumnDnD() {
   // re-attach a click handler for it.
 }
 
-// One-time bootstrap of the V7.3 column engine. Safe to call before
-// the header DOM is in the document — renderHeader() looks up the
-// element lazily and bails if absent.
+// V7.4 — Mouse-driven column resize.
+// One mousedown listener per `.col-resize-handle`. Captures the
+// cell's starting width, then on every mousemove projects (startW +
+// dx) into _columnWidths[key] and re-emits the grid template. The
+// row container reads the same template via _gridTemplateFromOrder,
+// so the render path stays unchanged — no per-row inline-style work.
+function _attachColumnResize() {
+  const hdr = document.querySelector('.thdr');
+  if (!hdr) return;
+  hdr.querySelectorAll('[data-col] .col-resize-handle').forEach(handle => {
+    handle.addEventListener('mousedown', (e) => {
+      // Only react to the primary (left) mouse button so right-click
+      // context menus and middle-click new-tab gestures still work.
+      if (e.button !== 0) return;
+      const cell = handle.parentElement;
+      if (!cell) return;
+      const key = cell.dataset.col;
+      if (!key || !COLUMN_DEFS[key]) return;
+
+      // Critical: prevent the parent draggable cell from interpreting
+      // this gesture as the start of a column reorder, AND prevent the
+      // browser from initiating its own text-selection / image-drag.
+      e.preventDefault();
+      e.stopPropagation();
+      _isResizing = true;
+
+      const rect = cell.getBoundingClientRect();
+      const startX = e.clientX;
+      const startW = rect.width;
+
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      cell.classList.add('col-resizing');
+
+      const isCoinKey = (key === 'coin');
+      const minPx = isCoinKey ? MIN_COIN_PX : MIN_COL_PX;
+
+      const onMove = (ev) => {
+        const dx = ev.clientX - startX;
+        const next = Math.max(minPx, Math.round(startW + dx));
+        // Dragging COIN's right edge converts it from 'flex' to a
+        // fixed pixel width — once the user has resized it, that's
+        // their explicit choice. Resetting layout (window.resetLayout)
+        // restores the original flex behavior.
+        _columnWidths[key] = next;
+        _applyGridTemplate();
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        cell.classList.remove('col-resizing');
+        _persistColumnWidths();
+        // Tiny debounce before clearing the flag so a stray dragstart
+        // queued during the same gesture stays blocked.
+        setTimeout(() => { _isResizing = false; }, 0);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+    // Block click on the handle from bubbling to the parent — the
+    // PANIC cell uses click-to-open-manual and we don't want a stray
+    // resize click to trigger it.
+    handle.addEventListener('click', (e) => { e.stopPropagation(); });
+  });
+}
+
+// V7.4 — Hover tooltip popup engine.
+// Cells with `data-tooltip="…"` (set in renderHeader from
+// COLUMN_DEFS.tooltip) get a custom absolute-positioned popup on
+// mouseover. The native browser `title=""` is removed for these cells
+// at attach-time so the OS tooltip doesn't double-up on the custom one.
+// Implementation is delegated on the document so a header rebuild
+// (drag-reorder, resetLayout) never has to re-bind listeners.
+function _initHeaderTooltips() {
+  if (document.getElementById('header-tooltip-popup')) return; // idempotent
+  const tip = document.createElement('div');
+  tip.id = 'header-tooltip-popup';
+  tip.className = 'header-tooltip';
+  tip.setAttribute('role', 'tooltip');
+  tip.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(tip);
+
+  const positionFor = (cell) => {
+    const r = cell.getBoundingClientRect();
+    const vw = window.innerWidth || document.documentElement.clientWidth;
+    // First measure with default left/top to learn intrinsic size.
+    tip.style.left = '0px';
+    tip.style.top  = '0px';
+    tip.style.maxWidth = '320px';
+    tip.classList.add('is-visible');
+    const tr = tip.getBoundingClientRect();
+    // Center horizontally on the cell, clamp into the viewport.
+    let left = Math.round(r.left + r.width / 2 - tr.width / 2);
+    left = Math.max(8, Math.min(vw - tr.width - 8, left));
+    const top = Math.round(r.bottom + 8);
+    tip.style.left = `${left}px`;
+    tip.style.top  = `${top}px`;
+  };
+
+  document.addEventListener('mouseover', (e) => {
+    const t = e.target;
+    if (!t || !t.closest) return;
+    const cell = t.closest('.thdr [data-tooltip]');
+    if (!cell) return;
+    const text = cell.getAttribute('data-tooltip');
+    if (!text) return;
+    // Drop the native title so we don't render two tooltips at once.
+    if (cell.hasAttribute('title')) {
+      cell.dataset.tipNativeSaved = cell.getAttribute('title') || '';
+      cell.removeAttribute('title');
+    }
+    tip.textContent = text;
+    tip.setAttribute('aria-hidden', 'false');
+    positionFor(cell);
+  });
+
+  document.addEventListener('mouseout', (e) => {
+    const t = e.target;
+    if (!t || !t.closest) return;
+    const cell = t.closest('.thdr [data-tooltip]');
+    if (!cell) return;
+    tip.classList.remove('is-visible');
+    tip.setAttribute('aria-hidden', 'true');
+    // Restore the native title so right-click → "Inspect" etc. still
+    // shows the upstream metadata on a second hover.
+    if (cell.dataset.tipNativeSaved != null) {
+      cell.setAttribute('title', cell.dataset.tipNativeSaved);
+      delete cell.dataset.tipNativeSaved;
+    }
+  });
+
+  // Hide on scroll inside the scanner pane (the popup is body-mounted
+  // so it would otherwise stay anchored to a stale rect).
+  document.addEventListener('scroll', () => {
+    tip.classList.remove('is-visible');
+    tip.setAttribute('aria-hidden', 'true');
+  }, true);
+}
+
+// One-time bootstrap of the V7.3 + V7.4 column engine. Safe to call
+// before the header DOM is in the document — renderHeader() looks up
+// the element lazily and bails if absent.
 function initColumnDnD() {
   _applyGridTemplate();
   renderHeader();
+  _initHeaderTooltips(); // V7.4 hover popups — idempotent
 }
 
 // Reset action exposed for the user-facing "reset layout" footer link
-// so a broken order can be flushed without devtools.
+// so a broken order / oversized column can be flushed without devtools.
 window.resetLayout = function() {
-  try { localStorage.removeItem(COLUMN_ORDER_STORAGE_KEY); } catch {}
+  try {
+    localStorage.removeItem(COLUMN_ORDER_STORAGE_KEY);
+    localStorage.removeItem(COLUMN_WIDTHS_STORAGE_KEY); // V7.4
+  } catch {}
   _columnOrder = DEFAULT_COLUMN_ORDER.slice();
+  for (const k of Object.keys(COLUMN_DEFS)) _columnWidths[k] = COLUMN_DEFS[k].width;
   _applyGridTemplate();
   renderHeader();
   try { renderList(); } catch {}

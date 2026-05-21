@@ -193,20 +193,28 @@
                   | 12H | 24H | 7D | 24H VOL | HOT]. Inline children
                  below are a static SSR fallback so the page is not
                  visibly blank between markup parse and JS boot. -->
+            <!-- V7.4: each header cell carries a trailing
+                 .col-resize-handle injected by renderHeader(); the
+                 static markup below is just the SSR fallback so the
+                 first paint isn't a blank row before terminal.js
+                 boots. The [?] button is gone — the PANIC label is
+                 itself the manual trigger (data-panic-help on the
+                 cell), and SCORE / PANIC / HOT carry data-tooltip
+                 for the .header-tooltip popup engine. -->
             <div class="thdr" id="scanner-thdr">
-              <span data-col="rank" class="no-handle">#</span>
-              <span data-col="coin" class="no-handle">COIN</span>
-              <span data-col="signal" draggable="true">SIGNAL</span>
-              <span data-col="score" class="tr" draggable="true" title="Signal Score 0-10">SCORE</span>
-              <span data-col="panic" class="tr" draggable="true" title="V7.0 Panic Indicator: -100 (Capitulation) … 0 (Neutral) … +100 (Extreme FOMO).">PANIC <button type="button" class="panic-help-btn" data-panic-help aria-label="Open PANIC manual">?</button></span>
-              <span data-col="price" class="tr" draggable="true">PRICE</span>
-              <span data-col="c1"  class="tr" draggable="true" title="1h price change %">1H %</span>
-              <span data-col="c4"  class="tr" draggable="true" title="4h price change % (derived from CoinGecko sparkline)">4H %</span>
-              <span data-col="c12" class="tr" draggable="true" title="12h price change % (derived from CoinGecko sparkline)">12H %</span>
-              <span data-col="c24" class="tr" draggable="true">24H %</span>
-              <span data-col="c7d" class="tr" draggable="true" title="7d price change %">7D %</span>
-              <span data-col="qv"  class="tr" draggable="true" title="24h Quote Volume (USD)">24H VOL</span>
-              <span data-col="hot" class="tr" draggable="true" data-hot-tip>HOT</span>
+              <span data-col="rank" class="no-handle">#<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="coin" class="no-handle">COIN<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="signal" draggable="true">SIGNAL<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="score" class="tr" draggable="true" title="Signal Score 0-10" data-tooltip="Primary algorithmic valuation engine. Scales 0 to 10/10 based on macro confluence indicators.">SCORE<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="panic" class="tr panic-header" draggable="true" data-panic-help title="Click for the PANIC manual" data-tooltip="Composite math blend of 24h Volume Delta (50%), 1h Price Velocity (30%), and Institutional Sniping (20%). High absolute values indicate retail extremes ( >+80 FOMO top risk · <-80 capitulation bounce zone ). Click to open the full manual.">PANIC<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="price" class="tr" draggable="true">PRICE<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="c1"  class="tr" draggable="true" title="1h price change %">1H %<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="c4"  class="tr" draggable="true" title="4h price change % (derived from CoinGecko sparkline)">4H %<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="c12" class="tr" draggable="true" title="12h price change % (derived from CoinGecko sparkline)">12H %<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="c24" class="tr" draggable="true">24H %<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="c7d" class="tr" draggable="true" title="7d price change %">7D %<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="qv"  class="tr" draggable="true" title="24h Quote Volume (USD)">24H VOL<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <span data-col="hot" class="tr" draggable="true" data-hot-tip data-tooltip="Real-time attention and volatility tracking index based on immediate trading frequency spikes.">HOT<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
               <span class="trow-toggle-hdr no-handle" aria-hidden="true">⋯</span>
             </div>
             <div id="clist"></div>
