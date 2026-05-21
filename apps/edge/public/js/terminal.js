@@ -1465,6 +1465,24 @@ function renderList() {
     const cls = n >= 0 ? 'pos' : 'neg';
     return `<span class="tr ${cls}">${fp(n, 1)}</span>`;
   };
+  // V7.4.5 — defensive timeframe extractor. The upstream payload
+  // shape varies depending on which build branch in markets.js
+  // produced the row (CoinGecko-merged vs. Binance-only spot vs.
+  // futures-driver), and a coin can legitimately carry e.g.
+  // `price_change_percentage_1h_in_currency` without an `_c1` mirror.
+  // Walks the candidate key list and returns the FIRST finite number
+  // it finds. A real numeric 0 is preserved (the previous code path
+  // already handled that — this helper just widens the search).
+  const _pct = (row, ...keys) => {
+    if (!row) return null;
+    for (const k of keys) {
+      const raw = row[k];
+      if (raw == null || raw === '') continue;
+      const n = Number(raw);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  };
 
   page.forEach((d, i) => {
     try {
@@ -1540,6 +1558,16 @@ function renderList() {
       // visible cell carries a `data-col` attribute (mobile @media
       // rules + WS flash selectors target it) plus the legacy
       // `data-cell` alias for cells the stream pipeline mutates.
+      // V7.4.5 — each timeframe pulls through _pct() so any of the
+      // upstream key variants resolves to a number. Without the
+      // fallback chain, a row that came from the Binance-spot build
+      // branch in markets.js (which leaves _c1/_c4/_c12/_c7d as
+      // null) renders as the dead "-" placeholder.
+      const v_c1  = _pct(d, '_c1',  'price_change_percentage_1h_in_currency', 'price_change_percentage_1h', 'percent_change_1h', 'c1');
+      const v_c4  = _pct(d, '_c4',  'price_change_percentage_4h_in_currency', 'price_change_percentage_4h', 'percent_change_4h', 'c4');
+      const v_c12 = _pct(d, '_c12', 'price_change_percentage_12h_in_currency','price_change_percentage_12h','percent_change_12h','c12');
+      const v_c24 = _pct(d, '_c24', 'price_change_percentage_24h_in_currency','price_change_percentage_24h','percent_change_24h','c24');
+      const v_c7d = _pct(d, '_c7d', 'price_change_percentage_7d_in_currency', 'price_change_percentage_7d', 'percent_change_7d', 'c7d');
       const cellHTML = {
         rank:   `<span data-col="rank" class="rn">${start + i + 1}</span>`,
         coin:   `<div data-col="coin" class="coin-cell"><span class="csym">${escSym}${exchBadge}</span><span class="cnm">${escName}</span></div>`,
@@ -1547,11 +1575,11 @@ function renderList() {
         score:  `<span data-col="score" data-cell="score" class="tr" style="color:${s.score>=6?'var(--grn)':'var(--txt2)'}"><b>${s.score}/10</b></span>`,
         panic:  `<span data-col="panic" data-cell="panic" class="tr">${panicBadge(panicScore)}</span>`,
         price:  `<span data-col="price" data-cell="price" class="tr">${_esc(fmt(price))}</span>`,
-        c1:     `<span data-col="c1"  data-cell="c1"  class="tr">${tfCell(d._c1)}</span>`,
-        c4:     `<span data-col="c4"  data-cell="c4"  class="tr">${tfCell(d._c4)}</span>`,
-        c12:    `<span data-col="c12" data-cell="c12" class="tr">${tfCell(d._c12)}</span>`,
-        c24:    `<span data-col="c24" data-cell="c24" class="tr">${tfCell(d._c24 ?? d.price_change_percentage_24h)}</span>`,
-        c7d:    `<span data-col="c7d" data-cell="c7d" class="tr">${tfCell(d._c7d)}</span>`,
+        c1:     `<span data-col="c1"  data-cell="c1"  class="tr">${tfCell(v_c1)}</span>`,
+        c4:     `<span data-col="c4"  data-cell="c4"  class="tr">${tfCell(v_c4)}</span>`,
+        c12:    `<span data-col="c12" data-cell="c12" class="tr">${tfCell(v_c12)}</span>`,
+        c24:    `<span data-col="c24" data-cell="c24" class="tr">${tfCell(v_c24)}</span>`,
+        c7d:    `<span data-col="c7d" data-cell="c7d" class="tr">${tfCell(v_c7d)}</span>`,
         qv:     `<span data-col="qv"  data-cell="qv"  class="tr">${_esc(fmt(qv))}</span>`,
         hot:    `<span data-col="hot" class="tr" style="color:${hot>60?'var(--red)':'var(--txt2)'}"><b>${hot}</b></span>`,
       };
@@ -3445,8 +3473,14 @@ document.getElementById('briefing-trigger')?.addEventListener('click', () => {
 //     the V7.4 .header-tooltip engine. Differs from `tip` which only
 //     feeds the native browser title="".
 const COLUMN_DEFS = {
+  // V7.4.5: COIN is now a fully reorderable column (the user must
+  // be able to drag SIGNAL onto it and have COIN bump right). RANK
+  // (#) stays non-draggable because it's a row marker, not a data
+  // column — but it IS still a valid DROP target (see _attachColumnDnD
+  // below: dragover + drop are wired on every cell regardless of
+  // dragOK, so signal can land at index 0 if the user really wants it).
   rank:   { label: '#',       width: 32,     tip: '',                                                                       align: 'left',  dragOK: false },
-  coin:   { label: 'COIN',    width: 'flex', tip: '',                                                                       align: 'left',  dragOK: false },
+  coin:   { label: 'COIN',    width: 'flex', tip: '',                                                                       align: 'left',  dragOK: true  },
   signal: { label: 'SIGNAL',  width: 80,     tip: '',                                                                       align: 'left',  dragOK: true  },
   score:  { label: 'SCORE',   width: 64,     tip: 'Signal Score 0-10',                                                      align: 'right', dragOK: true,
             tooltip: 'Primary algorithmic valuation engine. Scales 0 to 10/10 based on macro confluence indicators.' },
@@ -3605,27 +3639,51 @@ function _attachColumnDnD() {
   if (!hdr) return;
   let srcKey = null;
 
+  // V7.4.5 — split listener attachment so the "drag source" and
+  // "drop target" capabilities are independent.
+  //   • dragstart / dragend  → ONLY on cells whose def.dragOK is true
+  //                            (so we don't accidentally promote the
+  //                            row-number marker into a reorderable
+  //                            cell).
+  //   • dragover / drop /
+  //     dragleave            → EVERY cell, with no exception. Without
+  //                            this, COIN/RANK cannot accept a drop
+  //                            and the user can't park another column
+  //                            before COIN.
+  //
+  // Splice trace (verified for "move SIGNAL from idx 2 → COIN idx 1"):
+  //   before  = [rank, coin, signal, score, panic, …]   ← length 13
+  //   step 1  = splice(2, 1) ⇒ ['signal']; arr = [rank, coin, score, …]
+  //   step 2  = splice(1, 0, 'signal') ⇒ [rank, signal, coin, score, …]
+  //   after   = signal at idx 1, coin at idx 2 — no off-by-one. ✓
   hdr.querySelectorAll('[data-col]').forEach(el => {
     const key = el.dataset.col;
     const def = COLUMN_DEFS[key];
-    if (!def || !def.dragOK) return;
+    if (!def) return;
 
-    el.addEventListener('dragstart', (e) => {
-      // V7.4: suppress reorder while the mouse-resize engine is active.
-      if (_isResizing) { e.preventDefault(); return; }
-      srcKey = key;
-      el.classList.add('col-dragging');
-      try {
-        e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', key);
-      } catch {}
-    });
-    el.addEventListener('dragend', () => {
-      hdr.querySelectorAll('.col-drop-target').forEach(n => n.classList.remove('col-drop-target'));
-      el.classList.remove('col-dragging');
-      srcKey = null;
-    });
+    // ── DRAG SOURCE — gated by dragOK ──
+    if (def.dragOK) {
+      el.addEventListener('dragstart', (e) => {
+        // Suppress reorder while the mouse-resize engine is active.
+        if (_isResizing) { e.preventDefault(); return; }
+        srcKey = key;
+        el.classList.add('col-dragging');
+        try {
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', key);
+        } catch {}
+      });
+      el.addEventListener('dragend', () => {
+        hdr.querySelectorAll('.col-drop-target').forEach(n => n.classList.remove('col-drop-target'));
+        el.classList.remove('col-dragging');
+        srcKey = null;
+      });
+    }
+
+    // ── DROP TARGET — every cell, no exceptions (V7.4.5) ──
     el.addEventListener('dragover', (e) => {
+      // The preventDefault here is what makes the cell a legal drop
+      // target — without it the browser rejects the drop event.
       e.preventDefault();
       try { e.dataTransfer.dropEffect = 'move'; } catch {}
       hdr.querySelectorAll('.col-drop-target').forEach(n => n.classList.remove('col-drop-target'));

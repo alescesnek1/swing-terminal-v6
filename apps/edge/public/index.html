@@ -203,7 +203,9 @@
                  for the .header-tooltip popup engine. -->
             <div class="thdr" id="scanner-thdr">
               <span data-col="rank" class="no-handle">#<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
-              <span data-col="coin" class="no-handle">COIN<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
+              <!-- V7.4.5: COIN is draggable AND a drop target so SIGNAL
+                   can land before it (drop handlers wire on every cell). -->
+              <span data-col="coin" draggable="true">COIN<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
               <span data-col="signal" draggable="true">SIGNAL<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
               <span data-col="score" class="tr" draggable="true" title="Signal Score 0-10" data-tooltip="Primary algorithmic valuation engine. Scales 0 to 10/10 based on macro confluence indicators.">SCORE<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
               <span data-col="panic" class="tr panic-header" draggable="true" data-panic-help title="Click for the PANIC manual" data-tooltip="Composite math blend of 24h Volume Delta (50%), 1h Price Velocity (30%), and Institutional Sniping (20%). High absolute values indicate retail extremes ( >+80 FOMO top risk · <-80 capitulation bounce zone ). Click to open the full manual.">PANIC<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
