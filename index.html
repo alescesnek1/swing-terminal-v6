@@ -81,6 +81,7 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .thdr-cell{position:relative;user-select:none;cursor:grab;display:flex;align-items:center;white-space:nowrap}
 .thdr-cell.dragging{opacity:.5;cursor:grabbing}
 .thdr-cell.drag-over{border-left:2px solid var(--acc)}
+.thdr-cell.thdr-spacer{cursor:default;pointer-events:none;background:transparent}
 .col-resize-handle{position:absolute;right:-2px;top:0;bottom:0;width:5px;cursor:col-resize;z-index:5;background:transparent;transition:background .15s}
 .col-resize-handle:hover,.col-resize-handle.active{background:var(--acc);opacity:.6;border-radius:1px}
 body.col-resizing{cursor:col-resize!important;user-select:none!important}
@@ -278,7 +279,7 @@ body.col-resizing *{cursor:col-resize!important}
   .f-chip{font-size:8px;padding:2px 5px}
 
   /* Table: compact columns for mobile — user horizontally scrolls to reach SCORE */
-  .thdr,.trow{grid-template-columns:22px 96px 60px 74px 46px 46px 46px 46px 48px 50px 42px 52px!important;gap:3px;padding:3px 6px;font-size:9px;min-width:680px;width:max-content}
+  .thdr,.trow{grid-template-columns:22px 96px 60px 74px 46px 46px 46px 46px 48px 50px 42px 52px 0!important;gap:3px;padding:3px 6px;font-size:9px;min-width:680px;width:max-content}
   .col-resize-handle{display:none!important}
   .header-tooltip{display:none!important}
   .csym{font-size:10px}
@@ -324,7 +325,7 @@ body.col-resizing *{cursor:col-resize!important}
 
 @media(max-width:380px){
   /* Extra small: tighter columns but keep all 12 visible via horizontal swipe */
-  .thdr,.trow{grid-template-columns:20px 82px 54px 66px 40px 40px 40px 40px 42px 44px 38px 46px!important;font-size:8px;min-width:610px;width:max-content}
+  .thdr,.trow{grid-template-columns:20px 82px 54px 66px 40px 40px 40px 40px 42px 44px 38px 46px 0!important;font-size:8px;min-width:610px;width:max-content}
   .csym{font-size:9px}
   .tab{padding:5px 6px;font-size:8px}
   #topbar{padding:4px 6px}
@@ -332,7 +333,7 @@ body.col-resizing *{cursor:col-resize!important}
 </style>
 <style id="dynamic-cols">
 /* Default grid columns — will be overwritten by JS initColumnSystem() */
-.thdr,.trow{grid-template-columns:32px minmax(120px,1.6fr) 84px minmax(88px,1.1fr) 64px 64px 64px 64px 70px 60px 54px 70px}
+.thdr,.trow{grid-template-columns:32px minmax(120px,1.6fr) 84px minmax(88px,1.1fr) 64px 64px 64px 64px 70px 60px 54px 70px 1fr}
 </style>
 </head>
 <body>
@@ -542,7 +543,9 @@ const COLUMN_DEFS = [
   { key: 'hot',    label: 'HOT',    width: 54,  align: 'tr', flex: false,
     tooltip: 'Real-time attention and volatility tracking index based on immediate trading frequency spikes.' },
   { key: 'score',  label: 'SCORE',  width: 70,  align: 'tr', flex: false,
-    tooltip: 'Primary algorithmic valuation engine. Scales 0 to 10/10 based on macro confluence indicators.' }
+    tooltip: 'Primary algorithmic valuation engine. Scales 0 to 10/10 based on macro confluence indicators.' },
+  // Terminal black hole: absorbs all remaining width on the right. No resize, no drag, no drop.
+  { key: 'spacer', label: '',       width: '1fr', align: '', flex: false, dragOK: false }
 ];
 
 // Column order and widths persisted to localStorage
@@ -551,11 +554,17 @@ let COL_WIDTHS = {}; // key -> px width override (null/absent = default)
 
 function loadColumnLayout() {
   try {
-    const savedOrder = JSON.parse(localStorage.getItem('swing_col_order_v74'));
-    if (Array.isArray(savedOrder) && savedOrder.length === COLUMN_DEFS.length) {
-      // Validate all indices present
-      const sorted = [...savedOrder].sort((a,b) => a-b);
-      if (sorted.every((v,i) => v === i)) COL_ORDER = savedOrder;
+    let savedOrder = JSON.parse(localStorage.getItem('swing_col_order_v74'));
+    if (Array.isArray(savedOrder)) {
+      const spacerIdx = COLUMN_DEFS.findIndex(d => d.key === 'spacer');
+      // Migrate pre-V7.4.9 orders missing the spacer
+      if (spacerIdx >= 0 && savedOrder.length === COLUMN_DEFS.length - 1 && !savedOrder.includes(spacerIdx)) {
+        savedOrder = [...savedOrder, spacerIdx];
+      }
+      if (savedOrder.length === COLUMN_DEFS.length) {
+        const sorted = [...savedOrder].sort((a,b) => a-b);
+        if (sorted.every((v,i) => v === i)) COL_ORDER = savedOrder;
+      }
     }
   } catch(e) {}
   try {
@@ -570,6 +579,7 @@ function saveColumnLayout() {
 }
 
 function getColWidth(def) {
+  if (def.width === '1fr') return '1fr';
   if (def.flex) return 'minmax(120px,1.6fr)';
   const w = COL_WIDTHS[def.key];
   return (w != null ? w : def.width) + 'px';
@@ -610,12 +620,19 @@ function renderHeader() {
   hdr.innerHTML = '';
   COL_ORDER.forEach((defIdx, orderIdx) => {
     const def = COLUMN_DEFS[defIdx];
+    const isSpacer = def.dragOK === false;
     const cell = document.createElement('div');
-    cell.className = 'thdr-cell' + (def.align ? ' ' + def.align : '');
+    cell.className = 'thdr-cell' + (def.align ? ' ' + def.align : '') + (isSpacer ? ' thdr-spacer' : '');
     cell.dataset.orderIdx = orderIdx;
     cell.dataset.defIdx = defIdx;
-    cell.draggable = true;
+    cell.draggable = !isSpacer;
     cell.textContent = def.label;
+
+    if (isSpacer) {
+      // Pure void: no tooltip, no resize, no drag/drop events. Just absorbs flex space.
+      hdr.appendChild(cell);
+      return;
+    }
 
     // Tooltip
     if (def.tooltip) {
@@ -671,6 +688,12 @@ function renderHeader() {
       // Reorder: remove from old position, insert at new
       const moved = COL_ORDER.splice(from, 1)[0];
       COL_ORDER.splice(to, 0, moved);
+      // Spacer is sacred — always last. Push it back if any reorder displaced it.
+      const spIdx = COL_ORDER.findIndex(i => COLUMN_DEFS[i].dragOK === false);
+      if (spIdx >= 0 && spIdx !== COL_ORDER.length - 1) {
+        const sp = COL_ORDER.splice(spIdx, 1)[0];
+        COL_ORDER.push(sp);
+      }
       saveColumnLayout();
       applyGridTemplate();
       renderHeader();
@@ -1247,10 +1270,11 @@ function renderList() {
       vol:    `<span class="tr" style="color:${v>7?'var(--amb)':'var(--txt2)'}">${v.toFixed(1)}</span>`,
       panic:  `<span class="tr" style="color:${panicCol};font-weight:600">${panic > 0 ? '+' : ''}${panic}</span>`,
       hot:    `<span class="tr" style="color:${hot>60?'var(--red)':hot>30?'var(--amb)':'var(--txt2)'}"><b>${hot}</b></span>`,
-      score:  `<span class="tr" style="color:${s.score>=5?'var(--grn)':s.score>=3?'var(--amb)':'var(--txt2)'};font-weight:700">${s.score}/10</span>`
+      score:  `<span class="tr" style="color:${s.score>=5?'var(--grn)':s.score>=3?'var(--amb)':'var(--txt2)'};font-weight:700">${s.score}/10</span>`,
+      spacer: ''
     };
 
-    const cells = COL_ORDER.map(idx => cellMap[COLUMN_DEFS[idx].key]).join('');
+    const cells = COL_ORDER.map(idx => cellMap[COLUMN_DEFS[idx].key] || '').join('');
     return `<div class="trow${SEL===d.id?' sel':''}${rowCls}" onclick="pickCoin('${d.id}')">${cells}</div>`;
   }).join('');
 
