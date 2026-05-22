@@ -699,6 +699,40 @@ function initColumnSystem() {
   loadColumnLayout();
   applyGridTemplate();
   renderHeader();
+  bindVoidDropZone();
+}
+
+// V7.4.10 — The entire header background catches drops. If the user releases
+// the dragged column over the empty void (anywhere outside a specific child
+// cell), the column gets appended to the far right of the grid.
+function bindVoidDropZone() {
+  const hdr = document.getElementById('thdr-row');
+  if (!hdr || hdr.dataset.voidDropBound === '1') return;
+  hdr.dataset.voidDropBound = '1';
+
+  hdr.addEventListener('dragover', (e) => {
+    if (!_dragState) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  });
+
+  hdr.addEventListener('drop', (e) => {
+    // Bail unless the drop landed directly on the parent's empty background.
+    // If e.target is a child .thdr-cell, the child's own handler already moved it.
+    if (e.target !== hdr) return;
+    if (!_dragState) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const from = _dragState.fromOrderIdx;
+    if (from == null || from < 0 || from >= COL_ORDER.length) return;
+    if (from === COL_ORDER.length - 1) return; // already pinned right
+    const moved = COL_ORDER.splice(from, 1)[0];
+    COL_ORDER.push(moved);
+    saveColumnLayout();
+    applyGridTemplate();
+    renderHeader();
+    renderList();
+  });
 }
 
 // ========== SECTOR MAPPING ==========
