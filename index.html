@@ -73,15 +73,14 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .scan-wrap .thdr,.scan-wrap .trow{white-space:nowrap}
 /* Column order: #  COIN  SIGNAL  PRICE  1H  4H  24H  7D  VOL%  PANIC  HOT  SCORE
    Grid columns are dynamically injected via #dynamic-cols <style> tag by JS. */
-.thdr{display:grid;gap:4px;padding:5px 10px;font-size:9px;color:var(--txt3);letter-spacing:.05em;border-bottom:1px solid var(--b1);background:var(--s1);min-width:880px;width:100%}
-.trow{display:grid;gap:4px;padding:5px 10px;border-bottom:1px solid rgba(15,21,40,.9);cursor:pointer;transition:background .1s;align-items:center;font-size:10px;min-width:880px;width:100%}
+.thdr{display:grid;justify-content:start;gap:4px;padding:5px 10px;font-size:9px;color:var(--txt3);letter-spacing:.05em;border-bottom:1px solid var(--b1);background:var(--s1);min-width:880px;width:100%}
+.trow{display:grid;justify-content:start;gap:4px;padding:5px 10px;border-bottom:1px solid rgba(15,21,40,.9);cursor:pointer;transition:background .1s;align-items:center;font-size:10px;min-width:880px;width:100%}
 .trow:hover{background:var(--s2)}.trow.sel{background:rgba(0,232,200,.035);border-left:2px solid var(--acc);padding-left:8px}.trow:last-child{border-bottom:none}
 
 /* COLUMN RESIZE HANDLE */
 .thdr-cell{position:relative;user-select:none;cursor:grab;display:flex;align-items:center;white-space:nowrap}
 .thdr-cell.dragging{opacity:.5;cursor:grabbing}
 .thdr-cell.drag-over{border-left:2px solid var(--acc)}
-.thdr-cell.thdr-spacer{cursor:default;pointer-events:none;background:transparent}
 .col-resize-handle{position:absolute;right:-2px;top:0;bottom:0;width:5px;cursor:col-resize;z-index:5;background:transparent;transition:background .15s}
 .col-resize-handle:hover,.col-resize-handle.active{background:var(--acc);opacity:.6;border-radius:1px}
 body.col-resizing{cursor:col-resize!important;user-select:none!important}
@@ -279,7 +278,7 @@ body.col-resizing *{cursor:col-resize!important}
   .f-chip{font-size:8px;padding:2px 5px}
 
   /* Table: compact columns for mobile — user horizontally scrolls to reach SCORE */
-  .thdr,.trow{grid-template-columns:22px 96px 60px 74px 46px 46px 46px 46px 48px 50px 42px 52px 0!important;gap:3px;padding:3px 6px;font-size:9px;min-width:680px;width:max-content}
+  .thdr,.trow{grid-template-columns:22px 96px 60px 74px 46px 46px 46px 46px 48px 50px 42px 52px!important;gap:3px;padding:3px 6px;font-size:9px;min-width:680px;width:max-content}
   .col-resize-handle{display:none!important}
   .header-tooltip{display:none!important}
   .csym{font-size:10px}
@@ -325,7 +324,7 @@ body.col-resizing *{cursor:col-resize!important}
 
 @media(max-width:380px){
   /* Extra small: tighter columns but keep all 12 visible via horizontal swipe */
-  .thdr,.trow{grid-template-columns:20px 82px 54px 66px 40px 40px 40px 40px 42px 44px 38px 46px 0!important;font-size:8px;min-width:610px;width:max-content}
+  .thdr,.trow{grid-template-columns:20px 82px 54px 66px 40px 40px 40px 40px 42px 44px 38px 46px!important;font-size:8px;min-width:610px;width:max-content}
   .csym{font-size:9px}
   .tab{padding:5px 6px;font-size:8px}
   #topbar{padding:4px 6px}
@@ -333,7 +332,7 @@ body.col-resizing *{cursor:col-resize!important}
 </style>
 <style id="dynamic-cols">
 /* Default grid columns — will be overwritten by JS initColumnSystem() */
-.thdr,.trow{grid-template-columns:32px minmax(120px,1.6fr) 84px minmax(88px,1.1fr) 64px 64px 64px 64px 70px 60px 54px 70px 1fr}
+.thdr,.trow{grid-template-columns:32px 160px 84px 88px 64px 64px 64px 64px 70px 60px 54px 70px}
 </style>
 </head>
 <body>
@@ -530,7 +529,7 @@ function getMinScoreFromStorage() {
 // ========== COLUMN DEFINITIONS & LAYOUT ENGINE (V7.4) ==========
 const COLUMN_DEFS = [
   { key: 'rank',   label: '#',      width: 32,  align: '', flex: false },
-  { key: 'coin',   label: 'COIN',   width: null, align: '', flex: true  },  // fluid 1fr
+  { key: 'coin',   label: 'COIN',   width: 160, align: '', flex: false },
   { key: 'signal', label: 'SIGNAL', width: 84,  align: '', flex: false },
   { key: 'price',  label: 'PRICE',  width: 88,  align: 'tr', flex: false },
   { key: '1h',     label: '1H',     width: 64,  align: 'tr', flex: false },
@@ -543,9 +542,7 @@ const COLUMN_DEFS = [
   { key: 'hot',    label: 'HOT',    width: 54,  align: 'tr', flex: false,
     tooltip: 'Real-time attention and volatility tracking index based on immediate trading frequency spikes.' },
   { key: 'score',  label: 'SCORE',  width: 70,  align: 'tr', flex: false,
-    tooltip: 'Primary algorithmic valuation engine. Scales 0 to 10/10 based on macro confluence indicators.' },
-  // Terminal black hole: absorbs all remaining width on the right. No resize, no drag, no drop.
-  { key: 'spacer', label: '',       width: '1fr', align: '', flex: false, dragOK: false }
+    tooltip: 'Primary algorithmic valuation engine. Scales 0 to 10/10 based on macro confluence indicators.' }
 ];
 
 // Column order and widths persisted to localStorage
@@ -554,17 +551,10 @@ let COL_WIDTHS = {}; // key -> px width override (null/absent = default)
 
 function loadColumnLayout() {
   try {
-    let savedOrder = JSON.parse(localStorage.getItem('swing_col_order_v74'));
-    if (Array.isArray(savedOrder)) {
-      const spacerIdx = COLUMN_DEFS.findIndex(d => d.key === 'spacer');
-      // Migrate pre-V7.4.9 orders missing the spacer
-      if (spacerIdx >= 0 && savedOrder.length === COLUMN_DEFS.length - 1 && !savedOrder.includes(spacerIdx)) {
-        savedOrder = [...savedOrder, spacerIdx];
-      }
-      if (savedOrder.length === COLUMN_DEFS.length) {
-        const sorted = [...savedOrder].sort((a,b) => a-b);
-        if (sorted.every((v,i) => v === i)) COL_ORDER = savedOrder;
-      }
+    const savedOrder = JSON.parse(localStorage.getItem('swing_col_order_v74'));
+    if (Array.isArray(savedOrder) && savedOrder.length === COLUMN_DEFS.length) {
+      const sorted = [...savedOrder].sort((a,b) => a-b);
+      if (sorted.every((v,i) => v === i)) COL_ORDER = savedOrder;
     }
   } catch(e) {}
   try {
@@ -579,8 +569,6 @@ function saveColumnLayout() {
 }
 
 function getColWidth(def) {
-  if (def.width === '1fr') return '1fr';
-  if (def.flex) return 'minmax(120px,1.6fr)';
   const w = COL_WIDTHS[def.key];
   return (w != null ? w : def.width) + 'px';
 }
@@ -620,19 +608,12 @@ function renderHeader() {
   hdr.innerHTML = '';
   COL_ORDER.forEach((defIdx, orderIdx) => {
     const def = COLUMN_DEFS[defIdx];
-    const isSpacer = def.dragOK === false;
     const cell = document.createElement('div');
-    cell.className = 'thdr-cell' + (def.align ? ' ' + def.align : '') + (isSpacer ? ' thdr-spacer' : '');
+    cell.className = 'thdr-cell' + (def.align ? ' ' + def.align : '');
     cell.dataset.orderIdx = orderIdx;
     cell.dataset.defIdx = defIdx;
-    cell.draggable = !isSpacer;
+    cell.draggable = true;
     cell.textContent = def.label;
-
-    if (isSpacer) {
-      // Pure void: no tooltip, no resize, no drag/drop events. Just absorbs flex space.
-      hdr.appendChild(cell);
-      return;
-    }
 
     // Tooltip
     if (def.tooltip) {
@@ -642,7 +623,7 @@ function renderHeader() {
       cell.appendChild(tip);
     }
 
-    // Resize handle (not on fluid column)
+    // Resize handle
     if (!def.flex) {
       const handle = document.createElement('div');
       handle.className = 'col-resize-handle';
@@ -685,15 +666,9 @@ function renderHeader() {
       const from = _dragState.fromOrderIdx;
       const to = orderIdx;
       if (from === to) return;
-      // Reorder: remove from old position, insert at new
+      // Reorder: any index → any index, no constraints.
       const moved = COL_ORDER.splice(from, 1)[0];
       COL_ORDER.splice(to, 0, moved);
-      // Spacer is sacred — always last. Push it back if any reorder displaced it.
-      const spIdx = COL_ORDER.findIndex(i => COLUMN_DEFS[i].dragOK === false);
-      if (spIdx >= 0 && spIdx !== COL_ORDER.length - 1) {
-        const sp = COL_ORDER.splice(spIdx, 1)[0];
-        COL_ORDER.push(sp);
-      }
       saveColumnLayout();
       applyGridTemplate();
       renderHeader();
@@ -755,7 +730,7 @@ function fmt(n) {
   if (n >= 0.001) return '$' + n.toFixed(4);
   return '$' + n.toFixed(6);
 }
-function fp(n, d=2) { return n == null ? '—' : (n >= 0 ? '+' : '') + n.toFixed(d) + '%'; }
+function fp(n, d=2) { const v = (n == null || !isFinite(n)) ? 0 : +n; return (v >= 0 ? '+' : '') + v.toFixed(d) + '%'; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 // Seeded PRNG for deterministic mock derivations
@@ -763,9 +738,17 @@ function rng(seed) { let s = (((seed % 2147483647) + 2147483647) % 2147483647) |
 function coinRng(id, salt=0) { return rng(id.split('').reduce((a,c) => a*31 + c.charCodeAt(0), 1) + salt + Math.floor(Date.now()/900000)); }
 
 // ========== DERIVED METRICS ==========
-function get1h(d) { return d.price_change_percentage_1h_in_currency ?? (d.price_change_percentage_24h != null ? d.price_change_percentage_24h / 6 + (coinRng(d.id,11)()-0.5)*2.5 : 0); }
-function get4h(d) { return d._4h ?? (d.price_change_percentage_24h != null ? d.price_change_percentage_24h / 2.8 + (coinRng(d.id,44)()-0.5)*3 : 0); }
-function getVolPct(d) { return d.total_volume / (d.market_cap || 1) * 100; }
+// Direct CoinGecko /coins/markets bindings — no synthesis, no fabricated values.
+// Missing keys collapse to 0 so fp() renders "+0.0%" instead of "—".
+function get1h(d)  { return +d.price_change_percentage_1h_in_currency  || 0; }
+function get4h(d)  { return +d.price_change_percentage_4h_in_currency  || 0; }
+function get24h(d) { const v = d.price_change_percentage_24h_in_currency ?? d.price_change_percentage_24h; return +v || 0; }
+function get7d(d)  { return +d.price_change_percentage_7d_in_currency  || 0; }
+function getVolPct(d) {
+  const tv = +d.total_volume || 0;
+  const mc = +d.market_cap || 0;
+  return mc > 0 ? (tv / mc) * 100 : 0;
+}
 function getFunding(d) {
   const r = coinRng(d.id, 99), c = d.price_change_percentage_24h || 0;
   return clamp(0.0075 - c * 0.0019 + (r()-0.5) * 0.009, -0.06, 0.08);
@@ -1230,6 +1213,13 @@ function getFilteredSorted() {
 }
 
 function renderList() {
+  // TEMP DIAG — log the upstream payload shape so we can audit the exact CoinGecko keys.
+  // Remove after verifying 1h/4h/24h/7d/vol bindings.
+  if (DATA[0] && !window.__dataKeyDump) {
+    console.log('[DATA[0] keys]', Object.keys(DATA[0]));
+    console.log('[DATA[0] sample]', DATA[0]);
+    window.__dataKeyDump = true;
+  }
   const filtered = getFilteredSorted();
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   currentPage = clamp(currentPage, 0, Math.max(0, totalPages - 1));
@@ -1249,9 +1239,9 @@ function renderList() {
 
   // Build cell data keyed by column key so we can emit in COL_ORDER
   document.getElementById('clist').innerHTML = page.map((d, i) => {
-    const s = sig(d), c24 = d.price_change_percentage_24h || 0;
+    const s = sig(d), c24 = get24h(d);
     const h1 = get1h(d), h4 = get4h(d), v = getVolPct(d);
-    const c7 = d.price_change_percentage_7d_in_currency || 0;
+    const c7 = get7d(d);
     const hot = calcHotness(d);
     const panic = calcPanic(d);
     const sym = (d.symbol || '').toUpperCase();
@@ -1270,11 +1260,10 @@ function renderList() {
       vol:    `<span class="tr" style="color:${v>7?'var(--amb)':'var(--txt2)'}">${v.toFixed(1)}</span>`,
       panic:  `<span class="tr" style="color:${panicCol};font-weight:600">${panic > 0 ? '+' : ''}${panic}</span>`,
       hot:    `<span class="tr" style="color:${hot>60?'var(--red)':hot>30?'var(--amb)':'var(--txt2)'}"><b>${hot}</b></span>`,
-      score:  `<span class="tr" style="color:${s.score>=5?'var(--grn)':s.score>=3?'var(--amb)':'var(--txt2)'};font-weight:700">${s.score}/10</span>`,
-      spacer: ''
+      score:  `<span class="tr" style="color:${s.score>=5?'var(--grn)':s.score>=3?'var(--amb)':'var(--txt2)'};font-weight:700">${s.score}/10</span>`
     };
 
-    const cells = COL_ORDER.map(idx => cellMap[COLUMN_DEFS[idx].key] || '').join('');
+    const cells = COL_ORDER.map(idx => cellMap[COLUMN_DEFS[idx].key]).join('');
     return `<div class="trow${SEL===d.id?' sel':''}${rowCls}" onclick="pickCoin('${d.id}')">${cells}</div>`;
   }).join('');
 
