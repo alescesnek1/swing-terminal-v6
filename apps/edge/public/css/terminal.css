@@ -388,16 +388,16 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .pb-row{display:grid;grid-template-columns:80px 90px 50px 1fr 1fr 130px 110px;gap:8px;padding:8px 14px;border-bottom:1px solid rgba(15,21,40,.7);font-size:11px;align-items:center;white-space:nowrap;transition:background .08s}
 .pb-row:hover{background:var(--s2)}
 .pb-row:last-child{border-bottom:none}
-.pb-row__time{color:var(--txt3)}
+.pb-row__time{color:var(--txt3);font-family:var(--mono);font-size:8px;font-weight:400;font-variant-numeric:tabular-nums}
 .pb-row__sym{color:var(--txt);font-weight:600;font-size:12px}
 .pb-row__side{font-size:9px;font-weight:700;padding:2px 6px;border-radius:2px;text-align:center;letter-spacing:.06em;justify-self:start}
 .pb-row__side.long{background:rgba(0,212,132,.12);color:var(--grn);border:1px solid rgba(0,212,132,.3)}
 .pb-row__side.short{background:rgba(255,51,86,.12);color:var(--red);border:1px solid rgba(255,51,86,.3)}
-.pb-row__px{color:var(--txt2);text-align:right;overflow:hidden;text-overflow:ellipsis}
-.pb-row__pnl{text-align:right;font-weight:700}
+.pb-row__px{color:var(--txt2);text-align:right;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:8px;font-weight:400;font-variant-numeric:tabular-nums}
+.pb-row__pnl{text-align:right;font-family:var(--mono);font-size:8px;font-weight:400;font-variant-numeric:tabular-nums}
 .pb-row__pnl.pos{color:var(--grn)}
 .pb-row__pnl.neg{color:var(--red)}
-.pb-row__dur{text-align:right;color:var(--txt3)}
+.pb-row__dur{text-align:right;color:var(--txt3);font-family:var(--mono);font-size:8px;font-weight:400;font-variant-numeric:tabular-nums}
 
 /* LIVE open-position rows — distinct from closed trades */
 .pb-row--live{border-left:2px solid var(--amb);background:rgba(255,176,32,.04);border-bottom:1px solid rgba(255,176,32,.12)}

@@ -3261,7 +3261,9 @@ function _pbTradeKey(trade) {
   ].join('|');
 }
 
-// ── TRADE RECEIPT: Canvas sparkline renderer (pure Canvas 2D API) ──
+// ── TRADE RECEIPT: PnL sparkline renderer (pure Canvas 2D API) ──
+// Plots PnL% instead of raw price so UP = profit, DOWN = loss
+// regardless of LONG/SHORT side.
 function _pbDrawReceipt(canvas, trade) {
   const curve = Array.isArray(trade.priceCurve) ? trade.priceCurve : [];
   if (curve.length < 2) return;
@@ -3274,117 +3276,145 @@ function _pbDrawReceipt(canvas, trade) {
   if (!ctx) return;
   ctx.scale(dpr, dpr);
 
-  const pad = { top: 14, right: 18, bottom: 14, left: 18 };
-  const w = cssW - pad.left - pad.right;
-  const h = cssH - pad.top - pad.bottom;
+  const pad = 15; // strict padding on all sides
+  const w = cssW - pad * 2;
+  const h = cssH - pad * 2;
+  const zeroY = pad + h / 2; // Y center = 0% PnL
 
-  // Price bounds with 8% breathing room
-  let minP = Infinity, maxP = -Infinity;
-  for (let i = 0; i < curve.length; i++) {
-    const p = curve[i].p;
-    if (p < minP) minP = p;
-    if (p > maxP) maxP = p;
+  // ── Transform price curve → PnL% curve ──
+  const ep = Number(trade.entryPrice) || 1;
+  const isShort = String(trade.side || '').toLowerCase() === 'short';
+  const pnlPts = curve.map(pt => {
+    const pnl = isShort
+      ? (ep - pt.p) / ep
+      : (pt.p - ep) / ep;
+    return { t: pt.t, pnl };
+  });
+
+  // ── Y-axis scaling: max |pnl| fills half-height minus pad ──
+  let maxAbs = 0;
+  for (let i = 0; i < pnlPts.length; i++) {
+    const a = Math.abs(pnlPts[i].pnl);
+    if (a > maxAbs) maxAbs = a;
   }
-  // Include entry price in bounds
-  const ep = Number(trade.entryPrice) || 0;
-  if (ep < minP) minP = ep;
-  if (ep > maxP) maxP = ep;
-  const range = maxP - minP || 1;
-  const breath = range * 0.08;
-  minP -= breath;
-  maxP += breath;
-  const pRange = maxP - minP;
+  if (maxAbs === 0) maxAbs = 0.01; // prevent division by zero
+  const halfH = h / 2;
 
-  const tMin = curve[0].t;
-  const tMax = curve[curve.length - 1].t;
+  const tMin = pnlPts[0].t;
+  const tMax = pnlPts[pnlPts.length - 1].t;
   const tRange = tMax - tMin || 1;
 
-  const toX = (t) => pad.left + ((t - tMin) / tRange) * w;
-  const toY = (p) => pad.top + (1 - (p - minP) / pRange) * h;
+  const toX = (t) => pad + ((t - tMin) / tRange) * w;
+  const toY = (pnl) => zeroY - (pnl / maxAbs) * halfH;
 
-  // ── Background grid lines ──
-  ctx.strokeStyle = 'rgba(255,255,255,.04)';
+  // ── Subtle background grid (4 horizontal lines) ──
+  ctx.strokeStyle = 'rgba(255,255,255,.035)';
   ctx.lineWidth = 1;
-  for (let i = 0; i <= 4; i++) {
-    const gy = pad.top + (h / 4) * i;
-    ctx.beginPath(); ctx.moveTo(pad.left, gy); ctx.lineTo(pad.left + w, gy); ctx.stroke();
+  for (let i = 1; i <= 3; i++) {
+    const gy1 = zeroY - (halfH / 3) * i;
+    const gy2 = zeroY + (halfH / 3) * i;
+    ctx.beginPath(); ctx.moveTo(pad, gy1); ctx.lineTo(pad + w, gy1); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(pad, gy2); ctx.lineTo(pad + w, gy2); ctx.stroke();
   }
 
-  // ── Entry price dashed line ──
-  const ey = toY(ep);
-  ctx.strokeStyle = 'rgba(184,204,232,.3)';
+  // ── Zero line (0% PnL = Entry) — dashed ──
+  ctx.strokeStyle = 'rgba(184,204,232,.25)';
   ctx.lineWidth = 1;
-  ctx.setLineDash([4, 4]);
-  ctx.beginPath(); ctx.moveTo(pad.left, ey); ctx.lineTo(pad.left + w, ey); ctx.stroke();
+  ctx.setLineDash([5, 4]);
+  ctx.beginPath(); ctx.moveTo(pad, zeroY); ctx.lineTo(pad + w, zeroY); ctx.stroke();
   ctx.setLineDash([]);
-  // Entry label
-  ctx.fillStyle = 'rgba(184,204,232,.45)';
-  ctx.font = '9px "IBM Plex Mono", monospace';
+  // Zero label
+  ctx.fillStyle = 'rgba(184,204,232,.4)';
+  ctx.font = '8px "IBM Plex Mono", monospace';
   ctx.textAlign = 'left';
-  ctx.fillText('ENTRY ' + _pbFmtPx(ep), pad.left + 2, ey - 4);
+  ctx.fillText('0% ENTRY', pad + 3, zeroY - 4);
 
-  // ── Price line ──
-  const isWin = (Number(trade.pnl) || 0) >= 0;
+  // ── Determine win/loss color ──
+  const finalPnl = pnlPts[pnlPts.length - 1].pnl;
+  const isWin = finalPnl >= 0;
   const lineColor = isWin ? '#00d484' : '#ff3356';
-  const lineGlow  = isWin ? 'rgba(0,212,132,.25)' : 'rgba(255,51,86,.25)';
+  const glowColor = isWin ? 'rgba(0,212,132,.2)' : 'rgba(255,51,86,.2)';
+  const fillTop   = isWin ? 'rgba(0,212,132,.14)' : 'rgba(255,51,86,.14)';
 
-  // Glow pass
-  ctx.strokeStyle = lineGlow;
-  ctx.lineWidth = 4;
+  // ── Glow pass ──
+  ctx.strokeStyle = glowColor;
+  ctx.lineWidth = 5;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   ctx.beginPath();
-  for (let i = 0; i < curve.length; i++) {
-    const x = toX(curve[i].t), y = toY(curve[i].p);
+  for (let i = 0; i < pnlPts.length; i++) {
+    const x = toX(pnlPts[i].t), y = toY(pnlPts[i].pnl);
     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   ctx.stroke();
 
-  // Sharp pass
+  // ── Sharp stroke ──
   ctx.strokeStyle = lineColor;
   ctx.lineWidth = 1.5;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
   ctx.beginPath();
-  for (let i = 0; i < curve.length; i++) {
-    const x = toX(curve[i].t), y = toY(curve[i].p);
+  for (let i = 0; i < pnlPts.length; i++) {
+    const x = toX(pnlPts[i].t), y = toY(pnlPts[i].pnl);
     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   ctx.stroke();
 
-  // ── Gradient fill under the line ──
-  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + h);
-  grad.addColorStop(0, isWin ? 'rgba(0,212,132,.12)' : 'rgba(255,51,86,.12)');
-  grad.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = grad;
+  // ── Gradient fill between curve and zero line ──
+  // Fill direction: from the curve toward the zero line.
+  if (isWin) {
+    // Profit: curve is above zero → gradient from top of chart to zeroY
+    const grad = ctx.createLinearGradient(0, pad, 0, zeroY);
+    grad.addColorStop(0, fillTop);
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+  } else {
+    // Loss: curve is below zero → gradient from zeroY to bottom of chart
+    const grad = ctx.createLinearGradient(0, zeroY, 0, pad + h);
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(1, fillTop);
+    ctx.fillStyle = grad;
+  }
   ctx.beginPath();
-  for (let i = 0; i < curve.length; i++) {
-    const x = toX(curve[i].t), y = toY(curve[i].p);
+  for (let i = 0; i < pnlPts.length; i++) {
+    const x = toX(pnlPts[i].t), y = toY(pnlPts[i].pnl);
     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
-  ctx.lineTo(toX(curve[curve.length - 1].t), pad.top + h);
-  ctx.lineTo(toX(curve[0].t), pad.top + h);
+  // Close path back along the zero line
+  ctx.lineTo(toX(pnlPts[pnlPts.length - 1].t), zeroY);
+  ctx.lineTo(toX(pnlPts[0].t), zeroY);
   ctx.closePath();
   ctx.fill();
 
-  // ── Entry marker (circle) ──
-  const ex0 = toX(curve[0].t), ey0 = toY(curve[0].p);
+  // ── ENTRY marker (blue ring at start, on zero line) ──
+  const entryX = toX(pnlPts[0].t), entryY = toY(pnlPts[0].pnl);
   ctx.fillStyle = '#3d9eff';
-  ctx.beginPath(); ctx.arc(ex0, ey0, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(entryX, entryY, 4, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = '#0b0f20';
-  ctx.beginPath(); ctx.arc(ex0, ey0, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(entryX, entryY, 1.8, 0, Math.PI * 2); ctx.fill();
 
-  // ── Exit marker (circle) ──
-  const lx = toX(curve[curve.length - 1].t), ly = toY(curve[curve.length - 1].p);
+  // ── EXIT marker (colored ring at end) ──
+  const exitX = toX(pnlPts[pnlPts.length - 1].t);
+  const exitY = toY(pnlPts[pnlPts.length - 1].pnl);
   ctx.fillStyle = lineColor;
-  ctx.beginPath(); ctx.arc(lx, ly, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(exitX, exitY, 4.5, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = '#0b0f20';
-  ctx.beginPath(); ctx.arc(lx, ly, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(exitX, exitY, 2, 0, Math.PI * 2); ctx.fill();
 
-  // ── Exit label ──
+  // ── Exit PnL label ──
   ctx.fillStyle = lineColor;
   ctx.font = '9px "IBM Plex Mono", monospace';
   ctx.textAlign = 'right';
-  const exitLabel = (trade.reason || 'exit').toUpperCase() + ' ' + _pbFmtPx(trade.exitPrice);
-  ctx.fillText(exitLabel, pad.left + w - 2, ly - 6);
+  const pctTxt = (finalPnl >= 0 ? '+' : '') + (finalPnl * 100).toFixed(2) + '%';
+  const yOff = isWin ? -7 : 12; // label above for wins, below for losses
+  ctx.fillText(pctTxt + '  ' + (trade.reason || 'exit').toUpperCase(), pad + w - 2, exitY + yOff);
+
+  // ── Max PnL% labels on Y axis edges ──
+  ctx.fillStyle = 'rgba(184,204,232,.25)';
+  ctx.font = '7px "IBM Plex Mono", monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('+' + (maxAbs * 100).toFixed(2) + '%', pad + w, pad + 8);
+  ctx.fillText('-' + (maxAbs * 100).toFixed(2) + '%', pad + w, pad + h - 2);
 }
 
 function _pbBuildRow(trade) {
@@ -4766,7 +4796,7 @@ if (typeof _origRequestAnalysis === 'function') {
   };
 }
 
-const LOCAL_PAPERBOT_STORAGE_KEY = 'terminal.v7.localPaperBot.state.v3';
+const LOCAL_PAPERBOT_STORAGE_KEY = 'terminal.v7.localPaperBot.state.v4';
 
 class LocalPaperBot {
   constructor(opts = {}) {
