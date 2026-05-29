@@ -3322,7 +3322,14 @@ function renderPaperBot(state) {
     if (state.status === 'stopped') { txt = 'STOPPED'; klass = 'pb-status-stopped'; }
     else if (openCount > 0) { txt = 'IN TRADE (' + openCount + ')'; klass = 'pb-status-intrade'; }
     else { txt = 'SEARCHING'; klass = 'pb-status-searching'; }
-    if (statusEl.textContent !== txt) statusEl.textContent = txt;
+    let statusText = document.getElementById('pb-status-text') || statusEl.querySelector('.pb-status-text');
+    if (!statusText) {
+      statusText = document.createElement('span');
+      statusText.className = 'pb-status-text';
+      statusText.id = 'pb-status-text';
+      statusEl.appendChild(statusText);
+    }
+    if (statusText.textContent !== txt) statusText.textContent = txt;
     statusEl.classList.remove('pb-status-searching','pb-status-intrade','pb-status-stopped');
     statusEl.classList.add(klass);
   }

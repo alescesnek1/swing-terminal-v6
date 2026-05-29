@@ -370,9 +370,14 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   0%,100%{opacity:.82;box-shadow:0 0 0 rgba(255,176,32,0)}
   50%{opacity:1;box-shadow:0 0 22px rgba(255,176,32,.46)}
 }
-.pb-status-searching{color:var(--grn) !important;animation:bot-pulse-scan 2.15s ease-in-out infinite;will-change:opacity,box-shadow}
-.pb-status-intrade{color:var(--amb) !important;animation:bot-pulse-trade 1.15s ease-in-out infinite;will-change:opacity,box-shadow}
-.pb-status-stopped{color:var(--red) !important;animation:none;opacity:.5;box-shadow:none}
+#pb-status{display:flex;align-items:center;gap:10px;overflow:visible}
+.pb-status-dot{width:10px;height:10px;border-radius:50%;flex:0 0 10px;background:currentColor;box-shadow:0 0 0 rgba(0,0,0,0);will-change:opacity,box-shadow}
+.pb-status-searching{color:var(--grn) !important;opacity:1}
+.pb-status-searching .pb-status-dot{animation:bot-pulse-scan 2.15s ease-in-out infinite}
+.pb-status-intrade{color:var(--amb) !important;opacity:1}
+.pb-status-intrade .pb-status-dot{animation:bot-pulse-trade 1.15s ease-in-out infinite}
+.pb-status-stopped{color:var(--red) !important;animation:none;opacity:.5}
+.pb-status-stopped .pb-status-dot{animation:none;box-shadow:none}
 
 .bot-ledger-wrap{display:flex;flex-direction:column;flex:1;min-height:0;background:var(--s1)}
 .bot-ledger-header{flex:0 0 auto}
