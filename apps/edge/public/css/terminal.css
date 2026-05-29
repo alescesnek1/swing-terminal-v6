@@ -405,6 +405,36 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 @keyframes pb-live-pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .pb-row__live-badge{display:inline-flex;align-items:center;justify-content:center;padding:2px 8px;border-radius:3px;font-size:9px;font-weight:700;letter-spacing:.1em;background:rgba(255,176,32,.15);color:var(--amb);border:1px solid rgba(255,176,32,.4);animation:pb-live-pulse 1.8s ease-in-out infinite}
 
+/* TRADE RECEIPT — click-to-expand sparkline panel */
+.pb-row--has-receipt{cursor:pointer}
+.pb-row--has-receipt:hover{background:rgba(0,232,200,.03)}
+.pb-row--expanded{background:rgba(0,232,200,.05) !important;border-left:2px solid var(--acc)}
+@keyframes pb-receipt-slide{from{opacity:0;max-height:0;margin-top:-4px}to{opacity:1;max-height:160px;margin-top:0}}
+.pb-row-receipt{
+  margin:0 8px 6px 8px;padding:0;
+  background:rgba(7,9,26,.85);backdrop-filter:blur(10px);
+  border:1px solid rgba(0,232,200,.12);border-top:none;
+  border-radius:0 0 6px 6px;
+  overflow:hidden;
+  animation:pb-receipt-slide .2s ease-out both
+}
+.pb-receipt__hdr{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:6px 14px;
+  border-bottom:1px solid rgba(255,255,255,.04);
+  font-size:9px;letter-spacing:.08em
+}
+.pb-receipt__title{color:var(--txt3);font-weight:700}
+.pb-receipt__meta{display:flex;align-items:center;gap:8px}
+.pb-receipt__sym{color:var(--txt);font-weight:600;font-size:10px}
+.pb-receipt__side{font-size:8px;font-weight:700;padding:1px 5px;border-radius:2px;letter-spacing:.06em}
+.pb-receipt__side.long{background:rgba(0,212,132,.12);color:var(--grn);border:1px solid rgba(0,212,132,.3)}
+.pb-receipt__side.short{background:rgba(255,51,86,.12);color:var(--red);border:1px solid rgba(255,51,86,.3)}
+.pb-receipt__result{font-weight:700;font-size:10px}
+.pb-receipt__result.pos{color:var(--grn)}
+.pb-receipt__result.neg{color:var(--red)}
+.pb-receipt__canvas{display:block;width:100%;height:100px;background:transparent}
+
 .pb-tab-pip{display:none;background:rgba(255,176,32,.18);color:var(--amb);border:1px solid rgba(255,176,32,.4);font-weight:700;padding:0 5px;border-radius:8px;font-size:8px;margin-left:4px}
 .pb-tab-pip.on{display:inline-block}
 

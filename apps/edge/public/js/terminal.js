@@ -3261,6 +3261,132 @@ function _pbTradeKey(trade) {
   ].join('|');
 }
 
+// ── TRADE RECEIPT: Canvas sparkline renderer (pure Canvas 2D API) ──
+function _pbDrawReceipt(canvas, trade) {
+  const curve = Array.isArray(trade.priceCurve) ? trade.priceCurve : [];
+  if (curve.length < 2) return;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || 400;
+  const cssH = canvas.clientHeight || 100;
+  canvas.width = cssW * dpr;
+  canvas.height = cssH * dpr;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.scale(dpr, dpr);
+
+  const pad = { top: 14, right: 18, bottom: 14, left: 18 };
+  const w = cssW - pad.left - pad.right;
+  const h = cssH - pad.top - pad.bottom;
+
+  // Price bounds with 8% breathing room
+  let minP = Infinity, maxP = -Infinity;
+  for (let i = 0; i < curve.length; i++) {
+    const p = curve[i].p;
+    if (p < minP) minP = p;
+    if (p > maxP) maxP = p;
+  }
+  // Include entry price in bounds
+  const ep = Number(trade.entryPrice) || 0;
+  if (ep < minP) minP = ep;
+  if (ep > maxP) maxP = ep;
+  const range = maxP - minP || 1;
+  const breath = range * 0.08;
+  minP -= breath;
+  maxP += breath;
+  const pRange = maxP - minP;
+
+  const tMin = curve[0].t;
+  const tMax = curve[curve.length - 1].t;
+  const tRange = tMax - tMin || 1;
+
+  const toX = (t) => pad.left + ((t - tMin) / tRange) * w;
+  const toY = (p) => pad.top + (1 - (p - minP) / pRange) * h;
+
+  // ── Background grid lines ──
+  ctx.strokeStyle = 'rgba(255,255,255,.04)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const gy = pad.top + (h / 4) * i;
+    ctx.beginPath(); ctx.moveTo(pad.left, gy); ctx.lineTo(pad.left + w, gy); ctx.stroke();
+  }
+
+  // ── Entry price dashed line ──
+  const ey = toY(ep);
+  ctx.strokeStyle = 'rgba(184,204,232,.3)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(pad.left, ey); ctx.lineTo(pad.left + w, ey); ctx.stroke();
+  ctx.setLineDash([]);
+  // Entry label
+  ctx.fillStyle = 'rgba(184,204,232,.45)';
+  ctx.font = '9px "IBM Plex Mono", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('ENTRY ' + _pbFmtPx(ep), pad.left + 2, ey - 4);
+
+  // ── Price line ──
+  const isWin = (Number(trade.pnl) || 0) >= 0;
+  const lineColor = isWin ? '#00d484' : '#ff3356';
+  const lineGlow  = isWin ? 'rgba(0,212,132,.25)' : 'rgba(255,51,86,.25)';
+
+  // Glow pass
+  ctx.strokeStyle = lineGlow;
+  ctx.lineWidth = 4;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (let i = 0; i < curve.length; i++) {
+    const x = toX(curve[i].t), y = toY(curve[i].p);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Sharp pass
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < curve.length; i++) {
+    const x = toX(curve[i].t), y = toY(curve[i].p);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // ── Gradient fill under the line ──
+  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + h);
+  grad.addColorStop(0, isWin ? 'rgba(0,212,132,.12)' : 'rgba(255,51,86,.12)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  for (let i = 0; i < curve.length; i++) {
+    const x = toX(curve[i].t), y = toY(curve[i].p);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.lineTo(toX(curve[curve.length - 1].t), pad.top + h);
+  ctx.lineTo(toX(curve[0].t), pad.top + h);
+  ctx.closePath();
+  ctx.fill();
+
+  // ── Entry marker (circle) ──
+  const ex0 = toX(curve[0].t), ey0 = toY(curve[0].p);
+  ctx.fillStyle = '#3d9eff';
+  ctx.beginPath(); ctx.arc(ex0, ey0, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#0b0f20';
+  ctx.beginPath(); ctx.arc(ex0, ey0, 2, 0, Math.PI * 2); ctx.fill();
+
+  // ── Exit marker (circle) ──
+  const lx = toX(curve[curve.length - 1].t), ly = toY(curve[curve.length - 1].p);
+  ctx.fillStyle = lineColor;
+  ctx.beginPath(); ctx.arc(lx, ly, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#0b0f20';
+  ctx.beginPath(); ctx.arc(lx, ly, 2, 0, Math.PI * 2); ctx.fill();
+
+  // ── Exit label ──
+  ctx.fillStyle = lineColor;
+  ctx.font = '9px "IBM Plex Mono", monospace';
+  ctx.textAlign = 'right';
+  const exitLabel = (trade.reason || 'exit').toUpperCase() + ' ' + _pbFmtPx(trade.exitPrice);
+  ctx.fillText(exitLabel, pad.left + w - 2, ly - 6);
+}
+
 function _pbBuildRow(trade) {
   const row = document.createElement('div');
   row.className = 'pb-row';
@@ -3308,6 +3434,50 @@ function _pbBuildRow(trade) {
   row.appendChild(exit);
   row.appendChild(pnl);
   row.appendChild(dur);
+
+  // ── TRADE RECEIPT: click to expand canvas sparkline ──
+  const hasCurve = Array.isArray(trade.priceCurve) && trade.priceCurve.length >= 2;
+  if (hasCurve) {
+    row.classList.add('pb-row--has-receipt');
+    row.addEventListener('click', () => {
+      const existing = row.nextElementSibling;
+      // Toggle off
+      if (existing && existing.classList.contains('pb-row-receipt')) {
+        existing.remove();
+        row.classList.remove('pb-row--expanded');
+        return;
+      }
+      // Toggle on — build receipt container
+      row.classList.add('pb-row--expanded');
+      const receipt = document.createElement('div');
+      receipt.className = 'pb-row-receipt';
+
+      // Header strip
+      const hdr = document.createElement('div');
+      hdr.className = 'pb-receipt__hdr';
+      const isWin = (Number(trade.pnl) || 0) >= 0;
+      hdr.innerHTML =
+        '<span class="pb-receipt__title">TRADE RECEIPT</span>'
+        + '<span class="pb-receipt__meta">'
+        + '<span class="pb-receipt__sym">' + (trade.symbol || '') + '</span> '
+        + '<span class="pb-receipt__side ' + sideKey + '">' + (sideKey === 'short' ? 'SHORT' : 'LONG') + '</span> '
+        + '<span class="pb-receipt__result ' + (isWin ? 'pos' : 'neg') + '">' + _pbFmtUsd(trade.pnl) + '</span>'
+        + '</span>';
+
+      const cvs = document.createElement('canvas');
+      cvs.className = 'pb-receipt__canvas';
+      cvs.setAttribute('width', '400');
+      cvs.setAttribute('height', '100');
+
+      receipt.appendChild(hdr);
+      receipt.appendChild(cvs);
+      row.after(receipt);
+
+      // Defer drawing one frame so the element has layout dimensions
+      requestAnimationFrame(() => _pbDrawReceipt(cvs, trade));
+    });
+  }
+
   return row;
 }
 
@@ -3468,6 +3638,9 @@ function renderPaperBot(state) {
   let trimCount = closedRows.length - PB_LEDGER_DOM_CAP;
   for (let i = closedRows.length - 1; i >= 0 && trimCount > 0; i--, trimCount--) {
     const last = closedRows[i];
+    // Clean up any expanded receipt panel attached to this row
+    const receipt = last.nextElementSibling;
+    if (receipt && receipt.classList.contains('pb-row-receipt')) receipt.remove();
     if (last.dataset && last.dataset.key) _pbRowKeys.delete(last.dataset.key);
     ledger.removeChild(last);
   }
@@ -4821,6 +4994,32 @@ class LocalPaperBot {
       this.state.cautionMultiplier = this._clamp(this.state.cautionMultiplier * 1.24, 0.75, 5);
     }
 
+    // ── TRADE RECEIPT: snapshot price curve for visual proof ──
+    let priceCurve = [];
+    try {
+      const fullHist = this.priceHistory.get(pos.symbol);
+      if (fullHist && fullHist.length) {
+        const openTs = Number(pos.openedAt) || 0;
+        priceCurve = fullHist
+          .filter(pt => pt.ts >= openTs && pt.ts <= now)
+          .map(pt => ({ p: pt.price, t: pt.ts }));
+        // Guarantee entry + exit anchors exist in the curve
+        if (!priceCurve.length || priceCurve[0].t > openTs) {
+          priceCurve.unshift({ p: pos.entryPrice, t: openTs });
+        }
+        if (priceCurve[priceCurve.length - 1].t < now) {
+          priceCurve.push({ p: effectiveExit, t: now });
+        }
+      }
+      // Fallback: at minimum, a straight line from entry → exit
+      if (priceCurve.length < 2) {
+        priceCurve = [
+          { p: pos.entryPrice, t: Number(pos.openedAt) || now },
+          { p: effectiveExit, t: now },
+        ];
+      }
+    } catch { priceCurve = []; }
+
     this.state.recentTrades.push({
       symbol: pos.symbol,
       side: pos.side,
@@ -4832,6 +5031,7 @@ class LocalPaperBot {
       openedAt: pos.openedAt,
       closedAt: now,
       holdMs: now - (Number(pos.openedAt) || now),
+      priceCurve,
     });
     if (this.state.recentTrades.length > this.recentTradeLimit) {
       this.state.recentTrades.splice(0, this.state.recentTrades.length - this.recentTradeLimit);
