@@ -3396,10 +3396,22 @@ function _pbDrawReceipt(canvas, trade) {
   // ── EXIT marker (colored ring at end) ──
   const exitX = toX(pnlPts[pnlPts.length - 1].t);
   const exitY = toY(pnlPts[pnlPts.length - 1].pnl);
-  ctx.fillStyle = lineColor;
-  ctx.beginPath(); ctx.arc(exitX, exitY, 4.5, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#0b0f20';
-  ctx.beginPath(); ctx.arc(exitX, exitY, 2, 0, Math.PI * 2); ctx.fill();
+  
+  if (trade.isOpen) {
+    const pulse = (Math.sin(Date.now() / 150) + 1) / 2;
+    const r1 = 4.5 + pulse * 2;
+    ctx.fillStyle = 'rgba(255, 176, 32, ' + (0.8 - pulse * 0.4) + ')';
+    ctx.beginPath(); ctx.arc(exitX, exitY, r1, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffb020';
+    ctx.beginPath(); ctx.arc(exitX, exitY, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#0b0f20';
+    ctx.beginPath(); ctx.arc(exitX, exitY, 1.5, 0, Math.PI * 2); ctx.fill();
+  } else {
+    ctx.fillStyle = lineColor;
+    ctx.beginPath(); ctx.arc(exitX, exitY, 4.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#0b0f20';
+    ctx.beginPath(); ctx.arc(exitX, exitY, 2, 0, Math.PI * 2); ctx.fill();
+  }
 
   // ── Exit PnL label ──
   ctx.fillStyle = lineColor;
@@ -3407,24 +3419,24 @@ function _pbDrawReceipt(canvas, trade) {
   ctx.textAlign = 'right';
   const pctTxt = (finalPnl >= 0 ? '+' : '') + (finalPnl * 100).toFixed(2) + '%';
   const yOff = isWin ? -7 : 12; // label above for wins, below for losses
-  ctx.fillText(pctTxt + '  ' + (trade.reason || 'exit').toUpperCase(), pad + w - 2, exitY + yOff);
+  const reasonTxt = trade.isOpen ? 'LIVE' : (trade.reason || 'exit').toUpperCase();
+  ctx.fillText(pctTxt + '  ' + reasonTxt, pad + w - 2, exitY + yOff);
 
-  // ── Max PnL% labels on Y axis edges ──
-  ctx.fillStyle = 'rgba(184,204,232,.25)';
-  ctx.font = '7px "IBM Plex Mono", monospace';
-  ctx.textAlign = 'right';
-  ctx.fillText('+' + (maxAbs * 100).toFixed(2) + '%', pad + w, pad + 8);
-  ctx.fillText('-' + (maxAbs * 100).toFixed(2) + '%', pad + w, pad + h - 2);
+  if (trade.isOpen && canvas.isConnected) {
+    requestAnimationFrame(() => _pbDrawReceipt(canvas, trade));
+  }
 }
 
 function _pbBuildRow(trade) {
+  const isLive = !!trade.isOpen;
   const row = document.createElement('div');
-  row.className = 'pb-row';
-  row.dataset.key = _pbTradeKey(trade);
+  row.className = isLive ? 'pb-row pb-row--live' : 'pb-row';
+  if (isLive) row.dataset.liveKey = trade.symbol + '|' + trade.openedAt;
+  else row.dataset.key = _pbTradeKey(trade);
 
   const time = document.createElement('span');
   time.className = 'pb-row__time';
-  time.textContent = _pbFmtTime(trade.closedAt);
+  time.textContent = _pbFmtTime(isLive ? trade.openedAt : trade.closedAt);
 
   const sym = document.createElement('span');
   sym.className = 'pb-row__sym';
@@ -3440,21 +3452,30 @@ function _pbBuildRow(trade) {
   entry.textContent = _pbFmtPx(trade.entryPrice);
   entry.title = 'Entry ' + _pbFmtPx(trade.entryPrice);
 
-  const exit = document.createElement('span');
-  exit.className = 'pb-row__px';
-  exit.textContent = _pbFmtPx(trade.exitPrice);
-  exit.title = 'Exit ' + _pbFmtPx(trade.exitPrice) + ' (' + (trade.reason || '—').toUpperCase() + ')';
+  let exit;
+  if (isLive) {
+    exit = document.createElement('span');
+    exit.className = 'pb-row__live-badge';
+    exit.textContent = 'LIVE';
+  } else {
+    exit = document.createElement('span');
+    exit.className = 'pb-row__px';
+    exit.textContent = _pbFmtPx(trade.exitPrice);
+    exit.title = 'Exit ' + _pbFmtPx(trade.exitPrice) + ' (' + (trade.reason || '—').toUpperCase() + ')';
+  }
 
   const pnl = document.createElement('span');
-  pnl.className = 'pb-row__pnl ' + ((Number(trade.pnl) || 0) >= 0 ? 'pos' : 'neg');
-  const pnlPctTxt = Number.isFinite(trade.pnlPct) ? ' (' + (trade.pnlPct >= 0 ? '+' : '') + trade.pnlPct.toFixed(2) + '%)' : '';
-  pnl.textContent = _pbFmtUsd(trade.pnl) + pnlPctTxt;
+  const pnlVal = isLive ? (Number(trade.currentPnl) || 0) : (Number(trade.pnl) || 0);
+  const pnlPctVal = isLive ? trade.currentPnlPct : trade.pnlPct;
+  pnl.className = 'pb-row__pnl ' + (pnlVal >= 0 ? 'pos' : 'neg');
+  const pnlPctTxt = Number.isFinite(pnlPctVal) ? ' (' + (pnlPctVal >= 0 ? '+' : '') + pnlPctVal.toFixed(2) + '%)' : '';
+  pnl.textContent = _pbFmtUsd(pnlVal) + pnlPctTxt;
 
   const dur = document.createElement('span');
   dur.className = 'pb-row__dur';
   const holdMs = (trade.holdMs != null)
     ? trade.holdMs
-    : (Number(trade.closedAt) || 0) - (Number(trade.openedAt) || 0);
+    : (isLive ? Date.now() - (Number(trade.openedAt) || Date.now()) : (Number(trade.closedAt) || 0) - (Number(trade.openedAt) || 0));
   dur.textContent = _pbFmtDuration(holdMs);
 
   row.appendChild(time);
@@ -3485,13 +3506,13 @@ function _pbBuildRow(trade) {
       // Header strip
       const hdr = document.createElement('div');
       hdr.className = 'pb-receipt__hdr';
-      const isWin = (Number(trade.pnl) || 0) >= 0;
+      const isWin = pnlVal >= 0;
       hdr.innerHTML =
-        '<span class="pb-receipt__title">TRADE RECEIPT</span>'
+        '<span class="pb-receipt__title">' + (isLive ? 'LIVE RECEIPT' : 'TRADE RECEIPT') + '</span>'
         + '<span class="pb-receipt__meta">'
         + '<span class="pb-receipt__sym">' + (trade.symbol || '') + '</span> '
         + '<span class="pb-receipt__side ' + sideKey + '">' + (sideKey === 'short' ? 'SHORT' : 'LONG') + '</span> '
-        + '<span class="pb-receipt__result ' + (isWin ? 'pos' : 'neg') + '">' + _pbFmtUsd(trade.pnl) + '</span>'
+        + '<span class="pb-receipt__result ' + (isWin ? 'pos' : 'neg') + '">' + _pbFmtUsd(pnlVal) + '</span>'
         + '</span>';
 
       const cvs = document.createElement('canvas');
@@ -3575,59 +3596,30 @@ function renderPaperBot(state) {
   _pbSetText('pb-trade-count', (state.totalClosed != null ? state.totalClosed : trades.length) + ' total');
 
   // ── LIVE POSITIONS: render at top of ledger ──
+  // Snapshot expanded live symbols
+  const expandedLiveKeys = new Set();
+  ledger.querySelectorAll('.pb-row--live.pb-row--expanded').forEach(el => {
+    if (el.dataset.liveKey) expandedLiveKeys.add(el.dataset.liveKey);
+  });
+
   // Remove stale live rows
-  ledger.querySelectorAll('.pb-row--live').forEach(el => el.remove());
+  ledger.querySelectorAll('.pb-row--live').forEach(el => {
+    const next = el.nextElementSibling;
+    if (next && next.classList.contains('pb-row-receipt')) next.remove();
+    el.remove();
+  });
+
   // Build live rows
   if (openPositions.length > 0) {
     const liveFrag = document.createDocumentFragment();
     for (let i = 0; i < openPositions.length; i++) {
       const pos = openPositions[i];
-      const row = document.createElement('div');
-      row.className = 'pb-row pb-row--live';
-      row.dataset.liveKey = pos.symbol + '|' + pos.openedAt;
-
-      const time = document.createElement('span');
-      time.className = 'pb-row__time';
-      time.textContent = _pbFmtTime(pos.openedAt);
-
-      const sym = document.createElement('span');
-      sym.className = 'pb-row__sym';
-      sym.textContent = String(pos.symbol || '');
-
-      const side = document.createElement('span');
-      const sideKey = String(pos.side || 'long').toLowerCase();
-      side.className = 'pb-row__side ' + sideKey;
-      side.textContent = sideKey === 'short' ? 'SHORT' : 'LONG';
-
-      const entry = document.createElement('span');
-      entry.className = 'pb-row__px';
-      entry.textContent = _pbFmtPx(pos.entryPrice);
-      entry.title = 'Entry ' + _pbFmtPx(pos.entryPrice);
-
-      // LIVE badge instead of exit price
-      const liveBadge = document.createElement('span');
-      liveBadge.className = 'pb-row__live-badge';
-      liveBadge.textContent = 'LIVE';
-
-      const pnlVal = Number(pos.currentPnl) || 0;
-      const pnlPctVal = Number(pos.currentPnlPct) || 0;
-      const pnl = document.createElement('span');
-      pnl.className = 'pb-row__pnl ' + (pnlVal >= 0 ? 'pos' : 'neg');
-      pnl.textContent = _pbFmtUsd(pnlVal) + ' (' + (pnlPctVal >= 0 ? '+' : '') + pnlPctVal.toFixed(2) + '%)';
-
-      const dur = document.createElement('span');
-      dur.className = 'pb-row__dur';
-      const holdMs = (Number(state.ts) || Date.now()) - (Number(pos.openedAt) || Date.now());
-      dur.textContent = _pbFmtDuration(holdMs);
-
-      row.appendChild(time);
-      row.appendChild(sym);
-      row.appendChild(side);
-      row.appendChild(entry);
-      row.appendChild(liveBadge);
-      row.appendChild(pnl);
-      row.appendChild(dur);
+      pos.isOpen = true;
+      const row = _pbBuildRow(pos);
       liveFrag.appendChild(row);
+      if (expandedLiveKeys.has(row.dataset.liveKey)) {
+        row.click(); // Re-apply expansion smoothly
+      }
     }
     ledger.insertBefore(liveFrag, ledger.firstChild);
   }
@@ -5091,7 +5083,20 @@ class LocalPaperBot {
       // Attach currentPnl for live UI rendering
       pos.currentPnl = this._round(pnl, 6);
       pos.currentPnlPct = this._round(pnlPct, 4);
-      return { ...pos, currentPrice: px, currentPnl: this._round(pnl, 6), currentPnlPct: this._round(pnlPct, 4), unrealizedPnl: this._round(pnl, 6), unrealizedPnlPct: this._round(pnlPct, 4) };
+
+      // Attach price curve for live receipt rendering
+      const fullHist = this.priceHistory.get(pos.symbol);
+      let priceCurve = [];
+      const openTs = Number(pos.openedAt) || 0;
+      if (fullHist && fullHist.length) {
+        priceCurve = fullHist.filter(pt => pt.ts >= openTs && pt.ts <= now).map(pt => ({ p: pt.price, t: pt.ts }));
+        if (!priceCurve.length || priceCurve[0].t > openTs) priceCurve.unshift({ p: pos.entryPrice, t: openTs });
+        if (priceCurve[priceCurve.length - 1].t < now) priceCurve.push({ p: px, t: now });
+      } else {
+        priceCurve = [{ p: pos.entryPrice, t: openTs }, { p: px, t: now }];
+      }
+      
+      return { ...pos, currentPrice: px, currentPnl: this._round(pnl, 6), currentPnlPct: this._round(pnlPct, 4), unrealizedPnl: this._round(pnl, 6), unrealizedPnlPct: this._round(pnlPct, 4), priceCurve };
     });
     const wins = this.state.wins | 0;
     const losses = this.state.losses | 0;
