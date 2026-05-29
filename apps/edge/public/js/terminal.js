@@ -1372,6 +1372,9 @@ async function fetchData() {
       });
     }
 
+    try { paperBotInstance.processMarkets(rawData); }
+    catch (e) { console.warn('[PAPERBOT] local engine failed:', e && e.message); }
+
     live = rawData;
     SRC = 'BINANCE-LIVE';
   } catch(e) {
@@ -3581,6 +3584,9 @@ function _applyTick(frame) {
     if (window._currentDetailCoinId && d.id === window._currentDetailCoinId) {
       _updateDetailPanel(d, newPrice, prevPrice, prevPanic);
     }
+
+    try { paperBotInstance.processMarkets([d]); }
+    catch (e) { console.warn('[PAPERBOT] tick engine failed:', e && e.message); }
   } catch (e) {
     // Frame processing must never throw — a bad payload from upstream
     // should drop the frame, not poison the rest of the stream.
@@ -3631,10 +3637,9 @@ async function connectStream() {
     try { frame = JSON.parse(ev.data); } catch { return; }
     if (!frame || typeof frame !== 'object') return;
     if (frame.t === 'tick') return _applyTick(frame);
-    // V6 — PaperBot state frame. Server pushes one every ~2s plus
-    // immediately on every OPEN/CLOSE. Rendered straight to the Bot
-    // Intelligence panel in scanner-right.
-    if (frame.t === 'pb') return renderPaperBot(frame);
+    // LocalPaperBot owns the Bot Intelligence panel; ignore legacy
+    // server-side PaperBot frames if an old stream still emits them.
+    if (frame.t === 'pb') return;
     if (frame.t === 'ping') {
       try { sock.send('{"t":"pong"}'); } catch {}
       return;
@@ -4522,3 +4527,308 @@ if (typeof _origRequestAnalysis === 'function') {
     return _origRequestAnalysis.call(this, sym, id, ctx);
   };
 }
+
+const LOCAL_PAPERBOT_STORAGE_KEY = 'terminal.v7.localPaperBot.state';
+
+class LocalPaperBot {
+  constructor(opts = {}) {
+    this.storageKey = opts.storageKey || LOCAL_PAPERBOT_STORAGE_KEY;
+    this.startingBalance = Number(opts.startingBalance) || 10000;
+    this.baselineCaution = 1;
+    this.maxOpenPositions = Number(opts.maxOpenPositions) || 4;
+    this.recentTradeLimit = Number(opts.recentTradeLimit) || 50;
+    this.historyLimit = Number(opts.historyLimit) || 36;
+    this.riskFraction = Number(opts.riskFraction) || 0.075;
+    this.takeProfitPct = Number(opts.takeProfitPct) || 0.018;
+    this.stopLossPct = Number(opts.stopLossPct) || 0.01;
+    this.feePct = Number(opts.feePct) || 0.0004;
+    this.priceHistory = new Map();
+    this.lastPrices = new Map();
+    this.state = this._loadState();
+  }
+
+  processMarkets(marketsArray) {
+    const now = Date.now();
+    const markets = Array.isArray(marketsArray) ? marketsArray : [];
+    const candidates = [];
+
+    for (let i = 0; i < markets.length; i++) {
+      const market = this._normalizeMarket(markets[i]);
+      if (!market) continue;
+      this.lastPrices.set(market.symbol, market.price);
+      const hist = this._pushPrice(market.symbol, market.price, now);
+      this._markOpenPrice(market.symbol, market.price);
+
+      const pos = this._findOpen(market.symbol);
+      if (pos) {
+        const exitReason = this._exitReason(pos, market.price);
+        if (exitReason) this._closePosition(pos, market.price, exitReason, now);
+        continue;
+      }
+
+      if (this.state.openPositions.length >= this.maxOpenPositions) continue;
+      const signal = this._buildSignal(market, hist);
+      if (signal) candidates.push(signal);
+    }
+
+    if (candidates.length && this.state.openPositions.length < this.maxOpenPositions) {
+      candidates.sort((a, b) => b.strength - a.strength);
+      for (let i = 0; i < candidates.length && this.state.openPositions.length < this.maxOpenPositions; i++) {
+        if (!this._findOpen(candidates[i].symbol)) this._openPosition(candidates[i], now);
+      }
+    }
+
+    const payload = this._payload(now);
+    this._saveState();
+    if (typeof renderPaperBot === 'function') renderPaperBot(payload);
+    return payload;
+  }
+
+  _loadState() {
+    const fresh = {
+      balance: this.startingBalance,
+      realizedPnl: 0,
+      wins: 0,
+      losses: 0,
+      cautionMultiplier: this.baselineCaution,
+      openPositions: [],
+      recentTrades: [],
+      startedAt: Date.now(),
+      totalClosed: 0,
+    };
+
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(this.storageKey);
+      if (!raw) return fresh;
+      const saved = JSON.parse(raw);
+      if (!saved || typeof saved !== 'object') return fresh;
+      return {
+        balance: this._finite(saved.balance, fresh.balance),
+        realizedPnl: this._finite(saved.realizedPnl, 0),
+        wins: Math.max(0, this._finite(saved.wins, 0) | 0),
+        losses: Math.max(0, this._finite(saved.losses, 0) | 0),
+        cautionMultiplier: this._clamp(this._finite(saved.cautionMultiplier, 1), 0.75, 5),
+        openPositions: Array.isArray(saved.openPositions) ? saved.openPositions.filter(Boolean).slice(0, this.maxOpenPositions) : [],
+        recentTrades: Array.isArray(saved.recentTrades) ? saved.recentTrades.filter(Boolean).slice(-this.recentTradeLimit) : [],
+        startedAt: this._finite(saved.startedAt, Date.now()),
+        totalClosed: Math.max(0, this._finite(saved.totalClosed, (saved.wins | 0) + (saved.losses | 0)) | 0),
+      };
+    } catch {
+      return fresh;
+    }
+  }
+
+  _saveState() {
+    try {
+      if (!window.localStorage) return;
+      window.localStorage.setItem(this.storageKey, JSON.stringify({
+        balance: this.state.balance,
+        realizedPnl: this.state.realizedPnl,
+        wins: this.state.wins,
+        losses: this.state.losses,
+        cautionMultiplier: this.state.cautionMultiplier,
+        openPositions: this.state.openPositions,
+        recentTrades: this.state.recentTrades.slice(-this.recentTradeLimit),
+        startedAt: this.state.startedAt,
+        totalClosed: this.state.totalClosed,
+      }));
+    } catch {}
+  }
+
+  _normalizeMarket(d) {
+    if (!d || typeof d !== 'object') return null;
+    const rawSymbol = String(d.symbol || d.base || d.id || '').split(':')[0].trim().toUpperCase();
+    const symbol = rawSymbol.replace(/[^A-Z0-9]/g, '');
+    const price = Number(d.current_price != null ? d.current_price : (d.price != null ? d.price : d.p));
+    if (!symbol || !Number.isFinite(price) || price <= 0) return null;
+    return {
+      id: d.id || symbol,
+      symbol,
+      price,
+      c24: this._finite(d.price_change_percentage_24h != null ? d.price_change_percentage_24h : d._c24, 0),
+      volume: this._finite(d.total_volume != null ? d.total_volume : d.qv, 0),
+      high24: this._finite(d.high_24h, 0),
+      low24: this._finite(d.low_24h, 0),
+      score: this._finite(d._sig_score != null ? d._sig_score : d.score, 0),
+      momentum: this._finite(d._mom, 0),
+    };
+  }
+
+  _pushPrice(symbol, price, ts) {
+    let hist = this.priceHistory.get(symbol);
+    if (!hist) {
+      hist = [];
+      this.priceHistory.set(symbol, hist);
+    }
+    const last = hist[hist.length - 1];
+    if (!last || last.price !== price) hist.push({ price, ts });
+    if (hist.length > this.historyLimit) hist.splice(0, hist.length - this.historyLimit);
+    return hist;
+  }
+
+  _buildSignal(market, hist) {
+    const caution = this._clamp(this.state.cautionMultiplier || 1, 0.75, 5);
+    const minMomentumPct = 0.48 * caution;
+    const breakoutBuffer = 0.0012 * caution;
+    const recent = hist.length >= 4 ? hist[hist.length - 4].price : market.price;
+    const recentMove = recent > 0 ? (market.price - recent) / recent : 0;
+    let localHigh = market.price;
+    let localLow = market.price;
+    for (let i = 0; i < hist.length - 1; i++) {
+      const px = hist[i].price;
+      if (px > localHigh) localHigh = px;
+      if (px < localLow) localLow = px;
+    }
+    const dayRange = market.high24 > market.low24 ? market.high24 - market.low24 : 0;
+    const rangePos = dayRange > 0 ? (market.price - market.low24) / dayRange : 0.5;
+    const breakoutUp = market.price >= localHigh * (1 + breakoutBuffer) || rangePos >= 0.82;
+    const breakdownDown = market.price <= localLow * (1 - breakoutBuffer) || rangePos <= 0.18;
+    const volumeOk = !market.volume || market.volume >= 100000;
+    const qualityBoost = Math.max(0, market.score - 5) * 0.12 + Math.max(0, market.momentum) * 0.02;
+    const longStrength = (market.c24 - minMomentumPct) + (recentMove * 100) + qualityBoost;
+    const shortStrength = (-market.c24 - minMomentumPct) + (-recentMove * 100) + qualityBoost;
+
+    if (volumeOk && breakoutUp && market.c24 >= minMomentumPct && recentMove >= -0.002) {
+      return { ...market, side: 'long', strength: longStrength, reason: 'momentum_breakout' };
+    }
+    if (volumeOk && breakdownDown && market.c24 <= -minMomentumPct && recentMove <= 0.002) {
+      return { ...market, side: 'short', strength: shortStrength, reason: 'momentum_breakdown' };
+    }
+    return null;
+  }
+
+  _openPosition(signal, now) {
+    const sideMul = signal.side === 'short' ? -1 : 1;
+    const notional = Math.max(25, this.state.balance * this.riskFraction / Math.max(1, this.state.cautionMultiplier));
+    const tp = signal.price * (1 + sideMul * this.takeProfitPct);
+    const sl = signal.price * (1 - sideMul * this.stopLossPct);
+    this.state.openPositions.push({
+      id: signal.id,
+      symbol: signal.symbol,
+      side: signal.side,
+      entryPrice: signal.price,
+      currentPrice: signal.price,
+      notional,
+      qty: notional / signal.price,
+      tpPrice: tp,
+      slPrice: sl,
+      openedAt: now,
+      reason: signal.reason,
+      entryMomentum: signal.c24,
+    });
+  }
+
+  _closePosition(pos, exitPrice, reason, now) {
+    const idx = this.state.openPositions.indexOf(pos);
+    if (idx < 0) return;
+    const sideMul = pos.side === 'short' ? -1 : 1;
+    const pnlPct = sideMul * ((exitPrice - pos.entryPrice) / pos.entryPrice) * 100;
+    const grossPnl = (pnlPct / 100) * pos.notional;
+    const fees = pos.notional * this.feePct * 2;
+    const pnl = grossPnl - fees;
+    this.state.balance = this._round(this.state.balance + pnl, 6);
+    this.state.realizedPnl = this._round(this.state.realizedPnl + pnl, 6);
+    this.state.openPositions.splice(idx, 1);
+    this.state.totalClosed = (this.state.totalClosed || 0) + 1;
+
+    if (pnl >= 0) {
+      this.state.wins += 1;
+      this.state.cautionMultiplier = this._clamp(1 + (this.state.cautionMultiplier - 1) * 0.72, 0.75, 5);
+    } else {
+      this.state.losses += 1;
+      this.state.cautionMultiplier = this._clamp(this.state.cautionMultiplier * 1.24, 0.75, 5);
+    }
+
+    this.state.recentTrades.push({
+      symbol: pos.symbol,
+      side: pos.side,
+      entryPrice: pos.entryPrice,
+      exitPrice,
+      pnl: this._round(pnl, 6),
+      pnlPct: this._round(pnlPct, 4),
+      reason,
+      openedAt: pos.openedAt,
+      closedAt: now,
+      holdMs: now - (Number(pos.openedAt) || now),
+    });
+    if (this.state.recentTrades.length > this.recentTradeLimit) {
+      this.state.recentTrades.splice(0, this.state.recentTrades.length - this.recentTradeLimit);
+    }
+  }
+
+  _exitReason(pos, price) {
+    if (pos.side === 'short') {
+      if (price <= pos.tpPrice) return 'take_profit';
+      if (price >= pos.slPrice) return 'stop_loss';
+    } else {
+      if (price >= pos.tpPrice) return 'take_profit';
+      if (price <= pos.slPrice) return 'stop_loss';
+    }
+    return null;
+  }
+
+  _payload(now) {
+    let unrealizedPnl = 0;
+    const openPositions = this.state.openPositions.map((pos) => {
+      const px = this.lastPrices.get(pos.symbol) || Number(pos.currentPrice) || Number(pos.entryPrice) || 0;
+      const sideMul = pos.side === 'short' ? -1 : 1;
+      const pnlPct = pos.entryPrice > 0 ? sideMul * ((px - pos.entryPrice) / pos.entryPrice) * 100 : 0;
+      const pnl = (pnlPct / 100) * (Number(pos.notional) || 0);
+      unrealizedPnl += pnl;
+      pos.currentPrice = px;
+      return { ...pos, currentPrice: px, unrealizedPnl: this._round(pnl, 6), unrealizedPnlPct: this._round(pnlPct, 4) };
+    });
+    const wins = this.state.wins | 0;
+    const losses = this.state.losses | 0;
+    const total = wins + losses;
+    const balance = this._round(this.state.balance, 6);
+    const realizedPnl = this._round(this.state.realizedPnl, 6);
+    unrealizedPnl = this._round(unrealizedPnl, 6);
+    return {
+      t: 'pb',
+      status: 'running',
+      balance,
+      equity: this._round(balance + unrealizedPnl, 6),
+      pnl: this._round(realizedPnl + unrealizedPnl, 6),
+      realizedPnl,
+      unrealizedPnl,
+      winRate: total ? (wins / total) * 100 : 0,
+      wins,
+      losses,
+      openCount: openPositions.length,
+      cautionMultiplier: this._round(this.state.cautionMultiplier, 4),
+      openPositions,
+      recentTrades: this.state.recentTrades.slice(-this.recentTradeLimit),
+      totalClosed: this.state.totalClosed || total,
+      startedAt: this.state.startedAt,
+      uptimeMs: now - (Number(this.state.startedAt) || now),
+      ts: now,
+    };
+  }
+
+  _findOpen(symbol) {
+    return this.state.openPositions.find(p => p && p.symbol === symbol);
+  }
+
+  _markOpenPrice(symbol, price) {
+    const pos = this._findOpen(symbol);
+    if (pos) pos.currentPrice = price;
+  }
+
+  _finite(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  _clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  _round(value, digits) {
+    const m = Math.pow(10, digits || 2);
+    return Math.round((Number(value) || 0) * m) / m;
+  }
+}
+
+const paperBotInstance = new LocalPaperBot();
+window.paperBotInstance = paperBotInstance;
