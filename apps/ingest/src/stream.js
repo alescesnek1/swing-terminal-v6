@@ -43,6 +43,33 @@ function extractQueryToken(reqUrl) {
   } catch { return ''; }
 }
 
+function parseUpgradeUrl(req) {
+  try {
+    return new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  } catch (err) {
+    console.log(`[STREAM] Upgrade URL parse failed: ${err.message}`);
+    return null;
+  }
+}
+
+function rejectUpgrade(socket, statusCode, reason, details = {}) {
+  const statusText = statusCode === 400 ? 'Bad Request'
+    : statusCode === 401 ? 'Unauthorized'
+    : statusCode === 403 ? 'Forbidden'
+    : statusCode === 404 ? 'Not Found'
+    : 'Error';
+  console.log(`[STREAM] Upgrade rejected: ${statusCode} ${reason}`, details);
+  try {
+    socket.write(
+      `HTTP/1.1 ${statusCode} ${statusText}\r\n`
+      + 'Connection: close\r\n'
+      + 'Content-Length: 0\r\n'
+      + '\r\n',
+    );
+  } catch {}
+  socket.destroy();
+}
+
 /**
  * Starts the WS stream server bound to an existing http.Server.
  *
@@ -57,38 +84,65 @@ export function startStreamServer({ server, aggregator, paperBot }) {
   if (!aggregator) throw new Error('startStreamServer: aggregator is required');
 
   const allowedOrigins = parseAllowedOrigins();
+  const requireToken = process.env.STREAM_REQUIRE_TOKEN === 'true';
   console.log(`[STREAM] Allowed origins: ${allowedOrigins.join(', ')}`);
+  console.log(`[STREAM] Query-token enforcement: ${requireToken ? 'enabled' : 'bypassed for debug'}`);
 
   // `noServer:true` so we can run the upgrade auth check ourselves;
   // ws's built-in `verifyClient` is sync-only and we want clear logs.
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (req, socket, head) => {
-    if (!req.url || !req.url.startsWith(STREAM_PATH)) {
-      socket.destroy();
+    const upgradeUrl = parseUpgradeUrl(req);
+    if (!upgradeUrl) {
+      rejectUpgrade(socket, 400, 'bad_url', { rawUrl: req.url || '' });
       return;
     }
+
+    if (upgradeUrl.pathname !== STREAM_PATH) {
+      rejectUpgrade(socket, 404, 'wrong_path', { path: upgradeUrl.pathname, expected: STREAM_PATH });
+      return;
+    }
+
     const origin = req.headers.origin || '';
     const originOk = allowedOrigins.includes(origin) || isLocalhost(origin) || origin === '';
     if (!originOk) {
-      console.warn(`[STREAM] Rejected upgrade — origin "${origin}" not in allowlist`);
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
+      rejectUpgrade(socket, 403, 'origin_not_allowed', { origin, allowedOrigins });
       return;
     }
-    const token = extractQueryToken(req.url);
-    if (!isLocalhost(origin) && !token) {
-      console.warn(`[STREAM] Rejected upgrade — token missing from non-local origin "${origin}"`);
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      ws._origin = origin;
-      ws._tokenPresent = !!token;
-      ws._missedPings = 0;
-      wss.emit('connection', ws, req);
+
+    const token = upgradeUrl.searchParams.get('token') || extractQueryToken(req.url);
+    const tokenParts = token ? token.split('.').length : 0;
+    console.log('[STREAM] Upgrade auth debug', {
+      path: upgradeUrl.pathname,
+      origin: origin || '(none)',
+      token_present: !!token,
+      token_len: token.length,
+      token_parts: tokenParts,
+      requireToken,
     });
+
+    if (requireToken && !isLocalhost(origin) && !token) {
+      rejectUpgrade(socket, 401, 'token_missing', { origin: origin || '(none)', token_present: false });
+      return;
+    }
+
+    if (requireToken && token && tokenParts !== 3) {
+      rejectUpgrade(socket, 401, 'token_malformed', { origin: origin || '(none)', token_parts: tokenParts });
+      return;
+    }
+
+    try {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        ws._origin = origin;
+        ws._tokenPresent = !!token;
+        ws._missedPings = 0;
+        wss.emit('connection', ws, req);
+      });
+    } catch (err) {
+      console.log(`[STREAM] handleUpgrade failed: ${err.stack || err.message}`);
+      socket.destroy();
+    }
   });
 
   wss.on('connection', (ws) => {
