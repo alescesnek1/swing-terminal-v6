@@ -143,6 +143,7 @@
     <!-- TABS -->
     <div id="tabs">
       <div class="tab on" onclick="sv('scanner',this)">SCANNER</div>
+      <div class="tab" onclick="sv('bot',this)" data-target="view-bot" title="Paper Trading Sandbox — server-side bot, live PnL, full ledger">🤖 BOT FEED <span class="cnt pb-tab-pip" id="pb-tab-pip"></span></div>
       <div class="tab" onclick="sv('alerts',this)">ALERTS <span class="cnt" id="abadge"></span></div>
       <div class="tab" onclick="sv('livefeed',this)">LIVE FEED <span class="lf-tab-badge" id="lf-unread"></span></div>
       <div class="tab" onclick="sv('charts',this)">TOP CHARTS</div>
@@ -240,44 +241,59 @@
           <div id="dcon" style="flex:1">
             <div style="padding:40px;text-align:center;color:var(--txt3)">Zvolte coin pro detail</div>
           </div>
+        </div>
+      </div>
+    </div>
 
-          <!-- V6 PAPER TRADING SANDBOX — server-side bot state, fanned
-               in over the existing /api/stream-markets WS as `pb` frames
-               and rendered live by renderPaperBot(). Falls back to
-               GET /api/paperbot/state polling when the WS is dead. -->
-          <div class="terminal-pb-panel" id="pb-panel">
-            <div class="ph">
-              <span class="pt">🤖 BOT INTELLIGENCE</span>
-              <span class="ps" id="pb-status">🟢 SEARCHING</span>
-            </div>
-            <div class="pb-metrics">
-              <div class="pb-metric">
-                <div class="pb-metric__label">REALIZED PNL</div>
-                <div class="pb-metric__value" id="pb-realized">—</div>
-              </div>
-              <div class="pb-metric">
-                <div class="pb-metric__label">UNREALIZED PNL</div>
-                <div class="pb-metric__value" id="pb-unrealized">—</div>
-              </div>
-              <div class="pb-metric">
-                <div class="pb-metric__label">WIN RATE</div>
-                <div class="pb-metric__value" id="pb-winrate">—</div>
-                <div class="pb-metric__sub" id="pb-wl">0W / 0L</div>
-              </div>
-              <div class="pb-metric">
-                <div class="pb-metric__label">CAUTION ×</div>
-                <div class="pb-metric__value" id="pb-caution">1.00</div>
-                <div class="pb-metric__sub" id="pb-balance">$10,000.00</div>
-              </div>
-            </div>
-            <div class="ph pb-subheader">
-              <span class="pt">CLOSED TRADES</span>
-              <span class="ps" id="pb-trade-count">0</span>
-            </div>
-            <div class="pb-ledger" id="pb-ledger">
-              <div class="pb-ledger__empty">Bot is warming up — no closed trades yet.</div>
-            </div>
-          </div>
+    <!-- V6 BOT FEED — first-class primary view. Server-side PaperBot
+         state arrives over /api/stream-markets as `pb` frames and is
+         rendered live by renderPaperBot(). REST fallback (when WS is
+         blocked) hits GET /api/paperbot/state every 2s. -->
+    <div id="v-bot" class="view">
+      <div class="bot-hero">
+        <div class="bot-card bot-card--status" id="pb-status-card">
+          <div class="bot-card__label">STATUS</div>
+          <div class="bot-card__value" id="pb-status">🟢 SEARCHING</div>
+          <div class="bot-card__sub" id="pb-uptime">Uptime —</div>
+        </div>
+        <div class="bot-card">
+          <div class="bot-card__label">REALIZED PNL</div>
+          <div class="bot-card__value" id="pb-realized">—</div>
+          <div class="bot-card__sub" id="pb-balance">$10,000.00 balance</div>
+        </div>
+        <div class="bot-card">
+          <div class="bot-card__label">UNREALIZED PNL</div>
+          <div class="bot-card__value" id="pb-unrealized">—</div>
+          <div class="bot-card__sub" id="pb-open-count">0 open positions</div>
+        </div>
+        <div class="bot-card">
+          <div class="bot-card__label">WIN RATE</div>
+          <div class="bot-card__value" id="pb-winrate">—</div>
+          <div class="bot-card__sub" id="pb-wl">0W / 0L</div>
+        </div>
+        <div class="bot-card">
+          <div class="bot-card__label">CAUTION MULTIPLIER</div>
+          <div class="bot-card__value" id="pb-caution">×1.00</div>
+          <div class="bot-card__sub" id="pb-caution-hint">Adapts on every close</div>
+        </div>
+      </div>
+
+      <div class="bot-ledger-wrap">
+        <div class="ph bot-ledger-header">
+          <span class="pt">CLOSED-TRADE LEDGER</span>
+          <span class="ps" id="pb-trade-count">0 total</span>
+        </div>
+        <div class="bot-ledger__cols">
+          <span>TIME</span>
+          <span>COIN</span>
+          <span>SIDE</span>
+          <span class="bot-ledger__cols-num">ENTRY</span>
+          <span class="bot-ledger__cols-num">EXIT</span>
+          <span class="bot-ledger__cols-num">PNL</span>
+          <span class="bot-ledger__cols-num">DURATION</span>
+        </div>
+        <div class="bot-ledger" id="pb-ledger">
+          <div class="bot-ledger__empty">Bot is warming up — no closed trades yet.</div>
         </div>
       </div>
     </div>

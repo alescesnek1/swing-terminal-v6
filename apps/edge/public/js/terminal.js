@@ -2436,28 +2436,81 @@ function renderMovers() {
   if (sumEl) sumEl.textContent = `${DATA.length} coins tracked · top ${gainers.length} gainers · bottom ${losers.length} losers`;
 }
 
+function _viewNameFromId(id) {
+  return String(id || '').replace(/^#/, '').replace(/^view-/, '').replace(/^v-/, '');
+}
+
+function _viewCandidateIds(v, el) {
+  const ids = [];
+  const push = (id) => {
+    const clean = String(id || '').replace(/^#/, '');
+    if (clean && !ids.includes(clean)) ids.push(clean);
+  };
+  const dataTarget = el && el.dataset ? el.dataset.target : '';
+  if (dataTarget) {
+    const clean = String(dataTarget).replace(/^#/, '');
+    push(clean);
+    if (clean.indexOf('view-') === 0) push('v-' + clean.slice(5));
+    if (clean.indexOf('v-') === 0) push('view-' + clean.slice(2));
+  }
+  const name = _viewNameFromId(v);
+  if (name) {
+    push('v-' + name);
+    push('view-' + name);
+  }
+  return ids;
+}
+
+function _resolveViewTarget(v, el) {
+  const ids = _viewCandidateIds(v, el);
+  for (let i = 0; i < ids.length; i++) {
+    const node = document.getElementById(ids[i]);
+    if (node) return node;
+  }
+  return null;
+}
+
+function _applyViewDisplay(target, v) {
+  if (!target) return;
+  const name = _viewNameFromId(target.id || v);
+  const flex = name === 'bot' || name === 'heatmap' || name === 'manual' || name === 'calendar';
+  target.style.display = flex ? 'flex' : 'block';
+  target.style.flexDirection = flex ? 'column' : '';
+  if (name === 'bot' || name === 'calendar') {
+    target.style.height = 'calc(100vh - 85px)';
+    target.style.overflow = 'hidden';
+  }
+}
+
 function sv(v, el) {
+  const target = _resolveViewTarget(v, el);
+  if (!target) return;
+
   // V6.3: clear ALL inline style overrides on every view, then add .on
   // to the target. CSS handles display type per-view via ID selectors.
   document.querySelectorAll('.view').forEach(x => {
     x.classList.remove('on');
-    x.style.display = '';
+    x.hidden = true;
+    x.style.display = 'none';
     x.style.opacity = '';
     x.style.visibility = '';
     x.style.transform = '';
     x.style.flexDirection = '';
     x.style.height = '';
+    x.style.overflow = '';
   });
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
-  const target = document.getElementById('v-' + v);
-  if (target) target.classList.add('on');
+  target.hidden = false;
+  target.classList.add('on');
+  _applyViewDisplay(target, v);
   if (el) el.classList.add('on');
-  if (v === 'livefeed' && typeof LiveFeed !== 'undefined') LiveFeed.clearUnread();
+  const activeViewName = _viewNameFromId(target.id || v);
+  if (activeViewName === 'livefeed' && typeof LiveFeed !== 'undefined') LiveFeed.clearUnread();
   // Heatmap canvas needs a redraw after the view becomes visible
   // (clientWidth/Height are zero while display:none).
-  if (v === 'heatmap') requestAnimationFrame(() => { try { renderHeatmap(); } catch(e){} });
-  if (v === 'manual') requestAnimationFrame(() => { try { initManual(); } catch(e){} });
-  if (v === 'calendar') requestAnimationFrame(() => {
+  if (activeViewName === 'heatmap') requestAnimationFrame(() => { try { renderHeatmap(); } catch(e){} });
+  if (activeViewName === 'manual') requestAnimationFrame(() => { try { initManual(); } catch(e){} });
+  if (activeViewName === 'calendar') requestAnimationFrame(() => {
     try { renderCalendar(); } catch(e){}
     // Kick off live unlocks fetch (cached client-side 25 min); re-render
     // when the network round-trips so the user sees fresh data without
@@ -3144,10 +3197,14 @@ const _pbRowKeys = new Set(); // de-dupe by closedAt|symbol|pnl
 
 function _pbFmtUsd(v) {
   const n = Number(v) || 0;
-  const sign = n >= 0 ? '+' : '−';
+  const sign = n >= 0 ? '+' : '-';
   const abs = Math.abs(n);
   if (abs >= 1000) return sign + '$' + abs.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   return sign + '$' + abs.toFixed(2);
+}
+function _pbFmtBalance(v) {
+  const n = Number(v) || 0;
+  return '$' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 function _pbFmtPx(v) {
   const n = Number(v) || 0;
@@ -3173,10 +3230,38 @@ function _pbSetText(id, text, klass) {
   }
 }
 
+function _pbFmtDuration(ms) {
+  const s = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+  if (s < 60)    return s.toFixed(0) + 's';
+  if (s < 3600)  return Math.floor(s / 60) + 'm ' + Math.floor(s % 60) + 's';
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
+function _pbFmtUptime(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return 'Uptime --';
+  const s = Math.max(0, Math.round(n / 1000));
+  if (s < 60)    return 'Uptime ' + s.toFixed(0) + 's';
+  if (s < 3600)  return 'Uptime ' + Math.floor(s / 60) + 'm';
+  if (s < 86400) return 'Uptime ' + Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+  return 'Uptime ' + Math.floor(s / 86400) + 'd ' + Math.floor((s % 86400) / 3600) + 'h';
+}
+
+function _pbTradeKey(trade) {
+  return [
+    trade && trade.closedAt != null ? trade.closedAt : '',
+    trade && trade.symbol != null ? trade.symbol : '',
+    trade && trade.exitPrice != null ? trade.exitPrice : '',
+    trade && trade.pnl != null ? trade.pnl : '',
+  ].join('|');
+}
+
 function _pbBuildRow(trade) {
   const row = document.createElement('div');
   row.className = 'pb-row';
-  row.dataset.key = `${trade.closedAt}|${trade.symbol}|${trade.pnl}`;
+  row.dataset.key = _pbTradeKey(trade);
 
   const time = document.createElement('span');
   time.className = 'pb-row__time';
@@ -3189,7 +3274,7 @@ function _pbBuildRow(trade) {
   const side = document.createElement('span');
   const sideKey = String(trade.side || 'long').toLowerCase();
   side.className = 'pb-row__side ' + sideKey;
-  side.textContent = sideKey === 'short' ? 'S' : 'L';
+  side.textContent = sideKey === 'short' ? 'SHORT' : 'LONG';
 
   const entry = document.createElement('span');
   entry.className = 'pb-row__px';
@@ -3203,7 +3288,15 @@ function _pbBuildRow(trade) {
 
   const pnl = document.createElement('span');
   pnl.className = 'pb-row__pnl ' + ((Number(trade.pnl) || 0) >= 0 ? 'pos' : 'neg');
-  pnl.textContent = _pbFmtUsd(trade.pnl);
+  const pnlPctTxt = Number.isFinite(trade.pnlPct) ? ' (' + (trade.pnlPct >= 0 ? '+' : '') + trade.pnlPct.toFixed(2) + '%)' : '';
+  pnl.textContent = _pbFmtUsd(trade.pnl) + pnlPctTxt;
+
+  const dur = document.createElement('span');
+  dur.className = 'pb-row__dur';
+  const holdMs = (trade.holdMs != null)
+    ? trade.holdMs
+    : (Number(trade.closedAt) || 0) - (Number(trade.openedAt) || 0);
+  dur.textContent = _pbFmtDuration(holdMs);
 
   row.appendChild(time);
   row.appendChild(sym);
@@ -3211,27 +3304,44 @@ function _pbBuildRow(trade) {
   row.appendChild(entry);
   row.appendChild(exit);
   row.appendChild(pnl);
+  row.appendChild(dur);
   return row;
 }
 
 function renderPaperBot(state) {
   if (!state || typeof state !== 'object') return;
-  const panel = document.getElementById('pb-panel');
-  if (!panel) return;
+  const view = document.getElementById('view-bot') || document.getElementById('v-bot');
+  if (!view) return;
+  const openCount = Number.isFinite(Number(state.openCount))
+    ? Number(state.openCount)
+    : (Array.isArray(state.openPositions) ? state.openPositions.length : 0);
 
-  // ── Status pip ──
   const statusEl = document.getElementById('pb-status');
   if (statusEl) {
     let txt, klass;
-    if (state.status === 'stopped') { txt = '🔴 STOPPED';   klass = 'pb-status-stopped'; }
-    else if ((state.openCount | 0) > 0) { txt = '🔴 IN TRADE (' + state.openCount + ')'; klass = 'pb-status-intrade'; }
-    else { txt = '🟢 SEARCHING'; klass = 'pb-status-searching'; }
+    if (state.status === 'stopped') { txt = 'STOPPED'; klass = 'pb-status-stopped'; }
+    else if (openCount > 0) { txt = 'IN TRADE (' + openCount + ')'; klass = 'pb-status-intrade'; }
+    else { txt = 'SEARCHING'; klass = 'pb-status-searching'; }
     if (statusEl.textContent !== txt) statusEl.textContent = txt;
     statusEl.classList.remove('pb-status-searching','pb-status-intrade','pb-status-stopped');
     statusEl.classList.add(klass);
   }
 
-  // ── Metric values (text mutate only, no innerHTML) ──
+  const tabPip = document.getElementById('pb-tab-pip');
+  if (tabPip) {
+    const pipTxt = openCount > 0 ? String(openCount) : '';
+    if (tabPip.textContent !== pipTxt) tabPip.textContent = pipTxt;
+    tabPip.classList.toggle('on', openCount > 0);
+  }
+
+  const uptimeMs = Number.isFinite(Number(state.uptimeMs))
+    ? Number(state.uptimeMs)
+    : (Number.isFinite(Number(state.startedAt))
+      ? (Number(state.ts) || Date.now()) - Number(state.startedAt)
+      : 0);
+  _pbSetText('pb-uptime', _pbFmtUptime(uptimeMs));
+  _pbSetText('pb-open-count', openCount + ' open ' + (openCount === 1 ? 'position' : 'positions'));
+
   const realized = Number(state.realizedPnl) || 0;
   const unrealized = Number(state.unrealizedPnl) || 0;
   _pbSetText('pb-realized',   _pbFmtUsd(realized),   realized >= 0 ? 'pos' : 'neg');
@@ -3244,40 +3354,34 @@ function renderPaperBot(state) {
   _pbSetText('pb-wl', wins + 'W / ' + losses + 'L');
 
   const caution = Number(state.cautionMultiplier) || 1;
-  _pbSetText('pb-caution', '×' + caution.toFixed(2), caution > 1.5 ? 'neg' : (caution < 0.9 ? 'pos' : ''));
+  _pbSetText('pb-caution', '\u00d7' + caution.toFixed(2), caution > 1.5 ? 'neg' : (caution < 0.9 ? 'pos' : ''));
 
-  const bal = Number(state.balance) || 0;
-  const balTxt = '$' + bal.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  _pbSetText('pb-balance', balTxt);
+  _pbSetText('pb-balance', _pbFmtBalance(state.balance) + ' balance');
 
-  // ── Ledger ──
   const ledger = document.getElementById('pb-ledger');
   if (!ledger) return;
   const trades = Array.isArray(state.recentTrades) ? state.recentTrades : [];
   _pbSetText('pb-trade-count', (state.totalClosed != null ? state.totalClosed : trades.length) + ' total');
 
   if (trades.length === 0) {
-    if (!ledger.firstElementChild || ledger.firstElementChild.className !== 'pb-ledger__empty') {
+    _pbRowKeys.clear();
+    if (!ledger.firstElementChild || ledger.firstElementChild.className !== 'bot-ledger__empty') {
       ledger.textContent = '';
       const empty = document.createElement('div');
-      empty.className = 'pb-ledger__empty';
-      empty.textContent = 'Bot is warming up — no closed trades yet.';
+      empty.className = 'bot-ledger__empty';
+      empty.textContent = 'Bot is warming up - no closed trades yet.';
       ledger.appendChild(empty);
     }
     return;
   }
 
-  // Drop the empty-state node the first time real trades arrive.
-  const empty = ledger.querySelector('.pb-ledger__empty');
+  const empty = ledger.querySelector('.bot-ledger__empty');
   if (empty) empty.remove();
 
-  // Prepend only NEW rows (trades come newest-first from the server).
-  // The server cap is 25; combined with PB_LEDGER_DOM_CAP we hold a
-  // bounded DOM regardless of how long the bot runs.
   const frag = document.createDocumentFragment();
   for (let i = trades.length - 1; i >= 0; i--) {
     const t = trades[i];
-    const key = `${t.closedAt}|${t.symbol}|${t.pnl}`;
+    const key = _pbTradeKey(t);
     if (_pbRowKeys.has(key)) continue;
     _pbRowKeys.add(key);
     const row = _pbBuildRow(t);
@@ -3286,7 +3390,6 @@ function renderPaperBot(state) {
   }
   if (frag.childNodes.length) ledger.insertBefore(frag, ledger.firstChild);
 
-  // Trim DOM tail to PB_LEDGER_DOM_CAP and prune the de-dupe set.
   while (ledger.children.length > PB_LEDGER_DOM_CAP) {
     const last = ledger.lastChild;
     if (!last) break;
