@@ -1891,30 +1891,122 @@ function resolveTvSymbol(d) {
   };
 }
 
+// V6 (chart-throttle): WS ticks fire faster than the iframe widget can
+// settle. Anything that wants to repaint the Top Charts grid goes through
+// `renderTopCharts()`, which leading-edge-fires immediately and then is
+// rate-limited to one repaint per CHART_RENDER_THROTTLE_MS. The actual
+// DOM work happens in `_renderTopChartsCore` and is a *diff*, not a wipe
+// — iframes are only created/destroyed when the symbol at a slot
+// changes. A re-rank that keeps the same symbol just mutates the
+// `.tc-meta` text, so the user can actually read and interact with the
+// chart between ticks.
+const CHART_RENDER_THROTTLE_MS = 1000;
+let _topChartsLastRender = 0;
+let _topChartsPending = null;
+
 function renderTopCharts() {
+  const now = Date.now();
+  const since = now - _topChartsLastRender;
+  if (since >= CHART_RENDER_THROTTLE_MS) {
+    _topChartsLastRender = now;
+    _renderTopChartsCore();
+    return;
+  }
+  if (_topChartsPending) return; // already queued for the trailing edge
+  _topChartsPending = setTimeout(() => {
+    _topChartsPending = null;
+    _topChartsLastRender = Date.now();
+    _renderTopChartsCore();
+  }, CHART_RENDER_THROTTLE_MS - since);
+}
+
+function _renderTopChartsCore() {
   // Dynamic Top 10 — sort the loaded global DATA pool by signal score
-  // DESC and render TradingView widgets for the leaders. Re-runs on
-  // every doRefresh so the grid follows the current market state.
+  // DESC and render TradingView widgets for the leaders. Diffed against
+  // the current DOM so iframes are reused whenever the symbol at a slot
+  // is unchanged — only score text mutates on a re-rank.
   const grid = document.getElementById('topcharts-grid');
   if (!grid) return;
   if (!Array.isArray(DATA) || !DATA.length) {
-    grid.innerHTML = '<div style="padding:20px;color:var(--txt3);font-size:10px">Loading scanner data…</div>';
+    if (grid.firstElementChild?.dataset?.placeholder !== '1') {
+      grid.textContent = '';
+      const ph = document.createElement('div');
+      ph.dataset.placeholder = '1';
+      ph.style.cssText = 'padding:20px;color:var(--txt3);font-size:10px';
+      ph.textContent = 'Loading scanner data…';
+      grid.appendChild(ph);
+    }
     return;
   }
   const top10 = [...DATA]
     .sort((a, b) => (b._sig_score || 0) - (a._sig_score || 0))
     .slice(0, 10);
-  grid.innerHTML = top10.map(d => {
+
+  // Drop any stale placeholder before we start diffing real cards.
+  const ph = grid.querySelector('[data-placeholder="1"]');
+  if (ph) ph.remove();
+
+  const existing = Array.from(grid.children);
+  top10.forEach((d, idx) => {
     const sym = typeof d.symbol === 'string' ? d.symbol.toUpperCase() : String(d.symbol || '').toUpperCase();
     const resolved = resolveTvSymbol(d);
-    if (!resolved) return '';
-    // V6.8 Sprint 1 (FIX-3): src is fully synthesized by encodeURIComponent
-    // around a fixed host — safe. sym + venueLabel + venue still escaped
-    // because they came from upstream rows.
+    if (!resolved) return;
     const src = 'https://s.tradingview.com/widgetembed/?symbol=' + encodeURIComponent(resolved.tv) + '&interval=15&hidesidetoolbar=1&theme=dark&style=1';
     const venueLabel = resolved.venue === 'alpha' ? 'ALPHA' : resolved.venue === 'dex' ? resolved.exch : 'BIN';
-    return `<div class="tc-card" data-venue="${_esc(resolved.venue)}"><div class="tc-head"><span class="tc-sym">${_esc(sym)} <span class="tc-venue">${_esc(venueLabel)}</span></span><span class="tc-meta">score ${(_sigOf(d).score)|0}/10</span></div><iframe class="tc-frame" loading="lazy" src="${_esc(src)}" allowfullscreen></iframe></div>`;
-  }).join('');
+    const scoreTxt = `score ${(_sigOf(d).score)|0}/10`;
+
+    let card = existing[idx];
+    const sameSym = card && card.dataset && card.dataset.tcKey === resolved.tv;
+
+    if (sameSym) {
+      // Same symbol at this slot — mutate ONLY the changing text nodes.
+      // The iframe is left untouched so the chart keeps drawing.
+      const meta = card.querySelector('.tc-meta');
+      if (meta && meta.textContent !== scoreTxt) meta.textContent = scoreTxt;
+      const venueEl = card.querySelector('.tc-venue');
+      if (venueEl && venueEl.textContent !== venueLabel) venueEl.textContent = venueLabel;
+      if (card.dataset.venue !== resolved.venue) card.dataset.venue = resolved.venue;
+      return;
+    }
+
+    // Build a fresh card via createElement (no innerHTML) so escaping
+    // is intrinsic and the iframe is the only network-loading node.
+    const next = document.createElement('div');
+    next.className = 'tc-card';
+    next.dataset.venue = resolved.venue;
+    next.dataset.tcKey = resolved.tv;
+
+    const head = document.createElement('div');
+    head.className = 'tc-head';
+    const symEl = document.createElement('span');
+    symEl.className = 'tc-sym';
+    symEl.textContent = sym + ' ';
+    const venueEl = document.createElement('span');
+    venueEl.className = 'tc-venue';
+    venueEl.textContent = venueLabel;
+    symEl.appendChild(venueEl);
+    const meta = document.createElement('span');
+    meta.className = 'tc-meta';
+    meta.textContent = scoreTxt;
+    head.appendChild(symEl);
+    head.appendChild(meta);
+
+    const frame = document.createElement('iframe');
+    frame.className = 'tc-frame';
+    frame.loading = 'lazy';
+    frame.allowFullscreen = true;
+    frame.src = src;
+
+    next.appendChild(head);
+    next.appendChild(frame);
+
+    if (existing[idx]) grid.replaceChild(next, existing[idx]);
+    else grid.appendChild(next);
+    existing[idx] = next;
+  });
+
+  // Trim any trailing cards left over from a previous, longer top10.
+  while (grid.children.length > top10.length) grid.removeChild(grid.lastChild);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -3034,6 +3126,176 @@ async function doRefresh() {
 }
 
 // ─────────────────────────────────────────────────────────────
+// V6 — BOT INTELLIGENCE PANEL
+//
+// Consumes `pb` frames pushed by the Fly.io ingest worker over the
+// existing /api/stream-markets WebSocket (and the equivalent payload
+// from GET /api/paperbot/state when the WS is dead). Mutates ONLY
+// the metric value nodes plus the diff of new ledger rows — no
+// innerHTML wipe on the parent panel, no flicker between ticks.
+//
+// Frame shape:
+//   { t:'pb', status, balance, equity, pnl, realizedPnl, unrealizedPnl,
+//     winRate, wins, losses, openCount, cautionMultiplier,
+//     openPositions:[…], recentTrades:[…], ts }
+// ─────────────────────────────────────────────────────────────
+const PB_LEDGER_DOM_CAP = 50;
+const _pbRowKeys = new Set(); // de-dupe by closedAt|symbol|pnl
+
+function _pbFmtUsd(v) {
+  const n = Number(v) || 0;
+  const sign = n >= 0 ? '+' : '−';
+  const abs = Math.abs(n);
+  if (abs >= 1000) return sign + '$' + abs.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return sign + '$' + abs.toFixed(2);
+}
+function _pbFmtPx(v) {
+  const n = Number(v) || 0;
+  if (n >= 1000) return n.toFixed(2);
+  if (n >= 1)    return n.toFixed(4);
+  return n.toFixed(6);
+}
+function _pbFmtTime(ts) {
+  const d = new Date(Number(ts) || Date.now());
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
+function _pbSetText(id, text, klass) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (el.textContent !== text) el.textContent = text;
+  if (klass !== undefined) {
+    el.classList.remove('pos', 'neg');
+    if (klass) el.classList.add(klass);
+  }
+}
+
+function _pbBuildRow(trade) {
+  const row = document.createElement('div');
+  row.className = 'pb-row';
+  row.dataset.key = `${trade.closedAt}|${trade.symbol}|${trade.pnl}`;
+
+  const time = document.createElement('span');
+  time.className = 'pb-row__time';
+  time.textContent = _pbFmtTime(trade.closedAt);
+
+  const sym = document.createElement('span');
+  sym.className = 'pb-row__sym';
+  sym.textContent = String(trade.symbol || '');
+
+  const side = document.createElement('span');
+  const sideKey = String(trade.side || 'long').toLowerCase();
+  side.className = 'pb-row__side ' + sideKey;
+  side.textContent = sideKey === 'short' ? 'S' : 'L';
+
+  const entry = document.createElement('span');
+  entry.className = 'pb-row__px';
+  entry.textContent = _pbFmtPx(trade.entryPrice);
+  entry.title = 'Entry ' + _pbFmtPx(trade.entryPrice);
+
+  const exit = document.createElement('span');
+  exit.className = 'pb-row__px';
+  exit.textContent = _pbFmtPx(trade.exitPrice);
+  exit.title = 'Exit ' + _pbFmtPx(trade.exitPrice) + ' (' + (trade.reason || '—').toUpperCase() + ')';
+
+  const pnl = document.createElement('span');
+  pnl.className = 'pb-row__pnl ' + ((Number(trade.pnl) || 0) >= 0 ? 'pos' : 'neg');
+  pnl.textContent = _pbFmtUsd(trade.pnl);
+
+  row.appendChild(time);
+  row.appendChild(sym);
+  row.appendChild(side);
+  row.appendChild(entry);
+  row.appendChild(exit);
+  row.appendChild(pnl);
+  return row;
+}
+
+function renderPaperBot(state) {
+  if (!state || typeof state !== 'object') return;
+  const panel = document.getElementById('pb-panel');
+  if (!panel) return;
+
+  // ── Status pip ──
+  const statusEl = document.getElementById('pb-status');
+  if (statusEl) {
+    let txt, klass;
+    if (state.status === 'stopped') { txt = '🔴 STOPPED';   klass = 'pb-status-stopped'; }
+    else if ((state.openCount | 0) > 0) { txt = '🔴 IN TRADE (' + state.openCount + ')'; klass = 'pb-status-intrade'; }
+    else { txt = '🟢 SEARCHING'; klass = 'pb-status-searching'; }
+    if (statusEl.textContent !== txt) statusEl.textContent = txt;
+    statusEl.classList.remove('pb-status-searching','pb-status-intrade','pb-status-stopped');
+    statusEl.classList.add(klass);
+  }
+
+  // ── Metric values (text mutate only, no innerHTML) ──
+  const realized = Number(state.realizedPnl) || 0;
+  const unrealized = Number(state.unrealizedPnl) || 0;
+  _pbSetText('pb-realized',   _pbFmtUsd(realized),   realized >= 0 ? 'pos' : 'neg');
+  _pbSetText('pb-unrealized', _pbFmtUsd(unrealized), unrealized >= 0 ? 'pos' : 'neg');
+
+  const wins = state.wins | 0;
+  const losses = state.losses | 0;
+  const wr = Number(state.winRate) || 0;
+  _pbSetText('pb-winrate', wr.toFixed(1) + '%', wr >= 50 ? 'pos' : (wins + losses === 0 ? '' : 'neg'));
+  _pbSetText('pb-wl', wins + 'W / ' + losses + 'L');
+
+  const caution = Number(state.cautionMultiplier) || 1;
+  _pbSetText('pb-caution', '×' + caution.toFixed(2), caution > 1.5 ? 'neg' : (caution < 0.9 ? 'pos' : ''));
+
+  const bal = Number(state.balance) || 0;
+  const balTxt = '$' + bal.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  _pbSetText('pb-balance', balTxt);
+
+  // ── Ledger ──
+  const ledger = document.getElementById('pb-ledger');
+  if (!ledger) return;
+  const trades = Array.isArray(state.recentTrades) ? state.recentTrades : [];
+  _pbSetText('pb-trade-count', (state.totalClosed != null ? state.totalClosed : trades.length) + ' total');
+
+  if (trades.length === 0) {
+    if (!ledger.firstElementChild || ledger.firstElementChild.className !== 'pb-ledger__empty') {
+      ledger.textContent = '';
+      const empty = document.createElement('div');
+      empty.className = 'pb-ledger__empty';
+      empty.textContent = 'Bot is warming up — no closed trades yet.';
+      ledger.appendChild(empty);
+    }
+    return;
+  }
+
+  // Drop the empty-state node the first time real trades arrive.
+  const empty = ledger.querySelector('.pb-ledger__empty');
+  if (empty) empty.remove();
+
+  // Prepend only NEW rows (trades come newest-first from the server).
+  // The server cap is 25; combined with PB_LEDGER_DOM_CAP we hold a
+  // bounded DOM regardless of how long the bot runs.
+  const frag = document.createDocumentFragment();
+  for (let i = trades.length - 1; i >= 0; i--) {
+    const t = trades[i];
+    const key = `${t.closedAt}|${t.symbol}|${t.pnl}`;
+    if (_pbRowKeys.has(key)) continue;
+    _pbRowKeys.add(key);
+    const row = _pbBuildRow(t);
+    if (frag.firstChild) frag.insertBefore(row, frag.firstChild);
+    else frag.appendChild(row);
+  }
+  if (frag.childNodes.length) ledger.insertBefore(frag, ledger.firstChild);
+
+  // Trim DOM tail to PB_LEDGER_DOM_CAP and prune the de-dupe set.
+  while (ledger.children.length > PB_LEDGER_DOM_CAP) {
+    const last = ledger.lastChild;
+    if (!last) break;
+    if (last.dataset && last.dataset.key) _pbRowKeys.delete(last.dataset.key);
+    ledger.removeChild(last);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // V7.0 — REAL-TIME WEBSOCKET STREAM PIPELINE
 //
 // Replaces the 120-second `setInterval(doRefresh, …)` poll with a
@@ -3259,6 +3521,10 @@ async function connectStream() {
     try { frame = JSON.parse(ev.data); } catch { return; }
     if (!frame || typeof frame !== 'object') return;
     if (frame.t === 'tick') return _applyTick(frame);
+    // V6 — PaperBot state frame. Server pushes one every ~2s plus
+    // immediately on every OPEN/CLOSE. Rendered straight to the Bot
+    // Intelligence panel in scanner-right.
+    if (frame.t === 'pb') return renderPaperBot(frame);
     if (frame.t === 'ping') {
       try { sock.send('{"t":"pong"}'); } catch {}
       return;

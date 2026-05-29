@@ -9,6 +9,7 @@ import { startStreamServer } from './stream.js';
 import { Aggregator } from './aggregator.js';
 import { TriggerEngine } from './trigger/engine.js';
 import { BinanceFeed } from './feeds/binance.js';
+import { PaperBot } from './paperbot.js';
 import { getRedis, redisPing } from '../../shared/redis-client.js';
 import { TOP_N_SYMBOLS } from '../../shared/constants.js';
 
@@ -29,6 +30,7 @@ let aggregator;
 let triggerEngine;
 let binanceFeed;
 let streamServer;
+let paperBot;
 let shuttingDown = false;
 
 // ─────────────────────────────────────────────────────────────
@@ -71,6 +73,12 @@ async function main() {
     topN: TOP_N,
   });
 
+  // ── Step 2b (V6): PaperBot — the 24/7 paper-trading sandbox. Built
+  // BEFORE the health server so /api/paperbot/* endpoints have a live
+  // reference, and BEFORE the WS server so stream.js can subscribe to
+  // its `pb` events at startup.
+  paperBot = new PaperBot({ aggregator });
+
   // ── Step 3: Start health server ──
   const httpServer = startHealthServer({
     port: PORT,
@@ -82,18 +90,33 @@ async function main() {
       trigger: triggerEngine.getStatus(),
       symbols: binanceFeed.activeSymbols.length,
       stream_clients: streamServer ? streamServer.clientCount() : 0,
+      paperbot: paperBot ? {
+        status: paperBot.status,
+        balance: +paperBot.balance.toFixed(2),
+        wins: paperBot.wins,
+        losses: paperBot.losses,
+        open: paperBot.openPositions.size,
+        caution: +paperBot.cautionMultiplier.toFixed(3),
+      } : null,
     }),
+    paperBot,
   });
 
   // ── Step 3b (V7.0): attach /api/stream-markets WS server to the
   // existing HTTP listener so Fly.io still exposes a single port.
-  streamServer = startStreamServer({ server: httpServer, aggregator });
+  // V6 PaperBot: passing the bot lets stream.js fan `pb` state frames
+  // out to every connected client alongside the live `tick` stream.
+  streamServer = startStreamServer({ server: httpServer, aggregator, paperBot });
 
   // ── Step 4: Start aggregator ──
   aggregator.start();
 
   // ── Step 5: Start trigger engine ──
   triggerEngine.start();
+
+  // ── Step 5b (V6): start PaperBot. Runs forever regardless of how
+  // many clients are connected — it only depends on `aggregator.tick`.
+  paperBot.start();
 
   // ── Step 6: Start feed ──
   try {
@@ -125,6 +148,10 @@ async function shutdown(signal) {
     // down so listeners are detached cleanly and clients get a 1001
     // (going away) instead of a 1006 (abnormal closure).
     if (streamServer) await streamServer.close();
+
+    // Stop PaperBot before the aggregator so the `tick` listener is
+    // detached cleanly. Final state line goes to stdout from stop().
+    if (paperBot) paperBot.stop();
 
     // Stop trigger engine
     if (triggerEngine) triggerEngine.stop();

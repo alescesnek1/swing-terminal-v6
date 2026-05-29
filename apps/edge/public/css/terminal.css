@@ -347,6 +347,39 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .scanner-center{display:flex;flex-direction:column;min-width:0;border-right:1px solid var(--b1)}
 .scanner-right{display:flex;flex-direction:column;overflow-y:auto;max-height:calc(100vh - 85px)}
 
+/* ═══════════ V6 BOT INTELLIGENCE PANEL ═══════════
+   Lives at the bottom of .scanner-right beneath #dcon, inheriting the
+   same .ph header chrome and dark-mode tokens used by every other
+   terminal panel. The grid is 2×2 metric cards over a capped, scroll
+   container for the closed-trade ledger. Status pip in .ph .ps swaps
+   between SEARCHING / IN TRADE via #pb-status text + class. */
+.terminal-pb-panel{display:flex;flex-direction:column;border-top:1px solid var(--b1);background:var(--bg);margin-top:6px}
+.terminal-pb-panel .ph.pb-subheader{background:var(--s1)}
+.pb-status-searching{color:var(--grn)}
+.pb-status-intrade{color:var(--amb)}
+.pb-status-stopped{color:var(--red)}
+.pb-metrics{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--b1)}
+.pb-metric{background:var(--s2);padding:8px 10px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.pb-metric__label{font-size:8px;color:var(--txt3);letter-spacing:.1em;font-weight:600}
+.pb-metric__value{font-size:14px;font-weight:600;color:var(--txt);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pb-metric__value.pos{color:var(--grn)}
+.pb-metric__value.neg{color:var(--red)}
+.pb-metric__sub{font-size:9px;color:var(--txt3);font-family:var(--mono)}
+.pb-ledger{flex:1;min-height:140px;max-height:280px;overflow-y:auto;background:var(--s1)}
+.pb-ledger__empty{padding:14px 12px;color:var(--txt3);font-size:10px;text-align:center;font-style:italic}
+.pb-row{display:grid;grid-template-columns:48px 56px 30px 1fr 1fr 64px;gap:4px;padding:4px 10px;border-bottom:1px solid rgba(15,21,40,.85);font-size:9px;font-family:var(--mono);align-items:center;white-space:nowrap}
+.pb-row:hover{background:var(--s2)}
+.pb-row:last-child{border-bottom:none}
+.pb-row__time{color:var(--txt3)}
+.pb-row__sym{color:var(--txt);font-weight:600}
+.pb-row__side{font-size:8px;font-weight:700;padding:1px 3px;border-radius:2px;text-align:center;letter-spacing:.05em}
+.pb-row__side.long{background:rgba(0,212,132,.12);color:var(--grn);border:1px solid rgba(0,212,132,.3)}
+.pb-row__side.short{background:rgba(255,51,86,.12);color:var(--red);border:1px solid rgba(255,51,86,.3)}
+.pb-row__px{color:var(--txt2);text-align:right;overflow:hidden;text-overflow:ellipsis}
+.pb-row__pnl{text-align:right;font-weight:600}
+.pb-row__pnl.pos{color:var(--grn)}
+.pb-row__pnl.neg{color:var(--red)}
+
 /* ═══════════ AUTH GATE — Login Screen ═══════════ */
 .auth-gate {
   position: fixed; inset: 0; z-index: 2000;

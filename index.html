@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Swing Terminal V3</title>
+<title>Swing Terminal V6</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -48,6 +48,7 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .tsym{font-weight:600;color:var(--txt);font-size:10px}.tprc{color:var(--txt2);font-size:10px}
 
 .hdr-right{display:flex;align-items:center;gap:6px}
+.v6-badge{font-size:9px;font-weight:700;letter-spacing:.12em;color:var(--acc);padding:2px 6px;border:1px solid rgba(0,232,200,.35);border-radius:3px;background:rgba(0,232,200,.06);line-height:1;font-family:var(--mono)}
 .dot-live{width:6px;height:6px;border-radius:50%;background:var(--grn);animation:blink 2s infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.15}}
 .sbadge{font-size:9px;padding:2px 6px;border-radius:2px;font-weight:600;letter-spacing:.04em}
@@ -338,7 +339,7 @@ body.col-resizing *{cursor:col-resize!important}
 <body>
 
 <div id="topbar">
-  <div class="logo">◈ SWING TERMINAL <span>V3</span></div>
+  <div class="logo">◈ SWING TERMINAL <span>V6</span></div>
   <div class="hotness-box">
     <span class="hotness-label">HOTNESS</span>
     <div class="hotness-bar"><div id="hotness-fill" class="hotness-fill" style="width:0%;background:var(--grn)"></div></div>
@@ -350,6 +351,7 @@ body.col-resizing *{cursor:col-resize!important}
   </div>
   <div class="ticker-wrap" id="tkr"><span style="color:var(--txt3)">Nacitam TOP 500...</span></div>
   <div class="hdr-right">
+    <span class="v6-badge" title="Terminal V6">V6</span>
     <div class="dot-live"></div>
     <span id="sts" style="font-size:9px;color:var(--txt3)">INIT</span>
     <span id="srcb" class="sbadge s-mock">LOADING</span>

@@ -19,7 +19,11 @@
       "Bash(node --check \"C:/Users/Ales/Desktop/Bots/terminal crypto/terminal-v5/apps/edge/netlify/edge-functions/markets.js\")",
       "Bash(node -e \"const fs=require\\('fs'\\);const css=fs.readFileSync\\('C:/Users/Ales/Desktop/Bots/terminal crypto/terminal-v5/apps/edge/public/css/terminal.css','utf8'\\);let o=0,c=0;for\\(const ch of css\\){if\\(ch==='{'\\)o++;else if\\(ch==='}'\\)c++;}console.log\\('braces',o,c,o===c?'OK':'MISMATCH'\\);console.log\\('size',css.length,'bytes'\\)\")",
       "Bash(node -c \"C:/Users/Ales/Desktop/Bots/terminal crypto/terminal-v6/apps/edge/public/js/terminal.js\")",
-      "Bash(node -c \"apps/edge/public/js/terminal.js\")"
+      "Bash(node -c \"apps/edge/public/js/terminal.js\")",
+      "WebFetch(domain:glint.trade)",
+      "Bash(ls ..)",
+      "Bash(node --check ../terminal-v7/index.html)",
+      "Bash(node --check apps/edge/public/js/terminal.js)"
     ]
   }
 }

@@ -49,9 +49,10 @@ function extractQueryToken(reqUrl) {
  * @param {object} opts
  * @param {import('http').Server} opts.server       The http.Server returned by startHealthServer.
  * @param {import('./aggregator.js').Aggregator} opts.aggregator
+ * @param {import('./paperbot.js').PaperBot} [opts.paperBot]   V6 — optional paper-trading sandbox.
  * @returns {{ close: () => Promise<void>, clientCount: () => number }}
  */
-export function startStreamServer({ server, aggregator }) {
+export function startStreamServer({ server, aggregator, paperBot }) {
   if (!server) throw new Error('startStreamServer: server is required');
   if (!aggregator) throw new Error('startStreamServer: aggregator is required');
 
@@ -95,6 +96,13 @@ export function startStreamServer({ server, aggregator }) {
       ws.send(JSON.stringify({ t: 'hello', v: '7.0', interval_ms: PING_INTERVAL_MS }));
     } catch { /* socket may have closed already */ }
 
+    // V6: greet new clients with the current PaperBot snapshot so the
+    // sandbox UI shows live PnL/positions on first paint without
+    // waiting up to broadcastIntervalMs for the next push.
+    if (paperBot) {
+      try { ws.send(JSON.stringify(paperBot.getState())); } catch {}
+    }
+
     ws.on('message', (raw) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
@@ -106,15 +114,25 @@ export function startStreamServer({ server, aggregator }) {
   });
 
   // Tick fan-out. ONE listener on the aggregator, broadcast to N clients.
-  const onTick = (frame) => {
-    const payload = JSON.stringify(frame);
+  const broadcast = (payload) => {
     for (const ws of wss.clients) {
       if (ws.readyState === 1 /* OPEN */) {
         try { ws.send(payload); } catch { /* drop frame for this client */ }
       }
     }
   };
+  const onTick = (frame) => broadcast(JSON.stringify(frame));
   aggregator.on('tick', onTick);
+
+  // V6 — PaperBot state fan-out. The bot already self-throttles its
+  // own broadcasts (cfg.broadcastIntervalMs), so this listener is a
+  // straight pass-through. Frames carry `t:'pb'` so the client can
+  // tell them apart from market `tick` frames.
+  let onPb = null;
+  if (paperBot) {
+    onPb = (frame) => broadcast(JSON.stringify(frame));
+    paperBot.on('pb', onPb);
+  }
 
   // Heartbeat / dead-socket reaper.
   const pingTimer = setInterval(() => {
@@ -136,6 +154,7 @@ export function startStreamServer({ server, aggregator }) {
     close: async () => {
       clearInterval(pingTimer);
       aggregator.off('tick', onTick);
+      if (paperBot && onPb) paperBot.off('pb', onPb);
       await new Promise((resolve) => wss.close(resolve));
     },
   };

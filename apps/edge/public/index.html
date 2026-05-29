@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Swing Terminal V5">
+  <meta name="description" content="Swing Terminal V6">
   <!-- Force browsers to drop the previously cached HTML so the v3+ asset URLs are actually fetched. -->
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>">
-  <title>Swing Terminal V5</title>
+  <title>Swing Terminal V6</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/terminal.css?v=6h8">
   
@@ -22,7 +22,7 @@
   <div id="auth-gate" class="auth-gate">
     <div class="auth-card">
       <div class="auth-card__logo">◈</div>
-      <h1 class="auth-card__title">SWING TERMINAL V5</h1>
+      <h1 class="auth-card__title">SWING TERMINAL V6</h1>
       <p class="auth-card__sub">Auth required</p>
 
       <div id="auth-error" class="auth-error"></div>
@@ -78,7 +78,7 @@
   <!-- TERMINAL APP -->
   <div id="terminal-app" style="display:none">
     <div id="topbar">
-      <div class="logo">◈ SWING<span>TERMINAL V5</span></div>
+      <div class="logo">◈ SWING<span>TERMINAL V6</span></div>
       
       <div class="hotness-box" title="Logika: Hotness počítáme jako vážený průměr 24h Volume delty (váha 40 %), Open Interest delty (váha 40 %) a aktuální likvidity/spreadu (váha 20 %). Pokud je výsledek > 80, trh je 'EXTREME', pod 20 je 'DEAD'.">
         <span class="hotness-label">MKT HOTNESS:</span>
@@ -102,6 +102,7 @@
       </div>
 
       <div class="hdr-right">
+        <span class="v6-badge" title="Terminal V6" style="font-size:9px;font-weight:700;letter-spacing:.12em;color:var(--acc);padding:2px 6px;border:1px solid rgba(0,232,200,.35);border-radius:3px;background:rgba(0,232,200,.06);line-height:1">V6</span>
         <button class="hbtn hbtn--mkt-briefing" id="mkt-briefing-trigger" title="AI Market Briefing — Macro / Meta / Opportunities (cache 45 min)">🌍 MARKET BRIEFING</button>
         <button class="hbtn hbtn--briefing" id="briefing-trigger" title="AI syntéza trhu (top 3 setupy)">📋 SYNTÉZA TRHU</button>
         <button class="hbtn" onclick="document.dispatchEvent(new Event('refresh_now'))">REFRESH</button>
@@ -238,6 +239,44 @@
           <div class="ph"><span class="pt" id="dlbl">DETAIL COINU</span><span class="ps">Vyber coin vlevo</span></div>
           <div id="dcon" style="flex:1">
             <div style="padding:40px;text-align:center;color:var(--txt3)">Zvolte coin pro detail</div>
+          </div>
+
+          <!-- V6 PAPER TRADING SANDBOX — server-side bot state, fanned
+               in over the existing /api/stream-markets WS as `pb` frames
+               and rendered live by renderPaperBot(). Falls back to
+               GET /api/paperbot/state polling when the WS is dead. -->
+          <div class="terminal-pb-panel" id="pb-panel">
+            <div class="ph">
+              <span class="pt">🤖 BOT INTELLIGENCE</span>
+              <span class="ps" id="pb-status">🟢 SEARCHING</span>
+            </div>
+            <div class="pb-metrics">
+              <div class="pb-metric">
+                <div class="pb-metric__label">REALIZED PNL</div>
+                <div class="pb-metric__value" id="pb-realized">—</div>
+              </div>
+              <div class="pb-metric">
+                <div class="pb-metric__label">UNREALIZED PNL</div>
+                <div class="pb-metric__value" id="pb-unrealized">—</div>
+              </div>
+              <div class="pb-metric">
+                <div class="pb-metric__label">WIN RATE</div>
+                <div class="pb-metric__value" id="pb-winrate">—</div>
+                <div class="pb-metric__sub" id="pb-wl">0W / 0L</div>
+              </div>
+              <div class="pb-metric">
+                <div class="pb-metric__label">CAUTION ×</div>
+                <div class="pb-metric__value" id="pb-caution">1.00</div>
+                <div class="pb-metric__sub" id="pb-balance">$10,000.00</div>
+              </div>
+            </div>
+            <div class="ph pb-subheader">
+              <span class="pt">CLOSED TRADES</span>
+              <span class="ps" id="pb-trade-count">0</span>
+            </div>
+            <div class="pb-ledger" id="pb-ledger">
+              <div class="pb-ledger__empty">Bot is warming up — no closed trades yet.</div>
+            </div>
           </div>
         </div>
       </div>
