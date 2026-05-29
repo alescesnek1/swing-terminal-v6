@@ -3371,12 +3371,70 @@ function renderPaperBot(state) {
   const ledger = document.getElementById('pb-ledger');
   if (!ledger) return;
   const trades = Array.isArray(state.recentTrades) ? state.recentTrades : [];
+  const openPositions = Array.isArray(state.openPositions) ? state.openPositions : [];
   _pbSetText('pb-trade-count', (state.totalClosed != null ? state.totalClosed : trades.length) + ' total');
 
-  if (trades.length === 0) {
+  // ── LIVE POSITIONS: render at top of ledger ──
+  // Remove stale live rows
+  ledger.querySelectorAll('.pb-row--live').forEach(el => el.remove());
+  // Build live rows
+  if (openPositions.length > 0) {
+    const liveFrag = document.createDocumentFragment();
+    for (let i = 0; i < openPositions.length; i++) {
+      const pos = openPositions[i];
+      const row = document.createElement('div');
+      row.className = 'pb-row pb-row--live';
+      row.dataset.liveKey = pos.symbol + '|' + pos.openedAt;
+
+      const time = document.createElement('span');
+      time.className = 'pb-row__time';
+      time.textContent = _pbFmtTime(pos.openedAt);
+
+      const sym = document.createElement('span');
+      sym.className = 'pb-row__sym';
+      sym.textContent = String(pos.symbol || '');
+
+      const side = document.createElement('span');
+      const sideKey = String(pos.side || 'long').toLowerCase();
+      side.className = 'pb-row__side ' + sideKey;
+      side.textContent = sideKey === 'short' ? 'SHORT' : 'LONG';
+
+      const entry = document.createElement('span');
+      entry.className = 'pb-row__px';
+      entry.textContent = _pbFmtPx(pos.entryPrice);
+      entry.title = 'Entry ' + _pbFmtPx(pos.entryPrice);
+
+      // LIVE badge instead of exit price
+      const liveBadge = document.createElement('span');
+      liveBadge.className = 'pb-row__live-badge';
+      liveBadge.textContent = 'LIVE';
+
+      const pnlVal = Number(pos.currentPnl) || 0;
+      const pnlPctVal = Number(pos.currentPnlPct) || 0;
+      const pnl = document.createElement('span');
+      pnl.className = 'pb-row__pnl ' + (pnlVal >= 0 ? 'pos' : 'neg');
+      pnl.textContent = _pbFmtUsd(pnlVal) + ' (' + (pnlPctVal >= 0 ? '+' : '') + pnlPctVal.toFixed(2) + '%)';
+
+      const dur = document.createElement('span');
+      dur.className = 'pb-row__dur';
+      const holdMs = (Number(state.ts) || Date.now()) - (Number(pos.openedAt) || Date.now());
+      dur.textContent = _pbFmtDuration(holdMs);
+
+      row.appendChild(time);
+      row.appendChild(sym);
+      row.appendChild(side);
+      row.appendChild(entry);
+      row.appendChild(liveBadge);
+      row.appendChild(pnl);
+      row.appendChild(dur);
+      liveFrag.appendChild(row);
+    }
+    ledger.insertBefore(liveFrag, ledger.firstChild);
+  }
+
+  if (trades.length === 0 && openPositions.length === 0) {
     _pbRowKeys.clear();
-    if (!ledger.firstElementChild || ledger.firstElementChild.className !== 'bot-ledger__empty') {
-      ledger.textContent = '';
+    if (!ledger.querySelector('.bot-ledger__empty')) {
       const empty = document.createElement('div');
       empty.className = 'bot-ledger__empty';
       empty.textContent = 'Bot is warming up - no closed trades yet.';
@@ -3398,11 +3456,18 @@ function renderPaperBot(state) {
     if (frag.firstChild) frag.insertBefore(row, frag.firstChild);
     else frag.appendChild(row);
   }
-  if (frag.childNodes.length) ledger.insertBefore(frag, ledger.firstChild);
+  // Insert closed trades AFTER live rows
+  const firstClosedRow = ledger.querySelector('.pb-row:not(.pb-row--live)');
+  if (frag.childNodes.length) {
+    if (firstClosedRow) ledger.insertBefore(frag, firstClosedRow);
+    else ledger.appendChild(frag);
+  }
 
-  while (ledger.children.length > PB_LEDGER_DOM_CAP) {
-    const last = ledger.lastChild;
-    if (!last) break;
+  // Cap DOM — only trim closed rows (not live ones)
+  const closedRows = ledger.querySelectorAll('.pb-row:not(.pb-row--live)');
+  let trimCount = closedRows.length - PB_LEDGER_DOM_CAP;
+  for (let i = closedRows.length - 1; i >= 0 && trimCount > 0; i--, trimCount--) {
+    const last = closedRows[i];
     if (last.dataset && last.dataset.key) _pbRowKeys.delete(last.dataset.key);
     ledger.removeChild(last);
   }
@@ -4528,7 +4593,7 @@ if (typeof _origRequestAnalysis === 'function') {
   };
 }
 
-const LOCAL_PAPERBOT_STORAGE_KEY = 'terminal.v7.localPaperBot.state';
+const LOCAL_PAPERBOT_STORAGE_KEY = 'terminal.v7.localPaperBot.state.v3';
 
 class LocalPaperBot {
   constructor(opts = {}) {
@@ -4555,8 +4620,12 @@ class LocalPaperBot {
     for (let i = 0; i < markets.length; i++) {
       const market = this._normalizeMarket(markets[i]);
       if (!market) continue;
-      this.lastPrices.set(market.symbol, market.price);
+
+      // ── SANITY CHECK: reject data-anomaly ticks (>15% single-tick jump) ──
       const hist = this._pushPrice(market.symbol, market.price, now);
+      if (hist === null) continue; // corrupted tick — skip entirely
+
+      this.lastPrices.set(market.symbol, market.price);
       this._markOpenPrice(market.symbol, market.price);
 
       const pos = this._findOpen(market.symbol);
@@ -4661,6 +4730,14 @@ class LocalPaperBot {
       this.priceHistory.set(symbol, hist);
     }
     const last = hist[hist.length - 1];
+    // ── DATA SANITY: reject >15% single-tick jumps as feed corruption ──
+    if (last && last.price > 0) {
+      const pctChange = Math.abs(price - last.price) / last.price;
+      if (pctChange > 0.15) {
+        // Anomaly detected — do NOT update history, do NOT let SL/TP fire.
+        return null;
+      }
+    }
     if (!last || last.price !== price) hist.push({ price, ts });
     if (hist.length > this.historyLimit) hist.splice(0, hist.length - this.historyLimit);
     return hist;
@@ -4722,7 +4799,12 @@ class LocalPaperBot {
     const idx = this.state.openPositions.indexOf(pos);
     if (idx < 0) return;
     const sideMul = pos.side === 'short' ? -1 : 1;
-    const pnlPct = sideMul * ((exitPrice - pos.entryPrice) / pos.entryPrice) * 100;
+    // ── GUARANTEED SL: cap exit price at the SL level to prevent slippage ──
+    let effectiveExit = exitPrice;
+    if (reason === 'stop_loss') {
+      effectiveExit = pos.slPrice;
+    }
+    const pnlPct = sideMul * ((effectiveExit - pos.entryPrice) / pos.entryPrice) * 100;
     const grossPnl = (pnlPct / 100) * pos.notional;
     const fees = pos.notional * this.feePct * 2;
     const pnl = grossPnl - fees;
@@ -4743,7 +4825,7 @@ class LocalPaperBot {
       symbol: pos.symbol,
       side: pos.side,
       entryPrice: pos.entryPrice,
-      exitPrice,
+      exitPrice: effectiveExit,
       pnl: this._round(pnl, 6),
       pnlPct: this._round(pnlPct, 4),
       reason,
@@ -4776,7 +4858,10 @@ class LocalPaperBot {
       const pnl = (pnlPct / 100) * (Number(pos.notional) || 0);
       unrealizedPnl += pnl;
       pos.currentPrice = px;
-      return { ...pos, currentPrice: px, unrealizedPnl: this._round(pnl, 6), unrealizedPnlPct: this._round(pnlPct, 4) };
+      // Attach currentPnl for live UI rendering
+      pos.currentPnl = this._round(pnl, 6);
+      pos.currentPnlPct = this._round(pnlPct, 4);
+      return { ...pos, currentPrice: px, currentPnl: this._round(pnl, 6), currentPnlPct: this._round(pnlPct, 4), unrealizedPnl: this._round(pnl, 6), unrealizedPnlPct: this._round(pnlPct, 4) };
     });
     const wins = this.state.wins | 0;
     const losses = this.state.losses | 0;

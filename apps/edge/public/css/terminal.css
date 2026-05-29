@@ -399,6 +399,12 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .pb-row__pnl.neg{color:var(--red)}
 .pb-row__dur{text-align:right;color:var(--txt3)}
 
+/* LIVE open-position rows — distinct from closed trades */
+.pb-row--live{border-left:2px solid var(--amb);background:rgba(255,176,32,.04);border-bottom:1px solid rgba(255,176,32,.12)}
+.pb-row--live:hover{background:rgba(255,176,32,.08)}
+@keyframes pb-live-pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.pb-row__live-badge{display:inline-flex;align-items:center;justify-content:center;padding:2px 8px;border-radius:3px;font-size:9px;font-weight:700;letter-spacing:.1em;background:rgba(255,176,32,.15);color:var(--amb);border:1px solid rgba(255,176,32,.4);animation:pb-live-pulse 1.8s ease-in-out infinite}
+
 .pb-tab-pip{display:none;background:rgba(255,176,32,.18);color:var(--amb);border:1px solid rgba(255,176,32,.4);font-weight:700;padding:0 5px;border-radius:8px;font-size:8px;margin-left:4px}
 .pb-tab-pip.on{display:inline-block}
 
