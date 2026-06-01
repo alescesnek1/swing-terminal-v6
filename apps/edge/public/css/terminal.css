@@ -128,21 +128,49 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
    so the affordance is obvious without an extra widget. */
 .thdr > * { position: relative; padding-left: 4px; padding-right: 4px; }
 .thdr > .no-handle { padding-left: 0; }
-.thdr > [draggable="true"] {
+.thdr > [data-sortable="true"] {
   cursor: grab;
   border-bottom: 1px solid transparent;
-  transition: background .15s, border-color .15s;
+  transition: background .15s, border-color .15s, transform 0.2s cubic-bezier(0.2, 0, 0, 1);
+  will-change:transform;
+  touch-action:none;
 }
-.thdr > [draggable="true"]:hover {
+.thdr > [data-sortable="true"]:hover {
   background: rgba(0,232,200,.06);
   border-bottom-color: rgba(0,232,200,.40);
 }
-.thdr > [draggable="true"]:active { cursor: grabbing; }
+.thdr > [data-sortable="true"]:active { cursor: grabbing; }
 .thdr > .col-dragging {
   opacity: .55;
   background: rgba(0,232,200,.15) !important;
   border-bottom-color: rgba(0,232,200,.85) !important;
 }
+.thdr > .col-drag-origin {
+  opacity:0;
+  visibility:hidden;
+  background:rgba(0,232,200,.10) !important;
+  border-bottom-color:rgba(0,232,200,.65) !important;
+}
+.col-sort-active > [data-sortable="true"]{
+  transition:transform 0.2s cubic-bezier(0.2, 0, 0, 1),background .15s,border-color .15s;
+}
+.col-sort-body{cursor:grabbing;user-select:none}
+.col-drag-ghost{
+  position:fixed;
+  z-index:2147483001;
+  pointer-events:none;
+  display:flex;
+  align-items:center;
+  padding:5px 4px;
+  color:var(--txt);
+  background:rgba(11,15,32,.96);
+  border:1px solid rgba(0,232,200,.55);
+  border-radius:4px;
+  box-shadow:0 12px 28px rgba(0,0,0,.45),0 0 18px rgba(0,232,200,.18);
+  will-change:transform;
+  transform:translate3d(0,0,0);
+}
+.col-drag-ghost .col-resize-handle{display:none}
 .thdr > .col-drop-target {
   background: rgba(0,232,200,.10) !important;
   outline: 1px dashed rgba(0,232,200,.60);
@@ -169,6 +197,9 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .exch-alpha{background:rgba(168,85,247,.12);color:var(--pur);border-color:rgba(168,85,247,.45)}
 .sig-cell{display:flex;align-items:center;justify-content:flex-start;min-width:0}
 .pos{color:var(--grn)}.neg{color:var(--red)}.tr{text-align:right}
+.scan-wrap [data-cell],.scan-wrap .tr,.scan-wrap .rn,.scan-wrap .bdg,.scan-wrap .panic-cell,.scan-wrap .te-val{font-variant-numeric:tabular-nums}
+.empty-data{display:inline-flex;align-items:center;justify-content:flex-end;width:100%;color:var(--txt3);opacity:.55;font-size:8px;font-weight:600;letter-spacing:.08em;font-variant-numeric:tabular-nums}
+.sig-none{display:inline-flex;align-items:center;justify-content:center;min-width:18px;color:var(--txt3);opacity:.65;font-size:10px;font-weight:600}
 .bdg{display:inline-flex;align-items:center;justify-content:center;padding:1px 5px;border-radius:2px;font-size:8px;font-weight:600;letter-spacing:.04em}
 .buy{background:rgba(0,212,132,.1);color:var(--grn);border:1px solid rgba(0,212,132,.3)}
 .sell{background:rgba(255,51,86,.1);color:var(--red);border:1px solid rgba(255,51,86,.3)}
@@ -615,7 +646,7 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
      them on touch viewports to recover horizontal pixels and remove
      a misleading hover cue from a device that has no hover state. */
   .col-resize-handle{display:none !important;}
-  .thdr > [draggable="true"]{cursor:default;border-bottom:none;}
+  .thdr > [data-sortable="true"]{cursor:default;border-bottom:none;}
   /* The expand toggle is appended by renderList as the last child after score */
   .trow .trow-toggle{
     display:inline-flex;align-items:center;justify-content:center;

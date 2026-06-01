@@ -1450,6 +1450,7 @@ function renderList() {
   currentPage = clamp(currentPage, 0, Math.max(0, totalPages - 1));
   const start = currentPage * PAGE_SIZE;
   const page = filtered.slice(start, start + PAGE_SIZE);
+  const emptyData = '<div class="empty-data">NO DATA</div>';
 
   if (filtered.length === 0) {
     document.getElementById('clist').innerHTML = `<div style="padding:30px;text-align:center;color:var(--txt3)">Zadne vysledky.</div>`;
@@ -1464,9 +1465,36 @@ function renderList() {
   // 4H/12H entirely; the upstream contract is documented in markets.js).
   const tfCell = (v) => {
     const n = (v == null || v === '') ? NaN : parseFloat(v);
-    if (!Number.isFinite(n)) return '<span class="tr" style="color:var(--txt3)">-</span>';
+    if (!Number.isFinite(n)) return emptyData;
     const cls = n >= 0 ? 'pos' : 'neg';
     return `<span class="tr ${cls}">${fp(n, 1)}</span>`;
+  };
+  const safeNum = (v, fallback = 0) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const safeMetric = (v, formatter) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? _esc(formatter(n)) : emptyData;
+  };
+  const safeSig = (row) => {
+    try {
+      const s = _sigOf(row || {});
+      if (!s || typeof s !== 'object') throw new Error('empty signal');
+      return {
+        label: String(s.label == null ? '' : s.label).trim(),
+        cls: String(s.cls || 'neut').trim() || 'neut',
+        score: Number.isFinite(Number(s.score)) ? Number(s.score) : 0,
+      };
+    } catch {
+      return { label: '', cls: 'neut', score: 0 };
+    }
+  };
+  const emptySignal = '<span class="sig-none">-</span>';
+  const signalMarkup = (s) => {
+    const label = String(s && s.label || '').trim();
+    if (!label || (label.toUpperCase() === 'NEUT' && !(Number(s && s.score) > 0))) return emptySignal;
+    return `<span class="bdg ${_esc(s.cls || 'neut')}">${_esc(label)}</span>`;
   };
   // V7.4.5 — defensive timeframe extractor. The upstream payload
   // shape varies depending on which build branch in markets.js
@@ -1487,17 +1515,18 @@ function renderList() {
     return null;
   };
 
-  page.forEach((d, i) => {
+  page.forEach((row, i) => {
+    const d = row && typeof row === 'object' ? row : {};
     try {
       // 100% fail-safe variable casting
-      const safeNum = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
-      const price = safeNum(d.current_price);
-      const qv = safeNum(d.total_volume);
+      const price = safeNum(d.current_price, NaN);
+      const qv = safeNum(d.total_volume, NaN);
 
-      const s = _sigOf(d);
+      const s = safeSig(d);
       const sym = typeof d.symbol === 'string' ? d.symbol.toUpperCase() : String(d.symbol || '').toUpperCase();
       const name = d.name || String(d.id || 'N/A');
-      const onBin = isOnBinance(d);
+      let onBin = false;
+      try { onBin = isOnBinance(d); } catch { onBin = false; }
       // V4 Premium: tri-state badge.
       //   BIN   = Binance Spot (deepest liquidity)
       //   ALPHA = Binance Futures (USDⓈ-M perp) only — funding/OI live
@@ -1514,7 +1543,7 @@ function renderList() {
       // V5 (Phase 4 Wildcard A): stamp smart-money divergence tag if
       // we have one for this base symbol. Tag wraps in the same cell
       // as the signal label so the row width stays stable.
-      const div = DIVERGENCE_MAP.get(sym);
+      const div = DIVERGENCE_MAP && typeof DIVERGENCE_MAP.get === 'function' ? DIVERGENCE_MAP.get(sym) : null;
       let divTag = '';
       if (div) {
         // V6.8 Sprint 1 (FIX-3): cls + label resolve from a fixed
@@ -1528,10 +1557,10 @@ function renderList() {
 
       // V5 (Sniper Limit Protocol): pulsing 🎯 SNIPER stamp when the
       // mark price has dripped within 2 % of the detected bid wall.
-      const snip = SNIPER_MAP.get(sym);
+      const snip = SNIPER_MAP && typeof SNIPER_MAP.get === 'function' ? SNIPER_MAP.get(sym) : null;
       let snipTag = '';
       if (snip) {
-        const wallNotionalM = (snip.wall_notional_usd / 1_000_000).toFixed(2);
+        const wallNotionalM = (safeNum(snip.wall_notional_usd, 0) / 1_000_000).toFixed(2);
         // V6.8 Sprint 1 (FIX-3): tooltip values flow into title="" — escape.
         snipTag = `<span class="sniper-tag" title="${_esc(`SNIPER LIMIT · entry ${fmt(snip.optimal_limit_entry)} · wall $${wallNotionalM}M @ -${snip.wall_drop_pct.toFixed(2)}% · ${snip.proximity_pct.toFixed(2)}% from mark · conf ${snip.confidence}`)}">🎯 SNIPER</span>`;
       }
@@ -1542,18 +1571,17 @@ function renderList() {
       const idAttr = _esc(String(d.id || ''));
       const escSym = _esc(sym);
       const escName = _esc(name);
-      const escLabel = _esc(s.label);
-      const escCls = _esc(s.cls);
-      const hot = safeNum(calcHotness(d));
+      const hot = (() => { try { return safeNum(calcHotness(d), 0); } catch { return 0; } })();
       // Mobile-only sub-row carrying the columns hidden ≤640px.
-      const panicScore = Number.isFinite(d._panic) ? d._panic : calcPanic(d);
+      const panicScore = Number.isFinite(Number(d._panic)) ? Number(d._panic) : (() => { try { return calcPanic(d); } catch { return 0; } })();
+      const panicHTML = (() => { try { return panicBadge(panicScore); } catch { return emptyData; } })();
       const expandRow = `<div class="trow-expand" data-coin-id="${idAttr}">
-        <div class="te-cell"><span class="te-lbl">SIG</span><span class="te-val"><span class="bdg ${escCls}">${escLabel}</span></span></div>
+        <div class="te-cell"><span class="te-lbl">SIG</span><span class="te-val">${signalMarkup(s)}</span></div>
         <div class="te-cell"><span class="te-lbl">1H</span><span class="te-val">${tfCell(d._c1)}</span></div>
         <div class="te-cell"><span class="te-lbl">4H</span><span class="te-val">${tfCell(d._c4)}</span></div>
         <div class="te-cell"><span class="te-lbl">12H</span><span class="te-val">${tfCell(d._c12)}</span></div>
         <div class="te-cell"><span class="te-lbl">7D</span><span class="te-val">${tfCell(d._c7d)}</span></div>
-        <div class="te-cell"><span class="te-lbl">VOL</span><span class="te-val">${_esc(fmt(qv))}</span></div>
+        <div class="te-cell"><span class="te-lbl">VOL</span><span class="te-val">${safeMetric(qv, fmt)}</span></div>
         <div class="te-cell"><span class="te-lbl">HOT</span><span class="te-val" style="color:${hot>60?'var(--red)':'var(--txt2)'}">${hot}</span></div>
       </div>`;
       // V7.3: cell content built from the live _columnOrder registry
@@ -1574,16 +1602,16 @@ function renderList() {
       const cellHTML = {
         rank:   `<span data-col="rank" class="rn">${start + i + 1}</span>`,
         coin:   `<div data-col="coin" class="coin-cell"><span class="csym">${escSym}${exchBadge}</span><span class="cnm">${escName}</span></div>`,
-        signal: `<span data-col="signal" class="sig-cell"><span class="bdg ${escCls}">${escLabel}</span>${divTag}${snipTag}</span>`,
+        signal: `<span data-col="signal" class="sig-cell">${signalMarkup(s)}${divTag}${snipTag}</span>`,
         score:  `<span data-col="score" data-cell="score" class="tr" style="color:${s.score>=6?'var(--grn)':'var(--txt2)'}"><b>${s.score}/10</b></span>`,
-        panic:  `<span data-col="panic" data-cell="panic" class="tr">${panicBadge(panicScore)}</span>`,
-        price:  `<span data-col="price" data-cell="price" class="tr">${_esc(fmt(price))}</span>`,
+        panic:  `<span data-col="panic" data-cell="panic" class="tr">${panicHTML}</span>`,
+        price:  `<span data-col="price" data-cell="price" class="tr">${safeMetric(price, fmt)}</span>`,
         c1:     `<span data-col="c1"  data-cell="c1"  class="tr">${tfCell(v_c1)}</span>`,
         c4:     `<span data-col="c4"  data-cell="c4"  class="tr">${tfCell(v_c4)}</span>`,
         c12:    `<span data-col="c12" data-cell="c12" class="tr">${tfCell(v_c12)}</span>`,
         c24:    `<span data-col="c24" data-cell="c24" class="tr">${tfCell(v_c24)}</span>`,
         c7d:    `<span data-col="c7d" data-cell="c7d" class="tr">${tfCell(v_c7d)}</span>`,
-        qv:     `<span data-col="qv"  data-cell="qv"  class="tr">${_esc(fmt(qv))}</span>`,
+        qv:     `<span data-col="qv"  data-cell="qv"  class="tr">${safeMetric(qv, fmt)}</span>`,
         hot:    `<span data-col="hot" class="tr" style="color:${hot>60?'var(--red)':'var(--txt2)'}"><b>${hot}</b></span>`,
         // V7.4.9 — row-side mirror of the static spacer so the grid
         // column count stays aligned with the header DOM.
@@ -1599,6 +1627,19 @@ function renderList() {
       </div>${expandRow}`);
     } catch (err) {
       console.error('[TERMINAL] Error rendering coin:', d, err.message);
+      const fallbackId = _esc(String((d && d.id) || (d && d.symbol) || `row-${start + i}`));
+      const fallbackCells = _columnOrder.map(k => {
+        if (k === 'coin') {
+          return `<div data-col="coin" class="coin-cell"><span class="csym">${_esc(String((d && d.symbol) || 'N/A'))}</span><span class="cnm">${_esc(String((d && d.name) || 'Malformed row'))}</span></div>`;
+        }
+        if (k === 'signal') return `<span data-col="signal" class="sig-cell">${emptySignal}</span>`;
+        if (k === 'spacer') return '<span data-col="spacer" aria-hidden="true"></span>';
+        return `<span data-col="${_esc(k)}" class="tr">${emptyData}</span>`;
+      }).join('');
+      htmls.push(`<div class="trow" data-coin-id="${fallbackId}">
+        ${fallbackCells}
+        <span class="trow-toggle" data-trow-toggle="1" aria-label="Expand">â‹Ż</span>
+      </div>`);
     }
   });
 
@@ -4430,7 +4471,7 @@ function renderHeader() {
       return `<span data-col="spacer" class="thdr-spacer no-handle" aria-hidden="true"></span>`;
     }
     const tipAttr = def.tip ? ` title="${_esc(def.tip)}"` : '';
-    const dragAttr = def.dragOK ? ' draggable="true"' : '';
+    const dragAttr = def.dragOK ? ' data-sortable="true"' : '';
     const classes = [];
     if (def.align === 'right') classes.push('tr');
     if (!def.dragOK) classes.push('no-handle');
@@ -4458,104 +4499,169 @@ function renderHeader() {
 // from kicking in — otherwise dragging the right-edge handle would
 // also trigger the reorder gesture on the parent draggable cell.
 let _isResizing = false;
+let _columnDrag = null;
 
-function _attachColumnDnD() {
+function _attachFluidColumnDnD() {
   const hdr = document.querySelector('.thdr');
   if (!hdr) return;
-  let srcKey = null;
-
-  // V7.4.5 — split listener attachment so the "drag source" and
-  // "drop target" capabilities are independent.
-  //   • dragstart / dragend  → ONLY on cells whose def.dragOK is true
-  //                            (so we don't accidentally promote the
-  //                            row-number marker into a reorderable
-  //                            cell).
-  //   • dragover / drop /
-  //     dragleave            → EVERY cell, with no exception. Without
-  //                            this, COIN/RANK cannot accept a drop
-  //                            and the user can't park another column
-  //                            before COIN.
-  //
-  // Splice trace (verified for "move SIGNAL from idx 2 → COIN idx 1"):
-  //   before  = [rank, coin, signal, score, panic, …]   ← length 13
-  //   step 1  = splice(2, 1) ⇒ ['signal']; arr = [rank, coin, score, …]
-  //   step 2  = splice(1, 0, 'signal') ⇒ [rank, signal, coin, score, …]
-  //   after   = signal at idx 1, coin at idx 2 — no off-by-one. ✓
-  hdr.querySelectorAll('[data-col]').forEach(el => {
-    const key = el.dataset.col;
-    const def = COLUMN_DEFS[key];
-    if (!def) return;
-    // V7.4.9 — the spacer is INERT: not a drag source AND not a
-    // drop target. Skipping it here means dragging a column onto
-    // the right-edge void simply does nothing (no flash, no move).
-    // Combined with the tail-pin below, this guarantees the spacer
-    // is always the last cell in _columnOrder.
-    if (key === 'spacer') return;
-
-    // ── DRAG SOURCE — gated by dragOK ──
-    if (def.dragOK) {
-      el.addEventListener('dragstart', (e) => {
-        // Suppress reorder while the mouse-resize engine is active.
-        if (_isResizing) { e.preventDefault(); return; }
-        srcKey = key;
-        el.classList.add('col-dragging');
-        try {
-          e.dataTransfer.effectAllowed = 'move';
-          e.dataTransfer.setData('text/plain', key);
-        } catch {}
-      });
-      el.addEventListener('dragend', () => {
-        hdr.querySelectorAll('.col-drop-target').forEach(n => n.classList.remove('col-drop-target'));
-        el.classList.remove('col-dragging');
-        srcKey = null;
-      });
-    }
-
-    // ── DROP TARGET — every cell, no exceptions (V7.4.5) ──
-    el.addEventListener('dragover', (e) => {
-      // The preventDefault here is what makes the cell a legal drop
-      // target — without it the browser rejects the drop event.
-      e.preventDefault();
-      try { e.dataTransfer.dropEffect = 'move'; } catch {}
-      hdr.querySelectorAll('.col-drop-target').forEach(n => n.classList.remove('col-drop-target'));
-      el.classList.add('col-drop-target');
-    });
-    el.addEventListener('dragleave', () => {
-      el.classList.remove('col-drop-target');
-    });
-    el.addEventListener('drop', (e) => {
-      e.preventDefault();
-      el.classList.remove('col-drop-target');
-      const sk = srcKey || (e.dataTransfer && e.dataTransfer.getData && e.dataTransfer.getData('text/plain'));
-      const dk = key;
-      if (!sk || !dk || sk === dk) return;
-      const from = _columnOrder.indexOf(sk);
-      const to   = _columnOrder.indexOf(dk);
-      if (from < 0 || to < 0) return;
-      _columnOrder.splice(to, 0, _columnOrder.splice(from, 1)[0]);
-      // V7.4.9 — invariant enforcement: spacer is ALWAYS the last
-      // element of _columnOrder. If a user somehow lands a column
-      // after it (e.g. via a legacy saved order with a stale layout
-      // version), this re-pins the void to the tail without
-      // touching the user's chosen positions for the data columns.
-      const spIdx = _columnOrder.indexOf('spacer');
-      if (spIdx >= 0 && spIdx !== _columnOrder.length - 1) {
-        _columnOrder.splice(spIdx, 1);
-        _columnOrder.push('spacer');
-      }
-      _persistColumnOrder();
-      _applyGridTemplate();
-      renderHeader();
-      try { renderList(); } catch {}
-    });
+  hdr.querySelectorAll('[data-sortable="true"]').forEach(el => {
+    el.addEventListener('pointerdown', _onColumnPointerDown);
   });
-
-  // The [?] help button uses global delegation (see initPanicManual)
-  // — no per-button binding needed, so a header rebuild never has to
-  // re-attach a click handler for it.
 }
 
-// V7.4 — Mouse-driven column resize.
+function _onColumnPointerDown(e) {
+  if (e.button !== 0 || _isResizing) return;
+  if (e.target && e.target.closest && e.target.closest('[data-resize]')) return;
+  const source = e.currentTarget;
+  const key = source && source.dataset ? source.dataset.col : '';
+  if (!key || key === 'spacer' || !COLUMN_DEFS[key] || !COLUMN_DEFS[key].dragOK) return;
+
+  const hdr = source.closest('.thdr');
+  if (!hdr) return;
+  const items = Array.from(hdr.querySelectorAll('[data-sortable="true"]'))
+    .filter(el => el.dataset.col && el.dataset.col !== 'spacer' && COLUMN_DEFS[el.dataset.col]);
+  const from = items.indexOf(source);
+  if (from < 0) return;
+
+  e.preventDefault();
+  try { source.setPointerCapture(e.pointerId); } catch {}
+
+  const srcRect = source.getBoundingClientRect();
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const slots = items.map((el, index) => {
+    const rect = el.getBoundingClientRect();
+    return {
+      el,
+      key: el.dataset.col,
+      index,
+      left: rect.left,
+      right: rect.right,
+      width: rect.width,
+      center: rect.left + rect.width / 2,
+    };
+  });
+
+  const ghost = source.cloneNode(true);
+  ghost.classList.add('col-drag-ghost');
+  ghost.style.left = `${srcRect.left}px`;
+  ghost.style.top = `${srcRect.top}px`;
+  ghost.style.width = `${srcRect.width}px`;
+  ghost.style.height = `${srcRect.height}px`;
+  ghost.style.transform = 'translate3d(0,0,0)';
+  document.body.appendChild(ghost);
+
+  source.classList.add('col-drag-origin');
+  hdr.classList.add('col-sort-active');
+  document.body.classList.add('col-sort-body');
+
+  _columnDrag = {
+    hdr,
+    source,
+    ghost,
+    items,
+    slots,
+    key,
+    from,
+    to: from,
+    startX,
+    startY,
+    pointerId: e.pointerId,
+    raf: 0,
+    lastX: e.clientX,
+    lastY: e.clientY,
+  };
+
+  document.addEventListener('pointermove', _onColumnPointerMove, { passive: false });
+  document.addEventListener('pointerup', _onColumnPointerUp, { passive: false });
+  document.addEventListener('pointercancel', _onColumnPointerUp, { passive: false });
+}
+
+function _onColumnPointerMove(e) {
+  const st = _columnDrag;
+  if (!st) return;
+  e.preventDefault();
+  st.lastX = e.clientX;
+  st.lastY = e.clientY;
+  if (st.raf) return;
+  st.raf = requestAnimationFrame(() => {
+    st.raf = 0;
+    _paintColumnDrag(st);
+  });
+}
+
+function _paintColumnDrag(st) {
+  const dx = st.lastX - st.startX;
+  const dy = st.lastY - st.startY;
+  st.ghost.style.transform = `translate3d(${dx}px,${dy}px,0)`;
+
+  const ghostCenter = st.slots[st.from].center + dx;
+  const ordered = st.slots.filter(slot => slot.index !== st.from);
+  let to = ordered.length;
+  for (let i = 0; i < ordered.length; i++) {
+    if (ghostCenter < ordered[i].center) {
+      to = i;
+      break;
+    }
+  }
+  to = Math.max(0, Math.min(ordered.length, to));
+  st.to = to;
+
+  st.slots.forEach(slot => {
+    if (slot.index === st.from) return;
+    let tx = 0;
+    if (st.from < to) {
+      if (slot.index > st.from && slot.index <= to) {
+        const target = st.slots[slot.index - 1];
+        tx = target ? target.left - slot.left : 0;
+      }
+    } else if (st.from > to) {
+      if (slot.index >= to && slot.index < st.from) {
+        const target = st.slots[slot.index + 1];
+        tx = target ? target.left - slot.left : 0;
+      }
+    }
+    slot.el.style.transform = tx ? `translateX(${tx}px)` : '';
+  });
+}
+
+function _onColumnPointerUp(e) {
+  const st = _columnDrag;
+  if (!st) return;
+  e.preventDefault();
+  if (st.raf) cancelAnimationFrame(st.raf);
+  _paintColumnDrag(st);
+
+  document.removeEventListener('pointermove', _onColumnPointerMove);
+  document.removeEventListener('pointerup', _onColumnPointerUp);
+  document.removeEventListener('pointercancel', _onColumnPointerUp);
+  try { st.source.releasePointerCapture(st.pointerId); } catch {}
+
+  st.items.forEach(el => { el.style.transform = ''; });
+  st.source.classList.remove('col-drag-origin');
+  st.hdr.classList.remove('col-sort-active');
+  document.body.classList.remove('col-sort-body');
+  if (st.ghost && st.ghost.parentNode) st.ghost.parentNode.removeChild(st.ghost);
+
+  const keys = _columnOrder.filter(k => k !== 'spacer');
+  const from = keys.indexOf(st.key);
+  const to = Math.max(0, Math.min(keys.length - 1, st.to));
+  if (from >= 0 && to >= 0 && from !== to) {
+    keys.splice(to, 0, keys.splice(from, 1)[0]);
+    _columnOrder = keys.concat(_columnOrder.includes('spacer') ? ['spacer'] : []);
+    _persistColumnOrder();
+    _applyGridTemplate();
+    renderHeader();
+    try { renderList(); } catch {}
+  }
+  _columnDrag = null;
+}
+
+function _attachColumnDnD() {
+  _attachFluidColumnDnD();
+}
+
+// V7.4 - Mouse-driven column resize.
 // One mousedown listener per `.col-resize-handle`. Captures the
 // cell's starting width, then on every mousemove projects (startW +
 // dx) into _columnWidths[key] and re-emits the grid template. The
@@ -4609,7 +4715,7 @@ function _attachColumnResize() {
         document.body.style.userSelect = '';
         cell.classList.remove('col-resizing');
         _persistColumnWidths();
-        // Tiny debounce before clearing the flag so a stray dragstart
+        // Tiny debounce before clearing the flag so a stray pointer
         // queued during the same gesture stays blocked.
         setTimeout(() => { _isResizing = false; }, 0);
       };
