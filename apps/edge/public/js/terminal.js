@@ -4802,6 +4802,7 @@ class LocalPaperBot {
     this.takeProfitPct = Number(opts.takeProfitPct) || 0.018;
     this.stopLossPct = Number(opts.stopLossPct) || 0.01;
     this.feePct = Number(opts.feePct) || 0.0004;
+    this.sleepGapMs = Number(opts.sleepGapMs) || 30 * 60 * 1000;
     this.priceHistory = new Map();
     this.lastPrices = new Map();
     this.state = this._loadState();
@@ -4811,6 +4812,12 @@ class LocalPaperBot {
     const now = Date.now();
     const markets = Array.isArray(marketsArray) ? marketsArray : [];
     const candidates = [];
+    const currentPrices = new Map();
+    for (let i = 0; i < markets.length; i++) {
+      const snap = this._normalizeMarket(markets[i]);
+      if (snap) currentPrices.set(snap.symbol, snap.price);
+    }
+    const slept = currentPrices.size ? this._handleSleepGap(now, currentPrices) : false;
 
     for (let i = 0; i < markets.length; i++) {
       const market = this._normalizeMarket(markets[i]);
@@ -4830,7 +4837,7 @@ class LocalPaperBot {
         continue;
       }
 
-      if (this.state.openPositions.length >= this.maxOpenPositions) continue;
+      if (slept || this.state.openPositions.length >= this.maxOpenPositions) continue;
       const signal = this._buildSignal(market, hist);
       if (signal) candidates.push(signal);
     }
@@ -4842,6 +4849,7 @@ class LocalPaperBot {
       }
     }
 
+    if (currentPrices.size) this.state.lastTickTime = now;
     const payload = this._payload(now);
     this._saveState();
     if (typeof renderPaperBot === 'function') renderPaperBot(payload);
@@ -4859,6 +4867,7 @@ class LocalPaperBot {
       recentTrades: [],
       startedAt: Date.now(),
       totalClosed: 0,
+      lastTickTime: Date.now(),
     };
 
     try {
@@ -4876,6 +4885,7 @@ class LocalPaperBot {
         recentTrades: Array.isArray(saved.recentTrades) ? saved.recentTrades.filter(Boolean).slice(-this.recentTradeLimit) : [],
         startedAt: this._finite(saved.startedAt, Date.now()),
         totalClosed: Math.max(0, this._finite(saved.totalClosed, (saved.wins | 0) + (saved.losses | 0)) | 0),
+        lastTickTime: this._finite(saved.lastTickTime, Date.now()),
       };
     } catch {
       return fresh;
@@ -4895,6 +4905,7 @@ class LocalPaperBot {
         recentTrades: this.state.recentTrades.slice(-this.recentTradeLimit),
         startedAt: this.state.startedAt,
         totalClosed: this.state.totalClosed,
+        lastTickTime: this.state.lastTickTime,
       }));
     } catch {}
   }
@@ -4910,11 +4921,21 @@ class LocalPaperBot {
       symbol,
       price,
       c24: this._finite(d.price_change_percentage_24h != null ? d.price_change_percentage_24h : d._c24, 0),
+      c1: this._finite(d._c1, 0),
+      c4: this._finite(d._c4, 0),
+      c12: this._finite(d._c12, 0),
+      c7d: this._finite(d._c7d, 0),
       volume: this._finite(d.total_volume != null ? d.total_volume : d.qv, 0),
+      baseVolume: this._finite(d.base_volume, 0),
+      trades24h: Math.max(0, this._finite(d.trades_24h, 0) | 0),
       high24: this._finite(d.high_24h, 0),
       low24: this._finite(d.low_24h, 0),
       score: this._finite(d._sig_score != null ? d._sig_score : d.score, 0),
-      momentum: this._finite(d._mom, 0),
+      panic: this._finite(d._panic, 0),
+      hotness: this._calcHotnessSafe(d),
+      momentum: this._readMomentumScore(d),
+      scannerSignal: this._readScannerSignal(d),
+      raw: d,
     };
   }
 
@@ -4939,34 +4960,292 @@ class LocalPaperBot {
   }
 
   _buildSignal(market, hist) {
-    const caution = this._clamp(this.state.cautionMultiplier || 1, 0.75, 5);
-    const minMomentumPct = 0.48 * caution;
-    const breakoutBuffer = 0.0012 * caution;
-    const recent = hist.length >= 4 ? hist[hist.length - 4].price : market.price;
-    const recentMove = recent > 0 ? (market.price - recent) / recent : 0;
-    let localHigh = market.price;
-    let localLow = market.price;
-    for (let i = 0; i < hist.length - 1; i++) {
-      const px = hist[i].price;
-      if (px > localHigh) localHigh = px;
-      if (px < localLow) localLow = px;
-    }
-    const dayRange = market.high24 > market.low24 ? market.high24 - market.low24 : 0;
-    const rangePos = dayRange > 0 ? (market.price - market.low24) / dayRange : 0.5;
-    const breakoutUp = market.price >= localHigh * (1 + breakoutBuffer) || rangePos >= 0.82;
-    const breakdownDown = market.price <= localLow * (1 - breakoutBuffer) || rangePos <= 0.18;
-    const volumeOk = !market.volume || market.volume >= 100000;
-    const qualityBoost = Math.max(0, market.score - 5) * 0.12 + Math.max(0, market.momentum) * 0.02;
-    const longStrength = (market.c24 - minMomentumPct) + (recentMove * 100) + qualityBoost;
-    const shortStrength = (-market.c24 - minMomentumPct) + (-recentMove * 100) + qualityBoost;
+    const guard = this._marketRiskGuard();
+    if (guard.block) return null;
 
-    if (volumeOk && breakoutUp && market.c24 >= minMomentumPct && recentMove >= -0.002) {
-      return { ...market, side: 'long', strength: longStrength, reason: 'momentum_breakout' };
+    const raw = market && market.raw && typeof market.raw === 'object' ? market.raw : {};
+    const scanner = market.scannerSignal || this._readScannerSignal(raw);
+    const label = String(scanner.label || raw.signal || raw._signal || '').trim().toUpperCase();
+    const pattern = String(scanner.pattern || raw.pattern || raw._pattern || '').trim().toUpperCase();
+    const score = this._clamp(this._finite(scanner.score != null ? scanner.score : market.score, 0), 0, 10);
+    const hotness = this._clamp(this._finite(market.hotness, 0), 0, 100);
+    const panic = this._clamp(this._finite(market.panic, 0), -100, 100);
+    const momentum = this._clamp(this._finite(market.momentum, 0), -100, 100);
+    const stack = this._readMomentumStack(raw);
+    const sentiment = this._readAiSentiment(raw);
+    const volEvent = this._readVolatilityEvent(market.symbol);
+    const divergence = this._readDivergenceSignal(market.symbol);
+    const sniper = this._readSniperSignal(market.symbol);
+    const flags = this._readScannerFlags(raw, scanner);
+    const liquid = market.volume <= 0 || market.volume >= 100000;
+
+    if (!liquid) return null;
+
+    let longStrength = 0;
+    let shortStrength = 0;
+    const longReasons = [];
+    const shortReasons = [];
+    const addLong = (weight, reason) => {
+      if (!Number.isFinite(weight) || weight <= 0) return;
+      longStrength += weight;
+      longReasons.push(reason);
+    };
+    const addShort = (weight, reason) => {
+      if (!Number.isFinite(weight) || weight <= 0) return;
+      shortStrength += weight;
+      shortReasons.push(reason);
+    };
+
+    if (/BUY|RECLAIM|FLUSH/.test(label)) addLong(12 + score * 2, label.toLowerCase());
+    if (/SHORT|SELL/.test(label)) addShort(12 + score * 2, label.toLowerCase());
+    if (pattern === 'RECLAIM' || pattern === 'FLUSH') addLong(8 + score, pattern.toLowerCase());
+    if (flags.breakout) addLong(10 + Math.max(0, hotness - 55) * 0.25, 'scanner_breakout');
+    if (flags.breakdown) addShort(10 + Math.max(0, hotness - 55) * 0.25, 'scanner_breakdown');
+    if (flags.flush || panic <= -80) addLong(8 + Math.abs(Math.min(0, panic)) * 0.08, 'capitulation_reversal');
+    if (panic >= 80) addShort(8 + panic * 0.08, 'fomo_exhaustion');
+    if (momentum >= 35 && stack >= 0.6) addLong(8 + momentum * 0.12, 'multi_tf_bull');
+    if (momentum <= -35 && stack >= 0.6) addShort(8 + Math.abs(momentum) * 0.12, 'multi_tf_bear');
+    if (hotness >= 70 && market.c24 > 0) addLong(6 + (hotness - 70) * 0.18, 'hot_volume_bid');
+    if (hotness >= 70 && market.c24 < 0) addShort(6 + (hotness - 70) * 0.18, 'hot_volume_ask');
+
+    if (volEvent) {
+      const volWeight = 9 + Math.min(12, Math.abs(this._finite(volEvent.c1, 0)) + this._finite(volEvent.volRatio, 0));
+      if (this._finite(volEvent.c1, 0) >= 0) addLong(volWeight, 'volume_surge_up');
+      else addShort(volWeight, 'volume_surge_down');
     }
-    if (volumeOk && breakdownDown && market.c24 <= -minMomentumPct && recentMove <= 0.002) {
-      return { ...market, side: 'short', strength: shortStrength, reason: 'momentum_breakdown' };
+
+    if (sniper && this._finite(sniper.confidence, 0) >= 0.55) {
+      addLong(10 + this._finite(sniper.confidence, 0) * 12, 'sniper_bid_wall');
+    }
+
+    if (divergence && this._finite(divergence.confidence, 0) >= 0.5) {
+      const divWeight = 10 + this._finite(divergence.confidence, 0) * 12;
+      if (String(divergence.bias || '').toLowerCase() === 'bullish') addLong(divWeight, 'smart_money_bull');
+      if (String(divergence.bias || '').toLowerCase() === 'bearish') addShort(divWeight, 'smart_money_bear');
+    }
+
+    if (sentiment.score >= 0.65 || sentiment.label === 'bullish') {
+      addLong(8 + Math.abs(sentiment.score) * 10, 'ai_sentiment_bull');
+    }
+    if (sentiment.score <= -0.65 || sentiment.label === 'bearish') {
+      addShort(8 + Math.abs(sentiment.score) * 10, 'ai_sentiment_bear');
+    }
+
+    const minStrength = 18 * guard.caution;
+    const edge = 4 * guard.caution;
+    if (longStrength >= minStrength && longStrength >= shortStrength + edge) {
+      return { ...market, side: 'long', strength: longStrength, reason: this._reason(longReasons, 'scanner_long') };
+    }
+    if (shortStrength >= minStrength && shortStrength >= longStrength + edge) {
+      return { ...market, side: 'short', strength: shortStrength, reason: this._reason(shortReasons, 'scanner_short') };
     }
     return null;
+  }
+
+  _handleSleepGap(now, currentPrices) {
+    const last = Number(this.state.lastTickTime);
+    if (!Number.isFinite(last) || last <= 0) {
+      this.state.lastTickTime = now;
+      return false;
+    }
+    const gap = now - last;
+    if (gap <= this.sleepGapMs) return false;
+
+    const open = Array.isArray(this.state.openPositions) ? this.state.openPositions.slice() : [];
+    let closed = 0;
+    for (const pos of open) {
+      if (!pos || !pos.symbol) continue;
+      const px = currentPrices.get(pos.symbol)
+        || this.lastPrices.get(pos.symbol)
+        || Number(pos.currentPrice)
+        || Number(pos.entryPrice);
+      if (!Number.isFinite(px) || px <= 0) continue;
+      this._closePosition(pos, px, 'system_sleep', now);
+      closed += 1;
+    }
+    this.state.lastTickTime = now;
+    if (closed) {
+      try { LiveFeed?.push(`PaperBot sleep gap ${(gap / 60000).toFixed(0)}m - closed ${closed} open position(s)`, 'alert'); } catch {}
+      try { window.Toast?.warn('PaperBot sleep detector', `Closed ${closed} position(s) after ${(gap / 60000).toFixed(0)}m without ticks.`); } catch {}
+      console.warn('[PAPERBOT] sleep gap detected; forced close', { gapMs: gap, closed });
+    }
+    return true;
+  }
+
+  _marketRiskGuard() {
+    let reg = null;
+    try {
+      reg = (typeof REGIME !== 'undefined' && REGIME) || window.currentRegime || window.REGIME || null;
+    } catch { reg = null; }
+    const bucket = String(reg && reg.bucket || '').toLowerCase();
+    const label = String(reg && reg.label || reg && reg.level || '').toLowerCase();
+    const level = String(reg && reg.level || '').toLowerCase();
+    const score = this._finite(reg && reg.score, 0);
+    const hasRegime = !!(reg && (
+      reg.computed_at || reg.inputs || reg.components || Math.abs(score) > 0
+      || (Array.isArray(reg.reasons) && reg.reasons.length)
+    ));
+    const panicScore = this._finite(
+      reg && (reg.panicScore != null ? reg.panicScore : (reg.panic != null ? reg.panic : reg.marketPanic)),
+      score,
+    );
+    let volCount = 0;
+    try { volCount = Array.isArray(window.__lastVolatility) ? window.__lastVolatility.length : 0; } catch {}
+
+    const isChop = hasRegime && (bucket === 'chop' || /chop|sideways|mixed/.test(label));
+    const highPanic = (hasRegime && (level === 'shock' || Math.abs(panicScore) >= 70)) || volCount >= 5;
+    const elevated = (hasRegime && (level === 'elevated' || Math.abs(panicScore) >= 45)) || volCount > 0;
+
+    if (isChop || highPanic) {
+      const floor = highPanic ? 2.25 : 1.75;
+      this.state.cautionMultiplier = this._clamp(Math.max(this.state.cautionMultiplier || 1, floor), 0.75, 5);
+      return { block: true, caution: this.state.cautionMultiplier, reason: highPanic ? 'global_panic' : 'regime_chop' };
+    }
+    if (elevated) {
+      this.state.cautionMultiplier = this._clamp(Math.max(this.state.cautionMultiplier || 1, 1.35), 0.75, 5);
+    }
+    return { block: false, caution: this._clamp(this.state.cautionMultiplier || 1, 0.75, 5), reason: 'ok' };
+  }
+
+  _readScannerSignal(raw) {
+    try {
+      if (raw && raw._sig && typeof raw._sig === 'object') return raw._sig;
+      if (typeof _sigOf === 'function') return _sigOf(raw);
+      if (typeof sig === 'function') return sig(raw);
+    } catch {}
+    return {
+      label: raw && (raw.signal || raw._signal) || 'NEUT',
+      score: this._finite(raw && (raw._sig_score != null ? raw._sig_score : raw.score), 0),
+      reasons: [],
+      pattern: raw && (raw.pattern || raw._pattern) || null,
+      whyTags: [],
+    };
+  }
+
+  _calcHotnessSafe(raw) {
+    try {
+      if (raw && raw._hotness != null) return this._finite(raw._hotness, 0);
+      if (typeof calcHotness === 'function') return this._finite(calcHotness(raw), 0);
+    } catch {}
+    return 0;
+  }
+
+  _readMomentumScore(raw) {
+    try {
+      const m = raw && raw._mom;
+      if (m && typeof m === 'object') return this._finite(m.score, 0);
+      if (m != null) return this._finite(m, 0);
+      if (typeof computeMomentumScore === 'function') {
+        const computed = computeMomentumScore(raw);
+        return this._finite(computed && computed.score, 0);
+      }
+    } catch {}
+    return 0;
+  }
+
+  _readMomentumStack(raw) {
+    try {
+      const m = raw && raw._mom;
+      if (m && typeof m === 'object') return this._clamp(this._finite(m.stack, 0), 0, 1);
+      if (typeof computeMomentumScore === 'function') {
+        const computed = computeMomentumScore(raw);
+        return this._clamp(this._finite(computed && computed.stack, 0), 0, 1);
+      }
+    } catch {}
+    return 0;
+  }
+
+  _readAiSentiment(raw) {
+    const out = { label: 'neutral', score: 0 };
+    try {
+      const candidates = [
+        raw && raw.ai_sentiment,
+        raw && raw.aiSentiment,
+        raw && raw._sentiment,
+        raw && raw.sentiment,
+        raw && raw.news_sentiment,
+      ];
+      for (const c of candidates) {
+        if (!c) continue;
+        if (typeof c === 'object') {
+          const nested = this._readAiSentiment(c);
+          if (nested.label !== 'neutral' || nested.score) return nested;
+        }
+        const s = String(c).toLowerCase();
+        if (/bull|positive|buy|long/.test(s)) return { label: 'bullish', score: 0.8 };
+        if (/bear|negative|sell|short/.test(s)) return { label: 'bearish', score: -0.8 };
+      }
+      const keys = ['ai_score', 'aiScore', '_aiScore', 'sentiment_score', 'sentimentScore', 'ai_sentiment_score'];
+      for (const k of keys) {
+        if (!raw || raw[k] == null) continue;
+        let n = this._finite(raw[k], 0);
+        if (Math.abs(n) > 10) n /= 100;
+        else if (Math.abs(n) > 1) n /= 10;
+        n = this._clamp(n, -1, 1);
+        return { label: n > 0.25 ? 'bullish' : (n < -0.25 ? 'bearish' : 'neutral'), score: n };
+      }
+    } catch {}
+    return out;
+  }
+
+  _readVolatilityEvent(symbol) {
+    try {
+      if (!Array.isArray(window.__lastVolatility)) return null;
+      const key = String(symbol || '').toUpperCase();
+      return window.__lastVolatility.find(v => String(v && v.symbol || '').toUpperCase() === key) || null;
+    } catch { return null; }
+  }
+
+  _readDivergenceSignal(symbol) {
+    try {
+      if (typeof DIVERGENCE_MAP === 'undefined' || !DIVERGENCE_MAP) return null;
+      return DIVERGENCE_MAP.get(String(symbol || '').toUpperCase()) || null;
+    } catch { return null; }
+  }
+
+  _readSniperSignal(symbol) {
+    try {
+      if (typeof SNIPER_MAP === 'undefined' || !SNIPER_MAP) return null;
+      return SNIPER_MAP.get(String(symbol || '').toUpperCase()) || null;
+    } catch { return null; }
+  }
+
+  _readScannerFlags(raw, scanner) {
+    const haystack = [
+      scanner && scanner.label,
+      scanner && scanner.pattern,
+      ...(Array.isArray(scanner && scanner.reasons) ? scanner.reasons : []),
+      ...(Array.isArray(scanner && scanner.whyTags) ? scanner.whyTags.map(t => t && (t.tag || t.label || t)) : []),
+      raw && raw.signal,
+      raw && raw._signal,
+      raw && raw.pattern,
+      raw && raw._pattern,
+    ].filter(Boolean).join(' ').toLowerCase();
+    return {
+      breakout: this._truthyFlag(raw && (raw.breakout || raw._breakout || raw.breakoutUp || raw.is_breakout)) || /breakout/.test(haystack),
+      breakdown: this._truthyFlag(raw && (raw.breakdown || raw._breakdown || raw.breakoutDown || raw.is_breakdown)) || /breakdown|short|sell/.test(haystack),
+      flush: this._truthyFlag(raw && (raw.flush || raw._flush || raw.capitulation)) || /flush|capitulation/.test(haystack),
+    };
+  }
+
+  _truthyFlag(value) {
+    if (value === true) return true;
+    if (typeof value === 'number') return Number.isFinite(value) && value > 0;
+    if (typeof value === 'string') return /^(1|true|yes|y|on|breakout|breakdown)$/i.test(value.trim());
+    return false;
+  }
+
+  _reason(reasons, fallback) {
+    const seen = new Set();
+    const clean = [];
+    for (const r of reasons) {
+      const s = String(r || '').trim().replace(/[^a-z0-9_+-]/gi, '_').slice(0, 32);
+      if (!s || seen.has(s)) continue;
+      seen.add(s);
+      clean.push(s);
+      if (clean.length >= 3) break;
+    }
+    return clean.length ? clean.join('+') : fallback;
   }
 
   _openPosition(signal, now) {
