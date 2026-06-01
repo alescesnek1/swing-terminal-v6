@@ -109,6 +109,11 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   background:transparent;
   border:none;
   cursor:default;
+  flex-grow:1;
+  min-width:100px;
+  pointer-events:auto;
+  transition:transform 0.2s cubic-bezier(0.2, 0, 0, 1);
+  will-change:transform;
 }
 .thdr > .thdr-spacer:hover{
   background:transparent;
@@ -154,6 +159,9 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .col-sort-active > [data-sortable="true"]{
   transition:transform 0.2s cubic-bezier(0.2, 0, 0, 1),background .15s,border-color .15s;
 }
+.col-sort-active > [data-col="spacer"]{
+  transition:transform 0.2s cubic-bezier(0.2, 0, 0, 1);
+}
 .col-sort-body{cursor:grabbing;user-select:none}
 .col-drag-ghost{
   position:fixed;
@@ -183,6 +191,7 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .trow:hover{background:rgba(255,255,255,.03)}
 .trow.sel{background:rgba(255,255,255,.05);border-left:2px solid var(--acc);padding-left:8px}
 .trow>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:6px}
+.thdr > [data-col="spacer"],.trow > [data-col="spacer"]{flex-grow:1;min-width:100px;pointer-events:auto}
 .trow.alert-high{background:rgba(255,51,86,.03)}.trow.alert-med{background:rgba(255,176,32,.02)}
 .rn{color:var(--txt3);font-size:9px}
 .coin-cell{display:flex;flex-direction:column;align-items:flex-start;gap:0;min-width:0;overflow:hidden}

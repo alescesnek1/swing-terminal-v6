@@ -4362,15 +4362,6 @@ let _columnOrder = (() => {
     // rather than silently disappearing.
     const seen = new Set(cleaned);
     for (const k of DEFAULT_COLUMN_ORDER) if (!seen.has(k)) cleaned.push(k);
-    // V7.4.9 — defensive spacer-tail pin. A stale V7.4.6 save could
-    // have a column sitting after the spacer; this guarantees the
-    // void always closes the row regardless of how the order was
-    // serialised in a previous sprint.
-    const spIdx = cleaned.indexOf('spacer');
-    if (spIdx >= 0 && spIdx !== cleaned.length - 1) {
-      cleaned.splice(spIdx, 1);
-      cleaned.push('spacer');
-    }
     return cleaned.length ? cleaned : DEFAULT_COLUMN_ORDER.slice();
   } catch { return DEFAULT_COLUMN_ORDER.slice(); }
 })();
@@ -4418,7 +4409,7 @@ function _widthExpr(key) {
   // column. (The old COIN-flex path used `minmax(MIN_COIN_PX, 1fr)`
   // — that's kept as a defensive fallback for any FUTURE flex
   // column that needs a floor.)
-  if (key === 'spacer') return '1fr';
+  if (key === 'spacer') return 'minmax(100px, 1fr)';
   const w = _columnWidths[key];
   if (w === 'flex') return `minmax(${MIN_COIN_PX}px, 1fr)`;
   const def = COLUMN_DEFS[key] || {};
@@ -4518,8 +4509,8 @@ function _onColumnPointerDown(e) {
 
   const hdr = source.closest('.thdr');
   if (!hdr) return;
-  const items = Array.from(hdr.querySelectorAll('[data-sortable="true"]'))
-    .filter(el => el.dataset.col && el.dataset.col !== 'spacer' && COLUMN_DEFS[el.dataset.col]);
+  const items = Array.from(hdr.querySelectorAll('[data-col]'))
+    .filter(el => el.dataset.col && COLUMN_DEFS[el.dataset.col]);
   const from = items.indexOf(source);
   if (from < 0) return;
 
@@ -4643,12 +4634,12 @@ function _onColumnPointerUp(e) {
   document.body.classList.remove('col-sort-body');
   if (st.ghost && st.ghost.parentNode) st.ghost.parentNode.removeChild(st.ghost);
 
-  const keys = _columnOrder.filter(k => k !== 'spacer');
+  const keys = _columnOrder.slice();
   const from = keys.indexOf(st.key);
   const to = Math.max(0, Math.min(keys.length - 1, st.to));
   if (from >= 0 && to >= 0 && from !== to) {
     keys.splice(to, 0, keys.splice(from, 1)[0]);
-    _columnOrder = keys.concat(_columnOrder.includes('spacer') ? ['spacer'] : []);
+    _columnOrder = keys;
     _persistColumnOrder();
     _applyGridTemplate();
     renderHeader();
