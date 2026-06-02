@@ -1450,7 +1450,7 @@ function renderList() {
   currentPage = clamp(currentPage, 0, Math.max(0, totalPages - 1));
   const start = currentPage * PAGE_SIZE;
   const page = filtered.slice(start, start + PAGE_SIZE);
-  const emptyData = '<div class="empty-data">NO DATA</div>';
+  const emptyData = '<span style="color:var(--txt3);opacity:0.4;">-</span>';
 
   if (filtered.length === 0) {
     document.getElementById('clist').innerHTML = `<div style="padding:30px;text-align:center;color:var(--txt3)">Zadne vysledky.</div>`;
@@ -4590,7 +4590,14 @@ function _paintColumnDrag(st) {
   const ordered = st.slots.filter(slot => slot.index !== st.from);
   let to = ordered.length;
   for (let i = 0; i < ordered.length; i++) {
-    if (ghostCenter < ordered[i].center) {
+    // ABACUS PHYSICS: the spacer is a wide flex void whose center sits far to
+    // the right. Comparing against its center makes "drop past the spacer"
+    // practically unreachable, so for the spacer we use its LEFT edge as the
+    // boundary. Any ghost whose center crosses the spacer's start is treated
+    // as landing AFTER the spacer (to === ordered.length), which the drop
+    // handler then appends after the 'spacer' key in _columnOrder.
+    const boundary = ordered[i].key === 'spacer' ? ordered[i].left : ordered[i].center;
+    if (ghostCenter < boundary) {
       to = i;
       break;
     }
@@ -4636,9 +4643,14 @@ function _onColumnPointerUp(e) {
 
   const keys = _columnOrder.slice();
   const from = keys.indexOf(st.key);
+  // st.to is an index in the post-removal slot space (slots minus the dragged
+  // column), so valid insertion points run 0..(keys.length-1) inclusive — the
+  // upper bound is an append at the very tail, i.e. AFTER the spacer. The
+  // spacer-aware boundary in _paintColumnDrag is what lets st.to reach it.
   const to = Math.max(0, Math.min(keys.length - 1, st.to));
-  if (from >= 0 && to >= 0 && from !== to) {
-    keys.splice(to, 0, keys.splice(from, 1)[0]);
+  if (from >= 0 && from !== to) {
+    const moved = keys.splice(from, 1)[0];
+    keys.splice(to, 0, moved);
     _columnOrder = keys;
     _persistColumnOrder();
     _applyGridTemplate();
@@ -4896,8 +4908,13 @@ class LocalPaperBot {
     this.recentTradeLimit = Number(opts.recentTradeLimit) || 50;
     this.historyLimit = Number(opts.historyLimit) || 36;
     this.riskFraction = Number(opts.riskFraction) || 0.075;
-    this.takeProfitPct = Number(opts.takeProfitPct) || 0.018;
-    this.stopLossPct = Number(opts.stopLossPct) || 0.01;
+    // ── STRICT RISK BOUNDS (client mandate, non-overridable) ──
+    //   • Hard 3% stop-loss on every position.
+    //   • Dynamic take-profit band, 10%–20%, resolved per-trade in _openPosition.
+    this.stopLossPct = 0.03;
+    this.takeProfitPctMin = 0.10;
+    this.takeProfitPctMax = 0.20;
+    this.takeProfitPct = (this.takeProfitPctMin + this.takeProfitPctMax) / 2; // 0.15 fallback
     this.feePct = Number(opts.feePct) || 0.0004;
     this.sleepGapMs = Number(opts.sleepGapMs) || 30 * 60 * 1000;
     this.priceHistory = new Map();
@@ -5078,6 +5095,12 @@ class LocalPaperBot {
 
     if (!liquid) return null;
 
+    // ── LIQUIDATION HUNTER: detect a flush-and-confirm wick before anything
+    // else. This is a HARD GATE — the bot only ever fires on a confirmed
+    // liquidation flush, and only in the direction the flush reverses. ──
+    const flush = this._detectFlush(hist, market, volEvent);
+    if (!flush) return null;
+
     let longStrength = 0;
     let shortStrength = 0;
     const longReasons = [];
@@ -5092,6 +5115,10 @@ class LocalPaperBot {
       shortStrength += weight;
       shortReasons.push(reason);
     };
+
+    // Liquidation flush is the dominant, primary edge for this bot.
+    if (flush.side === 'long') addLong(flush.weight, 'liquidation_flush_long');
+    else addShort(flush.weight, 'liquidation_flush_short');
 
     if (/BUY|RECLAIM|FLUSH/.test(label)) addLong(12 + score * 2, label.toLowerCase());
     if (/SHORT|SELL/.test(label)) addShort(12 + score * 2, label.toLowerCase());
@@ -5130,11 +5157,60 @@ class LocalPaperBot {
 
     const minStrength = 18 * guard.caution;
     const edge = 4 * guard.caution;
-    if (longStrength >= minStrength && longStrength >= shortStrength + edge) {
-      return { ...market, side: 'long', strength: longStrength, reason: this._reason(longReasons, 'scanner_long') };
+    // Direction is locked to the confirmed flush — we only take the side the
+    // liquidation wick reversed into, and only if the stacked edge confirms.
+    if (flush.side === 'long' && longStrength >= minStrength && longStrength >= shortStrength + edge) {
+      return { ...market, side: 'long', strength: longStrength, reason: this._reason(longReasons, 'liquidation_flush_long') };
     }
-    if (shortStrength >= minStrength && shortStrength >= longStrength + edge) {
-      return { ...market, side: 'short', strength: shortStrength, reason: this._reason(shortReasons, 'scanner_short') };
+    if (flush.side === 'short' && shortStrength >= minStrength && shortStrength >= longStrength + edge) {
+      return { ...market, side: 'short', strength: shortStrength, reason: this._reason(shortReasons, 'liquidation_flush_short') };
+    }
+    return null;
+  }
+
+  // ── LIQUIDATION HUNTER ──────────────────────────────────────────────
+  // Detect a "flush and confirm" liquidation wick from recent price history.
+  //   • FLUSH  : the most recent completed leg (base -> wick) is a sharp move,
+  //              large both in absolute terms AND relative to the symbol's own
+  //              recent step volatility (so quiet drifts never qualify).
+  //   • CONFIRM: the live tick (wick -> last) stabilizes or reverses back
+  //              toward the pre-flush base without fully retracing it.
+  // A down-flush that bounces => LONG; an up-flush that rejects => SHORT.
+  // Volume, when present, only sharpens conviction (it never gates).
+  _detectFlush(hist, market, volEvent) {
+    if (!Array.isArray(hist) || hist.length < 3) return null;
+    const n = hist.length;
+    const last = this._finite(hist[n - 1].price, 0); // confirmation tick (live)
+    const wick = this._finite(hist[n - 2].price, 0); // flush extreme
+    const base = this._finite(hist[n - 3].price, 0); // pre-flush reference
+    if (!(last > 0 && wick > 0 && base > 0)) return null;
+
+    const flushPct = (wick - base) / base;   // signed magnitude of the flush leg
+    const confirmPct = (last - wick) / wick;  // signed reaction on the next tick
+
+    // Recent step volatility (excludes the flush+confirm legs) so "sharp"
+    // is measured against THIS symbol's normal cadence, not a fixed number.
+    let maxStep = 0;
+    for (let i = Math.max(1, n - 8); i < n - 2; i++) {
+      const a = this._finite(hist[i - 1].price, 0);
+      const b = this._finite(hist[i].price, 0);
+      if (a > 0) maxStep = Math.max(maxStep, Math.abs(b - a) / a);
+    }
+    const FLUSH_MIN = 0.012; // 1.2% floor for a move to count as a flush wick
+    const flushMag = Math.abs(flushPct);
+    if (flushMag < Math.max(FLUSH_MIN, maxStep * 1.8)) return null;
+
+    // Volume coupling: a concurrent volume-surge event lifts conviction.
+    const volBoost = volEvent ? Math.min(10, 4 + Math.abs(this._finite(volEvent.volRatio, 0))) : 0;
+    const baseWeight = 14 + flushMag * 120 + volBoost;
+
+    // DOWN-flush -> bounce/stabilize (not yet fully recovered) => LONG.
+    if (flushPct <= -FLUSH_MIN && confirmPct >= 0 && last < base) {
+      return { side: 'long', magnitude: flushMag, weight: baseWeight + confirmPct * 60 };
+    }
+    // UP-flush -> reject/stabilize (still above base) => SHORT.
+    if (flushPct >= FLUSH_MIN && confirmPct <= 0 && last > base) {
+      return { side: 'short', magnitude: flushMag, weight: baseWeight + Math.abs(confirmPct) * 60 };
     }
     return null;
   }
@@ -5348,8 +5424,19 @@ class LocalPaperBot {
   _openPosition(signal, now) {
     const sideMul = signal.side === 'short' ? -1 : 1;
     const notional = Math.max(25, this.state.balance * this.riskFraction / Math.max(1, this.state.cautionMultiplier));
-    const tp = signal.price * (1 + sideMul * this.takeProfitPct);
-    const sl = signal.price * (1 - sideMul * this.stopLossPct);
+    // ── STRICT RISK BOUNDS: 3% hard SL, dynamic 10%-20% TP ──
+    // TP scales within the band: half random, half driven by realized
+    // volatility (|24h change|), then hard-clamped so it can never escape
+    // [10%, 20%]. SL is the fixed client cap.
+    const slPct = this.stopLossPct;
+    const volScale = this._clamp(Math.abs(this._finite(signal.c24, 0)) / 20, 0, 1);
+    const tpPct = this._clamp(
+      this.takeProfitPctMin + (this.takeProfitPctMax - this.takeProfitPctMin) * (0.5 * Math.random() + 0.5 * volScale),
+      this.takeProfitPctMin,
+      this.takeProfitPctMax,
+    );
+    const tp = signal.price * (1 + sideMul * tpPct);
+    const sl = signal.price * (1 - sideMul * slPct);
     this.state.openPositions.push({
       id: signal.id,
       symbol: signal.symbol,
@@ -5360,6 +5447,8 @@ class LocalPaperBot {
       qty: notional / signal.price,
       tpPrice: tp,
       slPrice: sl,
+      tpPct,
+      slPct,
       openedAt: now,
       reason: signal.reason,
       entryMomentum: signal.c24,
