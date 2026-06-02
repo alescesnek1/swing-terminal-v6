@@ -4323,17 +4323,16 @@ const COLUMN_DEFS = {
   qv:     { label: '24H VOL', width: 90,     tip: '24h Quote Volume (USD)',                                                 align: 'right', dragOK: true  },
   hot:    { label: 'HOT',     width: 50,     tip: '',                                                                       align: 'right', dragOK: true,
             tooltip: 'Real-time attention and volatility tracking index based on immediate trading frequency spikes.' },
-  // V7.4.9 — TERMINAL BLACK HOLE (spacer).
-  // The V7.4.7 g1/g2/g3 ghosts were removed — three drop-target
-  // grid cells in the middle of the row made drop targeting
-  // unpredictable (users tried to drop INTO the void, which CSS
-  // grid can't satisfy). Replaced by a single static spacer at the
-  // tail that absorbs all remaining horizontal slack.
-  //   • Not draggable (dragOK:false) — can't be moved.
-  //   • Not a drop target — _attachColumnDnD skips it explicitly.
+  // ABACUS BEAD (spacer). A single 1fr grid track that absorbs all remaining
+  // horizontal slack. It is a FLUID bead on the wire — it may sit at ANY index
+  // in _columnOrder, splitting the row into a left group and a right group with
+  // a static void between them.
+  //   • Not draggable (dragOK:false) — the void itself can't be grabbed…
+  //   • …but it IS a drop neighbour: columns drop to its LEFT or RIGHT based on
+  //     the pointer vs. its center, so its position is fully fluid.
   //   • Not resizable — renderHeader emits no .col-resize-handle.
-  //   • Pinned to tail — drop handler re-asserts spacer at the end
-  //     after every reorder so it can never be displaced.
+  //   • Exactly one instance is enforced at load (state normalization) and on
+  //     every reorder; its index is preserved, never re-pinned to the tail.
   spacer: { label: '',        width: 'flex', tip: '',                                                                       align: 'left',  dragOK: false },
 };
 // Default visual sequence. The mobile-only expand toggle is appended
@@ -4347,11 +4346,20 @@ const MIN_COL_PX = 36;     // hard floor — narrower than this and the label ge
 const MIN_COIN_PX = 90;    // flex absorber needs a useful minimum.
 
 let _columnOrder = (() => {
-  // STATE NORMALIZATION: strip every spacer instance and force exactly one
-  // back at the absolute tail. Self-heals any legacy/corrupted localStorage
-  // state (e.g. a spacer stranded mid-array or a column persisted past it)
-  // the instant it's loaded, before anything else can read _columnOrder.
-  const normalize = (arr) => arr.filter(k => k !== 'spacer').concat(['spacer']);
+  // STATE NORMALIZATION: guarantee EXACTLY ONE spacer while PRESERVING its
+  // position. The spacer is now a fluid bead on the wire (abacus layout) and
+  // may legitimately sit at any index, so we no longer force it to the tail —
+  // we only drop duplicate spacers, and append one solely if none exists.
+  const normalize = (arr) => {
+    const out = [];
+    let seen = false;
+    for (const k of arr) {
+      if (k === 'spacer') { if (seen) continue; seen = true; }
+      out.push(k);
+    }
+    if (!seen) out.push('spacer');
+    return out;
+  };
   try {
     const raw = localStorage.getItem(COLUMN_ORDER_STORAGE_KEY);
     if (!raw) return normalize(DEFAULT_COLUMN_ORDER.slice());
@@ -4591,15 +4599,17 @@ function _paintColumnDrag(st) {
   const dy = st.lastY - st.startY;
   st.ghost.style.transform = `translate3d(${dx}px,${dy}px,0)`;
 
-  // COLLISION MATH: strict left-to-right intersection. Walk the data columns
-  // (spacer excluded) in DOM order and compare the LIVE pointer X against each
-  // sibling's bounding-box center. The dragged column inserts before the first
-  // sibling whose center the pointer hasn't reached. Past every data column,
-  // `to` is the data-column count → insert at the tail, before the spacer.
-  const dataSlots = st.slots.filter(slot => slot.key !== 'spacer');
-  let to = dataSlots.length;
-  for (let i = 0; i < dataSlots.length; i++) {
-    const slot = dataSlots[i];
+  // ABACUS COLLISION: the spacer is now a first-class bead on the wire, so it
+  // participates in the hit-test exactly like a data column. Walk EVERY slot in
+  // DOM order and compare the LIVE pointer X against each slot's center; the
+  // dragged column inserts before the first slot whose center the pointer
+  // hasn't reached. Because the spacer is a wide track, its center is the
+  // divider of the void — dropping left of it lands the column on the left
+  // group, right of it on the right group. Past everything → insert at the end.
+  let to = st.slots.length;
+  for (let i = 0; i < st.slots.length; i++) {
+    const slot = st.slots[i];
+    if (slot.index === st.from) continue;
     if (st.lastX < slot.left + slot.width / 2) { to = slot.index; break; }
   }
   st.to = to;
@@ -4635,26 +4645,27 @@ function _onColumnPointerUp(e) {
   document.body.classList.remove('col-sort-body');
   if (st.ghost && st.ghost.parentNode) st.ghost.parentNode.removeChild(st.ghost);
 
-  // STRICT SPACER LOCK: the spacer is a flex void (grid 1fr) that MUST be the
-  // final element. Any column placed after it is flung to the window's right
-  // edge. So we sort only the real columns, then unconditionally re-append the
-  // spacer to the absolute tail — no column can ever live past it.
-  // DOM RECONCILIATION: sort only the real (spacer-free) columns; the spacer is
-  // re-appended last so no column can ever live past it. `st.to` is an
-  // insertion index in the spacer-free space (0..count). Remove the dragged
-  // key first, then — because removal shifts everything after `from` left by
-  // one — decrement `to` when it sits past the origin. The resulting
-  // `splice(to, 0, moved)` lands exactly on the previewed drop slot.
-  const keys = _columnOrder.filter(k => k !== 'spacer');
+  // ABACUS SPLICE: the spacer is a positional bead — it stays wherever it sits
+  // in _columnOrder, so we reorder the FULL array (spacer included) and never
+  // re-pin it to the tail. `st.to` is an insertion index in the ORIGINAL full
+  // index space (0..length, where `length` means "after the last slot").
+  // Order of operations is critical:
+  //   1. Clamp `to` against the ORIGINAL length — so a drop can reach the very
+  //      end, not stall one slot short of it.
+  //   2. Remove the dragged key. This shifts everything after `from` left by 1.
+  //   3. Decrement `to` when it sat past the origin, then re-clamp. The splice
+  //      lands exactly on the previewed slot — which may be to the LEFT or the
+  //      RIGHT of the spacer, leaving a fluid void in the middle.
+  const keys = _columnOrder.slice();
   const from = keys.indexOf(st.key);
   if (from >= 0) {
-    const moved = keys.splice(from, 1)[0];
     let to = Math.max(0, Math.min(keys.length, st.to));
+    const moved = keys.splice(from, 1)[0];
     if (to > from) to -= 1;
+    to = Math.max(0, Math.min(keys.length, to));
     keys.splice(to, 0, moved);
-    const next = keys.concat(['spacer']);
-    if (next.join('|') !== _columnOrder.join('|')) {
-      _columnOrder = next;
+    if (keys.join('|') !== _columnOrder.join('|')) {
+      _columnOrder = keys;
       _persistColumnOrder();
       _applyGridTemplate();
       renderHeader();
