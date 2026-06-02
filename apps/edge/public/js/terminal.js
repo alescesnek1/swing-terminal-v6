@@ -4347,11 +4347,16 @@ const MIN_COL_PX = 36;     // hard floor — narrower than this and the label ge
 const MIN_COIN_PX = 90;    // flex absorber needs a useful minimum.
 
 let _columnOrder = (() => {
+  // STATE NORMALIZATION: strip every spacer instance and force exactly one
+  // back at the absolute tail. Self-heals any legacy/corrupted localStorage
+  // state (e.g. a spacer stranded mid-array or a column persisted past it)
+  // the instant it's loaded, before anything else can read _columnOrder.
+  const normalize = (arr) => arr.filter(k => k !== 'spacer').concat(['spacer']);
   try {
     const raw = localStorage.getItem(COLUMN_ORDER_STORAGE_KEY);
-    if (!raw) return DEFAULT_COLUMN_ORDER.slice();
+    if (!raw) return normalize(DEFAULT_COLUMN_ORDER.slice());
     const arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) return DEFAULT_COLUMN_ORDER.slice();
+    if (!Array.isArray(arr)) return normalize(DEFAULT_COLUMN_ORDER.slice());
     // Drop anything that doesn't map to a current COLUMN_DEFS entry —
     // protects against a column being removed in a future sprint
     // (e.g. V7.4.7's g1/g2/g3 ghosts, removed in V7.4.9) while the
@@ -4362,8 +4367,8 @@ let _columnOrder = (() => {
     // rather than silently disappearing.
     const seen = new Set(cleaned);
     for (const k of DEFAULT_COLUMN_ORDER) if (!seen.has(k)) cleaned.push(k);
-    return cleaned.length ? cleaned : DEFAULT_COLUMN_ORDER.slice();
-  } catch { return DEFAULT_COLUMN_ORDER.slice(); }
+    return normalize(cleaned.length ? cleaned : DEFAULT_COLUMN_ORDER.slice());
+  } catch { return normalize(DEFAULT_COLUMN_ORDER.slice()); }
 })();
 
 let _columnWidths = (() => {
@@ -4586,39 +4591,28 @@ function _paintColumnDrag(st) {
   const dy = st.lastY - st.startY;
   st.ghost.style.transform = `translate3d(${dx}px,${dy}px,0)`;
 
-  const ghostCenter = st.slots[st.from].center + dx;
-  const ordered = st.slots.filter(slot => slot.index !== st.from);
-  let to = ordered.length;
-  for (let i = 0; i < ordered.length; i++) {
-    // ABACUS PHYSICS: the spacer is a wide flex void whose center sits far to
-    // the right. Comparing against its center makes "drop past the spacer"
-    // practically unreachable, so for the spacer we use its LEFT edge as the
-    // boundary. Any ghost whose center crosses the spacer's start is treated
-    // as landing AFTER the spacer (to === ordered.length), which the drop
-    // handler then appends after the 'spacer' key in _columnOrder.
-    const boundary = ordered[i].key === 'spacer' ? ordered[i].left : ordered[i].center;
-    if (ghostCenter < boundary) {
-      to = i;
-      break;
-    }
+  // COLLISION MATH: strict left-to-right intersection. Walk the data columns
+  // (spacer excluded) in DOM order and compare the LIVE pointer X against each
+  // sibling's bounding-box center. The dragged column inserts before the first
+  // sibling whose center the pointer hasn't reached. Past every data column,
+  // `to` is the data-column count → insert at the tail, before the spacer.
+  const dataSlots = st.slots.filter(slot => slot.key !== 'spacer');
+  let to = dataSlots.length;
+  for (let i = 0; i < dataSlots.length; i++) {
+    const slot = dataSlots[i];
+    if (st.lastX < slot.left + slot.width / 2) { to = slot.index; break; }
   }
-  to = Math.max(0, Math.min(ordered.length, to));
   st.to = to;
 
+  // Preview: open a dragged-width gap at the insertion point. Siblings between
+  // the origin and the target slide by exactly the dragged column's width, so
+  // the visual gap mirrors the splice the drop handler will perform.
+  const draggedWidth = st.slots[st.from].width;
   st.slots.forEach(slot => {
-    if (slot.index === st.from) return;
+    if (slot.index === st.from || slot.key === 'spacer') { slot.el.style.transform = ''; return; }
     let tx = 0;
-    if (st.from < to) {
-      if (slot.index > st.from && slot.index <= to) {
-        const target = st.slots[slot.index - 1];
-        tx = target ? target.left - slot.left : 0;
-      }
-    } else if (st.from > to) {
-      if (slot.index >= to && slot.index < st.from) {
-        const target = st.slots[slot.index + 1];
-        tx = target ? target.left - slot.left : 0;
-      }
-    }
+    if (to > st.from && slot.index > st.from && slot.index < to) tx = -draggedWidth;
+    else if (to < st.from && slot.index >= to && slot.index < st.from) tx = draggedWidth;
     slot.el.style.transform = tx ? `translateX(${tx}px)` : '';
   });
 }
@@ -4641,21 +4635,31 @@ function _onColumnPointerUp(e) {
   document.body.classList.remove('col-sort-body');
   if (st.ghost && st.ghost.parentNode) st.ghost.parentNode.removeChild(st.ghost);
 
-  const keys = _columnOrder.slice();
+  // STRICT SPACER LOCK: the spacer is a flex void (grid 1fr) that MUST be the
+  // final element. Any column placed after it is flung to the window's right
+  // edge. So we sort only the real columns, then unconditionally re-append the
+  // spacer to the absolute tail — no column can ever live past it.
+  // DOM RECONCILIATION: sort only the real (spacer-free) columns; the spacer is
+  // re-appended last so no column can ever live past it. `st.to` is an
+  // insertion index in the spacer-free space (0..count). Remove the dragged
+  // key first, then — because removal shifts everything after `from` left by
+  // one — decrement `to` when it sits past the origin. The resulting
+  // `splice(to, 0, moved)` lands exactly on the previewed drop slot.
+  const keys = _columnOrder.filter(k => k !== 'spacer');
   const from = keys.indexOf(st.key);
-  // st.to is an index in the post-removal slot space (slots minus the dragged
-  // column), so valid insertion points run 0..(keys.length-1) inclusive — the
-  // upper bound is an append at the very tail, i.e. AFTER the spacer. The
-  // spacer-aware boundary in _paintColumnDrag is what lets st.to reach it.
-  const to = Math.max(0, Math.min(keys.length - 1, st.to));
-  if (from >= 0 && from !== to) {
+  if (from >= 0) {
     const moved = keys.splice(from, 1)[0];
+    let to = Math.max(0, Math.min(keys.length, st.to));
+    if (to > from) to -= 1;
     keys.splice(to, 0, moved);
-    _columnOrder = keys;
-    _persistColumnOrder();
-    _applyGridTemplate();
-    renderHeader();
-    try { renderList(); } catch {}
+    const next = keys.concat(['spacer']);
+    if (next.join('|') !== _columnOrder.join('|')) {
+      _columnOrder = next;
+      _persistColumnOrder();
+      _applyGridTemplate();
+      renderHeader();
+      try { renderList(); } catch {}
+    }
   }
   _columnDrag = null;
 }

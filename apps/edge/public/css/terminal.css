@@ -99,6 +99,17 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   gap:4px;
   padding:5px 10px;
   align-items:center;
+  /* STRICT LEFT ALIGNMENT: pin all tracks to the start so data columns stay
+     grouped on the left. Only the spacer (1fr) absorbs slack and pushes the
+     empty space to the right edge. */
+  justify-content:flex-start;
+}
+/* Data columns are fixed-size tracks — never let them grow or shrink during
+   a drag. Only the spacer flexes. */
+.thdr > [data-col]:not([data-col="spacer"]),
+.trow > [data-col]:not([data-col="spacer"]){
+  flex-grow:0;
+  flex-shrink:0;
 }
 /* V7.4.9 — single static spacer at the tail. Strictly inert: no
    drag source, no drop target, no resize handle. Exists solely as
