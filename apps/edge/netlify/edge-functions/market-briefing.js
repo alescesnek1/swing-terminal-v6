@@ -697,8 +697,44 @@ function buildMinimalFallbackPayload(lang, fallbackReason, upstreamError) {
   const text = cs
     ? '## 🌍 MARKET BRIEFING\n\n*Tržní data jsou momentálně nedostupná. Zkus to prosím za chvíli.*'
     : '## 🌍 MARKET BRIEFING\n\n*Market data is temporarily unavailable. Please try again shortly.*';
+  const reason = upstreamError ? String(upstreamError).slice(0, 220) : fallbackReason;
+  const richText = cs
+    ? [
+        '## MARKET BRIEFING',
+        '',
+        '### GLOBAL MACRO BACKDROP',
+        'Primarni datovy feed je docasne degradovany, proto briefing neprepisuje tvrda cisla bez overeni. Rezim rizika ber jako opatrny: prioritu ma ochrana kapitalu, sledovani BTC dominance, DXY/SPX smeru a likvidity na perpech.',
+        '',
+        '### TOP-10 CRYPTO IN MACRO CONTEXT',
+        'Bez aktualniho top-100 snapshotu nelze ferove seradit relativni silu. BTC a ETH zustavaji hlavni voditko trhu; alty obchoduj pouze tam, kde je potvrzeny objem, reclaim po flushi a jasne invalidacni misto.',
+        '',
+        '### META DIRECTION & LIQUIDITY ROTATION',
+        'Dokud se data neobnovi, predpokladej zvysenou rotaci likvidity a falesne prurazy. Liquidation flush + stabilizace ma prednost pred chase vstupy do extended pohybu.',
+        '',
+        '### OPPORTUNITIES & CATALYSTS',
+        'Cekej na cerstvy snapshot nebo rucne over objemove leadery. Plan: brat pouze potvrzene wick-reversal setupy, hard SL 3%, TP pasmo 10-20%, zadne zvysovani rizika behem degradace.',
+        '',
+        `*Fallback reason: ${reason}*`,
+      ].join('\n')
+    : [
+        '## MARKET BRIEFING',
+        '',
+        '### GLOBAL MACRO BACKDROP',
+        'The primary market-data feed is temporarily degraded, so this briefing will not invent fresh numbers. Treat the risk regime as cautious: prioritize capital protection and watch BTC dominance, DXY/SPX direction, and perp liquidity.',
+        '',
+        '### TOP-10 CRYPTO IN MACRO CONTEXT',
+        'Without a live top-100 snapshot, relative-strength ranking is not reliable. BTC and ETH remain the market anchors; trade alts only when volume, reclaim after flush, and invalidation are clear.',
+        '',
+        '### META DIRECTION & LIQUIDITY ROTATION',
+        'Until data recovers, assume elevated liquidity rotation and false breakouts. Liquidation flush plus stabilization takes priority over chasing extended moves.',
+        '',
+        '### OPPORTUNITIES & CATALYSTS',
+        'Wait for a fresh snapshot or manually verify volume leaders. Plan: confirmed wick-reversal setups only, hard 3% SL, 10-20% TP band, no risk increase during degradation.',
+        '',
+        `*Fallback reason: ${reason}*`,
+      ].join('\n');
   return {
-    analysis: text,
+    analysis: richText || text,
     meta: {
       model: '<unavailable>',
       tried_models: [],

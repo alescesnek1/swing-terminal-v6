@@ -25,8 +25,9 @@ import { EventEmitter } from 'node:events';
 const DEFAULTS = {
   startingBalance: 10_000,
   riskPerTradeUsd: 250,
-  takeProfitPct: 0.018,
-  stopLossPct: 0.009,
+  takeProfitPctMin: 0.10,
+  takeProfitPctMax: 0.20,
+  stopLossPct: 0.03,
   maxHoldMs: 30 * 60 * 1000,
   cooldownMs: 5 * 60 * 1000,
   maxOpenPositions: 6,
@@ -36,8 +37,8 @@ const DEFAULTS = {
   // when the latest price clears the rolling max by `entryEdgePct *
   // cautionMultiplier`. A tight window keeps the bot reactive on
   // 50ms tick cadence without needing kline buffers.
-  priceWindow: 60,
-  entryEdgePct: 0.0025,
+  priceWindow: 36,
+  flushMinPct: 0.0035,
   // Learning loop. Loss → tighten; win → relax. Clamped so the bot
   // never freezes (mult ≤ MAX) and never trades on noise (mult ≥ MIN).
   cautionOnLoss: 1.18,
@@ -99,7 +100,7 @@ export class PaperBot extends EventEmitter {
     console.log(
       `[PAPERBOT] Started — balance $${this.balance.toFixed(2)}, ` +
       `risk $${this.cfg.riskPerTradeUsd}/trade, ` +
-      `TP ${(this.cfg.takeProfitPct * 100).toFixed(2)}% / ` +
+      `TP ${(this.cfg.takeProfitPctMin * 100).toFixed(2)}-${(this.cfg.takeProfitPctMax * 100).toFixed(2)}% / ` +
       `SL ${(this.cfg.stopLossPct * 100).toFixed(2)}%`,
     );
     this._broadcastState();
@@ -164,43 +165,94 @@ export class PaperBot extends EventEmitter {
     if (ts < cdUntil) return;
 
     const buf = this._priceBuf.get(sym);
-    if (!buf || buf.length < this.cfg.priceWindow) return;
+    if (!buf || buf.length < 4) return;
 
-    // Exclude the latest tick from the reference window so the
-    // breakout test is `current > prior_high`, not `current > current`.
-    let priorHigh = -Infinity;
-    for (let i = 0; i < buf.length - 1; i++) {
-      if (buf[i] > priorHigh) priorHigh = buf[i];
-    }
-    if (!Number.isFinite(priorHigh) || priorHigh <= 0) return;
-
-    const edge = this.cfg.entryEdgePct * this.cautionMultiplier;
-    const threshold = priorHigh * (1 + edge);
-    if (px <= threshold) return;
+    const signal = this._detectFlush(buf);
+    if (!signal) return;
 
     const notional = Math.min(this.cfg.riskPerTradeUsd / this.cfg.stopLossPct, this.balance * 0.5);
     if (notional <= 0) return;
     const qty = notional / px;
+    const sideMul = signal.side === 'short' ? -1 : 1;
+    const tpPct = this._takeProfitPctForSignal(signal);
+    const slPct = 0.03;
 
     const pos = {
-      side: 'long',
+      side: signal.side,
       symbol: sym,
       entryPrice: px,
       qty,
       notional,
-      tp: px * (1 + this.cfg.takeProfitPct),
-      sl: px * (1 - this.cfg.stopLossPct),
+      tp: px * (1 + sideMul * tpPct),
+      sl: px * (1 - sideMul * slPct),
+      tpPct,
+      slPct,
+      reason: signal.side === 'short' ? 'liquidation_flush_short' : 'liquidation_flush_long',
       openedAt: ts,
       lastPrice: px,
     };
     this.openPositions.set(sym, pos);
 
     console.log(
-      `[PAPERBOT] OPEN ${sym} @ ${px.toFixed(6)} ` +
+      `[PAPERBOT] OPEN ${signal.side.toUpperCase()} ${sym} @ ${px.toFixed(6)} ` +
       `qty=${qty.toFixed(4)} tp=${pos.tp.toFixed(6)} sl=${pos.sl.toFixed(6)} ` +
       `caution=${this.cautionMultiplier.toFixed(2)}`,
     );
     this._broadcastState();
+  }
+
+  _detectFlush(buf) {
+    const n = Array.isArray(buf) ? buf.length : 0;
+    if (n < 4) return null;
+    const last = Number(buf[n - 1]);
+    if (!Number.isFinite(last) || last <= 0) return null;
+
+    let maxStep = 0;
+    for (let i = Math.max(1, n - 12); i < n; i++) {
+      const a = Number(buf[i - 1]);
+      const b = Number(buf[i]);
+      if (a > 0 && b > 0) maxStep = Math.max(maxStep, Math.abs(b - a) / a);
+    }
+
+    const minFlush = Math.max(this.cfg.flushMinPct, Math.min(0.018, maxStep * 1.25));
+    const lookbackStart = Math.max(1, n - 10);
+    let best = null;
+
+    for (let i = lookbackStart; i < n - 1; i++) {
+      const base = Number(buf[i - 1]);
+      const wick = Number(buf[i]);
+      if (!(base > 0 && wick > 0)) continue;
+
+      const flushPct = (wick - base) / base;
+      const mag = Math.abs(flushPct);
+      if (mag < minFlush) continue;
+
+      const reactionPct = (last - wick) / wick;
+      const retrace = Math.abs(last - wick) / Math.abs(wick - base);
+      const stabilized = Math.abs(reactionPct) <= mag * 0.18;
+      if (retrace < 0.08 && !stabilized) continue;
+
+      const strength = 21 + mag * 300 + Math.min(8, retrace * 10);
+      const required = 16 * Math.sqrt(Math.max(this.cfg.cautionMin, this.cautionMultiplier));
+      if (strength < required) continue;
+
+      if (flushPct < 0 && last > wick && last <= base * 1.006) {
+        const candidate = { side: 'long', magnitude: mag, strength };
+        if (!best || candidate.strength > best.strength) best = candidate;
+      } else if (flushPct > 0 && last < wick && last >= base * 0.994) {
+        const candidate = { side: 'short', magnitude: mag, strength };
+        if (!best || candidate.strength > best.strength) best = candidate;
+      }
+    }
+    return best;
+  }
+
+  _takeProfitPctForSignal(signal) {
+    const min = 0.10;
+    const max = 0.20;
+    const mag = Number(signal && signal.magnitude) || 0;
+    const scale = Math.max(0, Math.min(1, mag / 0.035));
+    return min + (max - min) * scale;
   }
 
   // ─────────────────────────────────────────────────────────
@@ -208,13 +260,23 @@ export class PaperBot extends EventEmitter {
   // ─────────────────────────────────────────────────────────
   _maybeClose(pos, px, ts) {
     let reason = null;
-    if (px >= pos.tp) reason = 'tp';
+    const sideMul = pos.side === 'short' ? -1 : 1;
+    pos.slPct = 0.03;
+    pos.sl = pos.entryPrice * (1 - sideMul * 0.03);
+    pos.tpPct = Math.max(0.10, Math.min(0.20, Number(pos.tpPct) || this.cfg.takeProfitPctMin));
+    pos.tp = pos.entryPrice * (1 + sideMul * pos.tpPct);
+
+    if (pos.side === 'short') {
+      if (px <= pos.tp) reason = 'tp';
+      else if (px >= pos.sl) reason = 'sl';
+    } else if (px >= pos.tp) reason = 'tp';
     else if (px <= pos.sl) reason = 'sl';
     else if (ts - pos.openedAt >= this.cfg.maxHoldMs) reason = 'time';
     if (!reason) return;
 
-    const pnl = (px - pos.entryPrice) * pos.qty;
-    const pnlPct = (px / pos.entryPrice - 1) * 100;
+    const effectiveExit = reason === 'sl' ? pos.sl : px;
+    const pnlPct = sideMul * ((effectiveExit - pos.entryPrice) / pos.entryPrice) * 100;
+    const pnl = (pnlPct / 100) * pos.notional;
     this.balance += pnl;
     this.realizedPnl += pnl;
 
@@ -226,7 +288,7 @@ export class PaperBot extends EventEmitter {
       symbol: pos.symbol,
       side: pos.side,
       entryPrice: pos.entryPrice,
-      exitPrice: px,
+      exitPrice: effectiveExit,
       qty: pos.qty,
       notional: pos.notional,
       pnl,
@@ -245,7 +307,7 @@ export class PaperBot extends EventEmitter {
 
     console.log(
       `[PAPERBOT] CLOSE ${pos.symbol} ${reason.toUpperCase()} ` +
-      `@ ${px.toFixed(6)} pnl=$${pnl.toFixed(2)} (${pnlPct.toFixed(2)}%) ` +
+      `@ ${effectiveExit.toFixed(6)} pnl=$${pnl.toFixed(2)} (${pnlPct.toFixed(2)}%) ` +
       `bal=$${this.balance.toFixed(2)} W/L=${this.wins}/${this.losses} ` +
       `caution=${this.cautionMultiplier.toFixed(2)}`,
     );
@@ -273,7 +335,8 @@ export class PaperBot extends EventEmitter {
     let u = 0;
     for (const p of this.openPositions.values()) {
       const px = this._lastPrice.get(p.symbol) || p.lastPrice || p.entryPrice;
-      u += (px - p.entryPrice) * p.qty;
+      const sideMul = p.side === 'short' ? -1 : 1;
+      u += sideMul * ((px - p.entryPrice) / p.entryPrice) * p.notional;
     }
     return u;
   }
@@ -289,17 +352,28 @@ export class PaperBot extends EventEmitter {
     const openPositions = [];
     for (const p of this.openPositions.values()) {
       const px = this._lastPrice.get(p.symbol) || p.lastPrice || p.entryPrice;
+      const sideMul = p.side === 'short' ? -1 : 1;
+      const currentPnlPct = p.entryPrice > 0 ? sideMul * ((px - p.entryPrice) / p.entryPrice) * 100 : 0;
+      const currentPnl = (currentPnlPct / 100) * p.notional;
       openPositions.push({
         symbol: p.symbol,
         side: p.side,
         entryPrice: p.entryPrice,
+        currentPrice: px,
         markPrice: px,
         qty: p.qty,
         notional: p.notional,
         tp: p.tp,
         sl: p.sl,
-        pnl: (px - p.entryPrice) * p.qty,
-        pnlPct: (px / p.entryPrice - 1) * 100,
+        tpPrice: p.tp,
+        slPrice: p.sl,
+        tpPct: p.tpPct,
+        slPct: 0.03,
+        pnl: currentPnl,
+        pnlPct: currentPnlPct,
+        currentPnl,
+        currentPnlPct,
+        reason: p.reason,
         openedAt: p.openedAt,
         ageMs: Date.now() - p.openedAt,
       });

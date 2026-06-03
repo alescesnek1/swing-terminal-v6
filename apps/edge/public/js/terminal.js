@@ -3599,8 +3599,12 @@ function _pbBuildRow(trade) {
   }
 
   const pnl = document.createElement('span');
-  const pnlVal = isLive ? (Number(trade.currentPnl) || 0) : (Number(trade.pnl) || 0);
-  const pnlPctVal = isLive ? trade.currentPnlPct : trade.pnlPct;
+  const pnlVal = isLive
+    ? (Number.isFinite(Number(trade.currentPnl)) ? Number(trade.currentPnl) : (Number(trade.pnl) || 0))
+    : (Number(trade.pnl) || 0);
+  const pnlPctVal = isLive
+    ? (Number.isFinite(Number(trade.currentPnlPct)) ? Number(trade.currentPnlPct) : trade.pnlPct)
+    : trade.pnlPct;
   pnl.className = 'pb-row__pnl ' + (pnlVal >= 0 ? 'pos' : 'neg');
   const pnlPctTxt = Number.isFinite(pnlPctVal) ? ' (' + (pnlPctVal >= 0 ? '+' : '') + pnlPctVal.toFixed(2) + '%)' : '';
   pnl.textContent = _pbFmtUsd(pnlVal) + pnlPctTxt;
@@ -3646,7 +3650,7 @@ function _pbBuildRow(trade) {
         + '<span class="pb-receipt__meta">'
         + '<span class="pb-receipt__sym">' + (trade.symbol || '') + '</span> '
         + '<span class="pb-receipt__side ' + sideKey + '">' + (sideKey === 'short' ? 'SHORT' : 'LONG') + '</span> '
-        + '<span class="pb-receipt__result ' + (isWin ? 'pos' : 'neg') + '">' + _pbFmtUsd(pnlVal) + '</span>'
+        + '<span class="pb-receipt__result ' + (isWin ? 'pos' : 'neg') + '">' + _pbFmtUsd(pnlVal) + pnlPctTxt + '</span>'
         + '</span>';
 
       const cvs = document.createElement('canvas');
@@ -3720,6 +3724,11 @@ function renderPaperBot(state) {
 
   const caution = Number(state.cautionMultiplier) || 1;
   _pbSetText('pb-caution', '\u00d7' + caution.toFixed(2), caution > 1.5 ? 'neg' : (caution < 0.9 ? 'pos' : ''));
+  const cautionTitle = 'Caution multiplier divides trade size and raises entry confirmation thresholds: effective notional = balance * risk fraction / max(1, multiplier). It rises after losses or risky regimes and relaxes after wins.';
+  const cautionEl = document.getElementById('pb-caution');
+  const cautionHintEl = document.getElementById('pb-caution-hint');
+  const cautionCard = cautionEl && cautionEl.closest ? cautionEl.closest('.bot-card') : null;
+  [cautionCard, cautionEl, cautionHintEl].forEach((el) => { if (el) el.title = cautionTitle; });
 
   _pbSetText('pb-balance', _pbFmtBalance(state.balance) + ' balance');
 
@@ -5301,8 +5310,8 @@ class LocalPaperBot {
       addShort(8 + Math.abs(sentiment.score) * 10, 'ai_sentiment_bear');
     }
 
-    const minStrength = 18 * guard.caution;
-    const edge = 4 * guard.caution;
+    const minStrength = 16 * Math.sqrt(Math.max(0.75, guard.caution));
+    const edge = 2 * Math.sqrt(Math.max(0.75, guard.caution));
     // Direction is locked to the confirmed flush — we only take the side the
     // liquidation wick reversed into, and only if the stacked edge confirms.
     if (flush.side === 'long' && longStrength >= minStrength && longStrength >= shortStrength + edge) {
@@ -5324,41 +5333,51 @@ class LocalPaperBot {
   // A down-flush that bounces => LONG; an up-flush that rejects => SHORT.
   // Volume, when present, only sharpens conviction (it never gates).
   _detectFlush(hist, market, volEvent) {
-    if (!Array.isArray(hist) || hist.length < 3) return null;
+    if (!Array.isArray(hist) || hist.length < 4) return null;
     const n = hist.length;
-    const last = this._finite(hist[n - 1].price, 0); // confirmation tick (live)
-    const wick = this._finite(hist[n - 2].price, 0); // flush extreme
-    const base = this._finite(hist[n - 3].price, 0); // pre-flush reference
-    if (!(last > 0 && wick > 0 && base > 0)) return null;
+    const last = this._finite(hist[n - 1].price, 0);
+    if (last <= 0) return null;
 
-    const flushPct = (wick - base) / base;   // signed magnitude of the flush leg
-    const confirmPct = (last - wick) / wick;  // signed reaction on the next tick
-
-    // Recent step volatility (excludes the flush+confirm legs) so "sharp"
-    // is measured against THIS symbol's normal cadence, not a fixed number.
     let maxStep = 0;
-    for (let i = Math.max(1, n - 8); i < n - 2; i++) {
+    for (let i = Math.max(1, n - 12); i < n; i++) {
       const a = this._finite(hist[i - 1].price, 0);
       const b = this._finite(hist[i].price, 0);
-      if (a > 0) maxStep = Math.max(maxStep, Math.abs(b - a) / a);
+      if (a > 0 && b > 0) maxStep = Math.max(maxStep, Math.abs(b - a) / a);
     }
-    const FLUSH_MIN = 0.012; // 1.2% floor for a move to count as a flush wick
-    const flushMag = Math.abs(flushPct);
-    if (flushMag < Math.max(FLUSH_MIN, maxStep * 1.8)) return null;
 
-    // Volume coupling: a concurrent volume-surge event lifts conviction.
-    const volBoost = volEvent ? Math.min(10, 4 + Math.abs(this._finite(volEvent.volRatio, 0))) : 0;
-    const baseWeight = 14 + flushMag * 120 + volBoost;
+    const FLUSH_MIN = 0.004;
+    const adaptiveMin = Math.max(FLUSH_MIN, Math.min(0.018, maxStep * 1.25));
+    const lookbackStart = Math.max(1, n - 10);
+    let best = null;
 
-    // DOWN-flush -> bounce/stabilize (not yet fully recovered) => LONG.
-    if (flushPct <= -FLUSH_MIN && confirmPct >= 0 && last < base) {
-      return { side: 'long', magnitude: flushMag, weight: baseWeight + confirmPct * 60 };
+    for (let i = lookbackStart; i < n - 1; i++) {
+      const base = this._finite(hist[i - 1].price, 0);
+      const wick = this._finite(hist[i].price, 0);
+      if (!(base > 0 && wick > 0)) continue;
+
+      const flushPct = (wick - base) / base;
+      const flushMag = Math.abs(flushPct);
+      if (flushMag < adaptiveMin) continue;
+
+      const reactionPct = (last - wick) / wick;
+      const retrace = flushMag > 0 ? Math.abs(last - wick) / Math.abs(wick - base) : 0;
+      const stabilized = Math.abs(reactionPct) <= flushMag * 0.18;
+      const confirmed = retrace >= 0.08 || stabilized;
+      if (!confirmed) continue;
+
+      const volBoost = volEvent ? Math.min(10, 4 + Math.abs(this._finite(volEvent.volRatio, 0))) : 0;
+      const weight = 21 + flushMag * 300 + Math.min(8, retrace * 10) + volBoost;
+
+      if (flushPct < 0 && last > wick && last <= base * 1.006) {
+        const candidate = { side: 'long', magnitude: flushMag, weight };
+        if (!best || candidate.weight > best.weight) best = candidate;
+      } else if (flushPct > 0 && last < wick && last >= base * 0.994) {
+        const candidate = { side: 'short', magnitude: flushMag, weight };
+        if (!best || candidate.weight > best.weight) best = candidate;
+      }
     }
-    // UP-flush -> reject/stabilize (still above base) => SHORT.
-    if (flushPct >= FLUSH_MIN && confirmPct <= 0 && last > base) {
-      return { side: 'short', magnitude: flushMag, weight: baseWeight + Math.abs(confirmPct) * 60 };
-    }
-    return null;
+
+    return best;
   }
 
   _handleSleepGap(now, currentPrices) {
@@ -5418,7 +5437,7 @@ class LocalPaperBot {
     if (isChop || highPanic) {
       const floor = highPanic ? 2.25 : 1.75;
       this.state.cautionMultiplier = this._clamp(Math.max(this.state.cautionMultiplier || 1, floor), 0.75, 5);
-      return { block: true, caution: this.state.cautionMultiplier, reason: highPanic ? 'global_panic' : 'regime_chop' };
+      return { block: false, caution: this.state.cautionMultiplier, reason: highPanic ? 'global_panic' : 'regime_chop' };
     }
     if (elevated) {
       this.state.cautionMultiplier = this._clamp(Math.max(this.state.cautionMultiplier || 1, 1.35), 0.75, 5);
@@ -5574,7 +5593,7 @@ class LocalPaperBot {
     // TP scales within the band: half random, half driven by realized
     // volatility (|24h change|), then hard-clamped so it can never escape
     // [10%, 20%]. SL is the fixed client cap.
-    const slPct = this.stopLossPct;
+    const slPct = 0.03;
     const volScale = this._clamp(Math.abs(this._finite(signal.c24, 0)) / 20, 0, 1);
     const tpPct = this._clamp(
       this.takeProfitPctMin + (this.takeProfitPctMax - this.takeProfitPctMin) * (0.5 * Math.random() + 0.5 * volScale),
@@ -5672,6 +5691,16 @@ class LocalPaperBot {
   }
 
   _exitReason(pos, price) {
+    const entry = Number(pos.entryPrice) || 0;
+    const sideMul = pos.side === 'short' ? -1 : 1;
+    if (entry > 0) {
+      const hardSl = entry * (1 - sideMul * 0.03);
+      pos.slPct = 0.03;
+      pos.slPrice = hardSl;
+      const currentTpPct = this._clamp(this._finite(pos.tpPct, this.takeProfitPct), 0.10, 0.20);
+      pos.tpPct = currentTpPct;
+      pos.tpPrice = entry * (1 + sideMul * currentTpPct);
+    }
     if (pos.side === 'short') {
       if (price <= pos.tpPrice) return 'take_profit';
       if (price >= pos.slPrice) return 'stop_loss';

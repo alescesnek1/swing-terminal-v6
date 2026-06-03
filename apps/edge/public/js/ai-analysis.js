@@ -213,6 +213,34 @@ function formatAnalysis(text) {
     .replace(/$/, '</p>');
 }
 
+function extractBriefingText(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  const direct = [
+    payload.analysis,
+    payload.briefing,
+    payload.text,
+    payload.content,
+    payload.markdown,
+    payload.message,
+  ];
+  for (const v of direct) {
+    if (typeof v === 'string' && v.trim()) return v;
+  }
+  const nested = [
+    payload.data,
+    payload.result,
+    payload.output,
+    payload.response,
+  ];
+  for (const obj of nested) {
+    if (obj && typeof obj === 'object') {
+      const text = extractBriefingText(obj);
+      if (text) return text;
+    }
+  }
+  return '';
+}
+
 // ── Auth ──
 
 async function getAccessToken() {
@@ -604,10 +632,18 @@ export async function requestMarketBriefing(opts = {}) {
     // page from a CDN, empty response) falls through to a degraded
     // banner rather than throwing into the outer catch.
     let payload = null;
+    let rawBody = '';
     try {
-      payload = await res.json();
+      rawBody = await res.text();
+      payload = JSON.parse(rawBody);
     } catch (parseErr) {
       console.error('[MKT-BRIEFING] JSON parse failed:', parseErr);
+      const rawText = String(rawBody || '').replace(/<[^>]*>/g, '').trim();
+      if (rawText) {
+        contentEl.innerHTML = degradedBanner('Server returned text instead of JSON; rendering the response body.') + formatAnalysis(rawText);
+        if (toplineEl) toplineEl.innerHTML = '<span class="ai-stale-badge">DEGRADED</span>';
+        return;
+      }
       contentEl.innerHTML = degradedBanner('Server vrátil neplatnou odpověď. Zkus to za chvíli.');
       if (toplineEl) toplineEl.innerHTML = '<span class="ai-stale-badge">⚠️ DEGRADED</span>';
       return;
@@ -627,8 +663,15 @@ export async function requestMarketBriefing(opts = {}) {
       if (!payload || typeof payload !== 'object') {
         throw new Error('payload is not an object');
       }
-      const text = typeof payload.analysis === 'string' ? payload.analysis : '';
+      let text = extractBriefingText(payload);
       const m = (payload.meta && typeof payload.meta === 'object') ? payload.meta : {};
+      if (!text && (m.cache_layer === 'degraded' || payload.error || payload.detail)) {
+        text = [
+          '## MARKET BRIEFING',
+          '',
+          String(payload.detail || payload.error || 'Market data is temporarily degraded.'),
+        ].join('\n');
+      }
 
       const banner = renderBriefingBanner(m);
       contentEl.innerHTML = banner + formatAnalysis(text);
