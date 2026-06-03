@@ -169,7 +169,12 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 /* V4 Premium: ALPHA = Binance Futures (USDⓈ-M perp) only. Distinct
    purple/orange so it can never be confused with BIN or DEX at a glance. */
 .exch-alpha{background:rgba(168,85,247,.12);color:var(--pur);border-color:rgba(168,85,247,.45)}
-.sig-cell{display:flex;align-items:center;justify-content:flex-start;min-width:0}
+.sig-cell{display:flex;align-items:center;justify-content:flex-start;gap:3px;min-width:0}
+/* V8.1 — badges are rigid: they never flex-shrink, so a multi-tag stack
+   ("FLUSH+BUY" + SHORTS_TRAPPED + 🎯 SNIPER) overflows the fixed cell
+   instead of squashing. That overflow is what the JS clip-killer
+   (_autosizeColumns) detects to auto-grow the SIGNAL column to fit. */
+.sig-cell > *{flex:0 0 auto;white-space:nowrap}
 .pos{color:var(--grn)}.neg{color:var(--red)}.tr{text-align:right}
 .scan-wrap [data-cell],.scan-wrap .tr,.scan-wrap .rn,.scan-wrap .bdg,.scan-wrap .panic-cell,.scan-wrap .te-val{font-variant-numeric:tabular-nums}
 .empty-data{display:inline-flex;align-items:center;justify-content:flex-end;width:100%;color:var(--txt3);opacity:.55;font-size:8px;font-weight:600;letter-spacing:.08em;font-variant-numeric:tabular-nums}

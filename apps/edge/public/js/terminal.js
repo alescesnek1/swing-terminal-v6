@@ -1652,6 +1652,12 @@ function renderList() {
     <span style="font-size:9px;color:var(--txt3)">${currentPage+1} / ${totalPages}</span>
     <button class="s-btn" onclick="currentPage=Math.min(${totalPages-1},currentPage+1);renderList()">NEXT</button>` : '';
   document.getElementById('scnt').textContent = filtered.length + ' / ' + DATA.length;
+
+  // V8.1 — after the rows are in the DOM, measure for clipping and reflow
+  // the absolute coordinate grid so no cell truncates and no two columns
+  // overlap. Deferred to the next frame so layout has settled first.
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(_autosizeColumns);
+  else setTimeout(_autosizeColumns, 16);
 }
 
 function pickCoin(id) {
@@ -4311,7 +4317,7 @@ const COLUMN_DEFS = {
   //     the middle of the row still produces correctly-numbered cells.
   rank:   { label: '#',       width: 32,     tip: '',                                                                       align: 'left',  dragOK: true  },
   coin:   { label: 'COIN',    width: 160,    tip: '',                                                                       align: 'left',  dragOK: true  },
-  signal: { label: 'SIGNAL',  width: 80,     tip: '',                                                                       align: 'left',  dragOK: true  },
+  signal: { label: 'SIGNAL',  width: 110,    tip: '',                                                                       align: 'left',  dragOK: true  },
   score:  { label: 'SCORE',   width: 64,     tip: 'Signal Score 0-10',                                                      align: 'right', dragOK: true,
             tooltip: 'Primary algorithmic valuation engine. Scales 0 to 10/10 based on macro confluence indicators.' },
   panic:  { label: 'PANIC',   width: 70,     tip: 'Click for the PANIC manual',                                             align: 'right', dragOK: true,
@@ -4396,6 +4402,14 @@ const COLUMN_GAP_PX = 10; // default padding inserted between columns on first b
 
 let _columnPositions = JSON.parse(localStorage.getItem(COLUMN_POSITIONS_STORAGE_KEY) || '{}');
 
+// V8.1 — measured content-width floor per column (key → px). Populated by
+// `_autosizeColumns()` after each paint so a column is NEVER narrower than
+// the widest content it must show (e.g. the SIGNAL cell's "FLUSH+BUY" +
+// SHORTS_TRAPPED + 🎯 SNIPER badge stack). Acts as a minimum applied to
+// `_colWidth`; it grows monotonically within a render cycle and converges
+// in a single measure pass, so it can never clip and never loops.
+let _columnContentWidths = {};
+
 function _persistColumnPositions() {
   try { localStorage.setItem(COLUMN_POSITIONS_STORAGE_KEY, JSON.stringify(_columnPositions)); } catch {}
 }
@@ -4417,14 +4431,18 @@ function _persistColumnWidths() {
   } catch {}
 }
 
-// V8 ABACUS — resolve a column's pixel WIDTH. User-resized widths in
-// `_columnWidths` win; otherwise fall back to the static COLUMN_DEFS
-// width, then a hard 80px default per the layout contract.
+// V8 ABACUS — resolve a column's pixel WIDTH. The widest of: the measured
+// content floor (`_columnContentWidths`, so data can never be clipped), the
+// user-resized width (`_columnWidths`), and the static COLUMN_DEFS width
+// (→ 80px default). The content floor is what permanently kills the SIGNAL
+// truncation: the cell auto-grows to fit its badge stack.
 function _colWidth(key) {
+  let base;
   const w = _columnWidths[key];
-  if (Number.isFinite(w)) return Math.max(key === 'coin' ? MIN_COIN_PX : MIN_COL_PX, Math.round(w));
-  const def = COLUMN_DEFS[key] || {};
-  return Number.isFinite(def.width) ? def.width : 80;
+  if (Number.isFinite(w)) base = Math.max(key === 'coin' ? MIN_COIN_PX : MIN_COL_PX, Math.round(w));
+  else { const def = COLUMN_DEFS[key] || {}; base = Number.isFinite(def.width) ? def.width : 80; }
+  const fit = _columnContentWidths[key];
+  return Number.isFinite(fit) ? Math.max(base, Math.ceil(fit)) : base;
 }
 
 // V8 ABACUS — resolve a column's pixel LEFT offset from the coordinate map.
@@ -4460,6 +4478,99 @@ function _ensureColumnPositions() {
       _columnPositions[k] = cursor;
       cursor += _colWidth(k) + COLUMN_GAP_PX;
     }
+  }
+  // Guarantee the seeded arrangement is collision-free even if a width grew.
+  _resolveColumnCollisions();
+}
+
+// ─────────────────────────────────────────────────────────────
+// V8.1 — SOLID-BODY ANTI-COLLISION.
+//
+// Columns are rigid bodies on the wire: they may sit at any arbitrary
+// pixel coordinate, but two of them can NEVER occupy the same space.
+// After any mutation (drop, resize, autosize, boot) this pass:
+//   1. Sorts every column by its current `left` (the just-dropped column,
+//      `priorityKey`, wins ties so it keeps the slot it was released on).
+//   2. Sweeps left→right, and whenever a body would intrude into the
+//      previous body's footprint (left < runningEdge), shoves it right to
+//      exactly runningEdge — `prevLeft + prevWidth + COLUMN_GAP_PX`.
+// Columns the user spaced out with deliberate gaps keep those gaps (their
+// left already clears the edge); only genuine overlaps are pushed apart.
+// The result is deterministic, idempotent, and overlap-free under ANY
+// drop coordinate. `_columnOrder` is re-synced to the visual left→right
+// sequence so the render set and the layout never disagree.
+// ─────────────────────────────────────────────────────────────
+function _resolveColumnCollisions(priorityKey) {
+  const keys = _columnOrder.slice().sort((a, b) => {
+    const la = _colLeft(a), lb = _colLeft(b);
+    if (la !== lb) return la - lb;
+    if (a === priorityKey) return -1;
+    if (b === priorityKey) return 1;
+    return 0;
+  });
+  let edge = 0;
+  for (const k of keys) {
+    let left = _colLeft(k);
+    if (left < edge) left = edge;          // intrusion → shove the body right
+    _columnPositions[k] = left;
+    edge = left + _colWidth(k) + COLUMN_GAP_PX;
+  }
+  _columnOrder = keys;
+}
+
+// V8.1 — stamp the resolved left/width onto the LIVE cells without a full
+// innerHTML rebuild. Lets the autosize/collision pass reflow the table in
+// place (no re-measure loop, no content flash).
+function _applyColumnGeometry() {
+  const stamp = (cell) => {
+    const k = cell.getAttribute('data-col');
+    if (!k || !COLUMN_DEFS[k]) return;
+    cell.style.left = `${_colLeft(k)}px`;
+    cell.style.width = `${_colWidth(k)}px`;
+  };
+  document.querySelectorAll('.thdr > [data-col]').forEach(stamp);
+  document.querySelectorAll('#clist [data-col]').forEach(stamp);
+}
+
+// V8.1 — CLIP KILLER. After each paint, scan every column's header + row
+// cells for REAL clipping (`scrollWidth > clientWidth`, i.e. the content
+// physically overflows the fixed box) and raise the column's content-width
+// floor just enough to fit it. The trigger is overflow itself — never the
+// box width — so a column that already fits reports no clip and the floor
+// stays put (grow-only, drift-free, converges in this single pass). On any
+// growth it re-resolves collisions and reflows the table in place.
+let _autosizing = false;
+function _autosizeColumns() {
+  if (_autosizing) return;
+  _autosizing = true;
+  try {
+    const hdr = document.querySelector('.thdr');
+    const clist = document.getElementById('clist');
+    if (!hdr || !clist) return;
+    let changed = false;
+    for (const k of _columnOrder) {
+      let need = 0;
+      const consider = (cell) => {
+        // Only a genuinely clipped cell inflates the floor. A cell whose
+        // content fits has scrollWidth === clientWidth and is ignored —
+        // that's what stops the box width feeding back into itself.
+        if (cell && cell.scrollWidth > cell.clientWidth + 1) {
+          need = Math.max(need, cell.scrollWidth + 6);
+        }
+      };
+      consider(hdr.querySelector(`:scope > [data-col="${k}"]`));
+      clist.querySelectorAll(`[data-col="${k}"]`).forEach(consider);
+      if (need > (_columnContentWidths[k] || 0)) {
+        _columnContentWidths[k] = need;
+        changed = true;
+      }
+    }
+    if (changed) {
+      _resolveColumnCollisions();
+      _applyColumnGeometry();
+    }
+  } finally {
+    _autosizing = false;
   }
 }
 
@@ -4590,8 +4701,12 @@ function _onColumnPointerUp(e) {
   st.source.classList.remove('col-dragging');
   document.body.classList.remove('col-sort-body');
 
-  // Freeze the column at the EXACT released pixel coordinate.
+  // Freeze the column at the released pixel coordinate, then run solid-body
+  // anti-collision so it can never rest on top of another column — it keeps
+  // the slot it was dropped on (priorityKey) and any genuine overlap with a
+  // neighbour is shoved apart into a distinct, readable block.
   _columnPositions[st.key] = Math.round(st.curLeft);
+  _resolveColumnCollisions(st.key);
   _persistColumnPositions();
   renderHeader();
   try { renderList(); } catch {}
@@ -4652,6 +4767,10 @@ function _attachColumnResize() {
         document.body.style.userSelect = '';
         cell.classList.remove('col-resizing');
         _persistColumnWidths();
+        // A widened column can now overlap its right-hand neighbour — run
+        // anti-collision so the grid stays solid-body before repainting.
+        _resolveColumnCollisions(key);
+        _persistColumnPositions();
         // Re-stamp header + rows so the new width is baked into every
         // cell's inline style across the absolute coordinate grid.
         renderHeader();
@@ -4764,6 +4883,7 @@ window.resetLayout = function() {
   _columnOrder = DEFAULT_COLUMN_ORDER.slice();
   for (const k of Object.keys(COLUMN_DEFS)) _columnWidths[k] = COLUMN_DEFS[k].width;
   _columnPositions = {};
+  _columnContentWidths = {};
   _ensureColumnPositions();
   renderHeader();
   try { renderList(); } catch {}
