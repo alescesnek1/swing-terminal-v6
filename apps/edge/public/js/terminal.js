@@ -868,12 +868,92 @@ function fmt(n) {
 function fp(n, d=2) { return n == null ? '—' : (n >= 0 ? '+' : '') + n.toFixed(d) + '%'; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+const TIMEFRAME_PCT_KEYS = {
+  c1: [
+    '_c1', 'c1', '1h', 'h1', 'pct_1h', 'pct1h', 'change_1h', 'change1h',
+    'change_pct_1h', 'price_change_1h', 'price_change_pct_1h',
+    'price_change_percentage_1h', 'price_change_percentage_1h_in_currency',
+    'percent_change_1h', 'percentage_1h',
+    'price_change_percentage.1h', 'price_change_percentage.h1',
+    'timeframes.1h', 'timeframes.h1', 'timeframes.c1', 'timeframes._c1',
+    'multi_timeframe.1h', 'multi_timeframe.h1', 'multi_timeframe.c1', 'multi_timeframe._c1',
+  ],
+  c4: [
+    '_c4', 'c4', '4h', 'h4', 'pct_4h', 'pct4h', 'change_4h', 'change4h',
+    'change_pct_4h', 'price_change_4h', 'price_change_pct_4h',
+    'price_change_percentage_4h', 'price_change_percentage_4h_in_currency',
+    'percent_change_4h', 'percentage_4h',
+    'price_change_percentage.4h', 'price_change_percentage.h4',
+    'timeframes.4h', 'timeframes.h4', 'timeframes.c4', 'timeframes._c4',
+    'multi_timeframe.4h', 'multi_timeframe.h4', 'multi_timeframe.c4', 'multi_timeframe._c4',
+  ],
+  c12: [
+    '_c12', 'c12', '12h', 'h12', 'pct_12h', 'pct12h', 'change_12h', 'change12h',
+    'change_pct_12h', 'price_change_12h', 'price_change_pct_12h',
+    'price_change_percentage_12h', 'price_change_percentage_12h_in_currency',
+    'percent_change_12h', 'percentage_12h',
+    'price_change_percentage.12h', 'price_change_percentage.h12',
+    'timeframes.12h', 'timeframes.h12', 'timeframes.c12', 'timeframes._c12',
+    'multi_timeframe.12h', 'multi_timeframe.h12', 'multi_timeframe.c12', 'multi_timeframe._c12',
+  ],
+  c24: [
+    '_c24', 'c24', '24h', 'h24', 'pct_24h', 'pct24h', 'change_24h', 'change24h',
+    'change_pct_24h', 'price_change_24h', 'price_change_pct_24h',
+    'price_change_percentage_24h', 'price_change_percentage_24h_in_currency',
+    'percent_change_24h', 'percentage_24h',
+    'price_change_percentage.24h', 'price_change_percentage.h24',
+    'timeframes.24h', 'timeframes.h24', 'timeframes.c24', 'timeframes._c24',
+    'multi_timeframe.24h', 'multi_timeframe.h24', 'multi_timeframe.c24', 'multi_timeframe._c24',
+  ],
+  c7d: [
+    '_c7d', 'c7d', '7d', 'd7', 'pct_7d', 'pct7d', 'change_7d', 'change7d',
+    'change_pct_7d', 'price_change_7d', 'price_change_pct_7d',
+    'price_change_percentage_7d', 'price_change_percentage_7d_in_currency',
+    'percent_change_7d', 'percentage_7d',
+    'price_change_percentage.7d', 'price_change_percentage.d7',
+    'timeframes.7d', 'timeframes.d7', 'timeframes.c7d', 'timeframes._c7d',
+    'multi_timeframe.7d', 'multi_timeframe.d7', 'multi_timeframe.c7d', 'multi_timeframe._c7d',
+    'seven_day.change_pct', 'timeframes.seven_day.change_pct', 'multi_timeframe.seven_day.change_pct',
+  ],
+};
+
+function _pctNumber(v) {
+  if (v && typeof v === 'object') {
+    for (const k of ['change_pct', 'pct', 'percent', 'percentage', 'value']) {
+      const n = _pctNumber(v[k]);
+      if (n != null) return n;
+    }
+    return null;
+  }
+  if (v == null || v === '') return null;
+  const n = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.'));
+  return Number.isFinite(n) ? n : null;
+}
+
+function _readPath(row, path) {
+  let cur = row;
+  for (const part of String(path).split('.')) {
+    if (cur == null) return null;
+    cur = cur[part];
+  }
+  return cur;
+}
+
+function getTimeframePct(row, key) {
+  if (!row) return null;
+  for (const path of (TIMEFRAME_PCT_KEYS[key] || [])) {
+    const n = _pctNumber(_readPath(row, path));
+    if (n != null) return n;
+  }
+  return null;
+}
+
 function rng(seed) { let s = (((seed % 2147483647) + 2147483647) % 2147483647) || 1; return () => { s = (16807 * s) % 2147483647; return (s - 1) / 2147483646; }; }
 function coinRng(id, salt=0) { return rng(id.split('').reduce((a,c) => a*31 + c.charCodeAt(0), 1) + salt + Math.floor(Date.now()/900000)); }
 
 // ========== DERIVED METRICS ==========
-function get1h(d) { return d._c1 || 0; }
-function get4h(d) { return d._c4 || 0; }
+function get1h(d) { return getTimeframePct(d, 'c1') ?? 0; }
+function get4h(d) { return getTimeframePct(d, 'c4') ?? 0; }
 function getVolPct(d) { return (d.total_volume / 100000000) * 100; /* simplified since it's now absolute volume */ }
 function getFunding(d) { return d._funding || 0; }
 function getPredFunding(d) { return (d._funding || 0) * 1.5; }
@@ -1363,8 +1443,22 @@ async function fetchData() {
     if (Array.isArray(rawData)) {
       rawData.forEach(d => {
         if (d.symbol) d.symbol = d.symbol.split(':')[0];
+        const c1 = getTimeframePct(d, 'c1');
+        const c4 = getTimeframePct(d, 'c4');
+        const c12 = getTimeframePct(d, 'c12');
+        const c24 = getTimeframePct(d, 'c24');
+        const c7d = getTimeframePct(d, 'c7d');
         d.current_price = d.current_price || 0;
-        d.price_change_percentage_24h = d.price_change_percentage_24h || d._c24 || 0;
+        if (c1 != null) d._c1 = c1;
+        if (c4 != null) d._c4 = c4;
+        if (c12 != null) d._c12 = c12;
+        if (c24 != null) {
+          d._c24 = c24;
+          d.price_change_percentage_24h = c24;
+        } else {
+          d.price_change_percentage_24h = d.price_change_percentage_24h || d._c24 || 0;
+        }
+        if (c7d != null) d._c7d = c7d;
         d.total_volume = d.total_volume || 0;
         d._funding = d._funding || 0;
         d._oi = d._oi || 0;
@@ -1504,16 +1598,7 @@ function renderList() {
   // Walks the candidate key list and returns the FIRST finite number
   // it finds. A real numeric 0 is preserved (the previous code path
   // already handled that — this helper just widens the search).
-  const _pct = (row, ...keys) => {
-    if (!row) return null;
-    for (const k of keys) {
-      const raw = row[k];
-      if (raw == null || raw === '') continue;
-      const n = Number(raw);
-      if (Number.isFinite(n)) return n;
-    }
-    return null;
-  };
+  const _pct = (row, key) => getTimeframePct(row, key);
 
   page.forEach((row, i) => {
     const d = row && typeof row === 'object' ? row : {};
@@ -1575,12 +1660,17 @@ function renderList() {
       // Mobile-only sub-row carrying the columns hidden ≤640px.
       const panicScore = Number.isFinite(Number(d._panic)) ? Number(d._panic) : (() => { try { return calcPanic(d); } catch { return 0; } })();
       const panicHTML = (() => { try { return panicBadge(panicScore); } catch { return emptyData; } })();
+      const v_c1  = _pct(d, 'c1');
+      const v_c4  = _pct(d, 'c4');
+      const v_c12 = _pct(d, 'c12');
+      const v_c24 = _pct(d, 'c24');
+      const v_c7d = _pct(d, 'c7d');
       const expandRow = `<div class="trow-expand" data-coin-id="${idAttr}">
         <div class="te-cell"><span class="te-lbl">SIG</span><span class="te-val">${signalMarkup(s)}</span></div>
-        <div class="te-cell"><span class="te-lbl">1H</span><span class="te-val">${tfCell(d._c1)}</span></div>
-        <div class="te-cell"><span class="te-lbl">4H</span><span class="te-val">${tfCell(d._c4)}</span></div>
-        <div class="te-cell"><span class="te-lbl">12H</span><span class="te-val">${tfCell(d._c12)}</span></div>
-        <div class="te-cell"><span class="te-lbl">7D</span><span class="te-val">${tfCell(d._c7d)}</span></div>
+        <div class="te-cell"><span class="te-lbl">1H</span><span class="te-val">${tfCell(v_c1)}</span></div>
+        <div class="te-cell"><span class="te-lbl">4H</span><span class="te-val">${tfCell(v_c4)}</span></div>
+        <div class="te-cell"><span class="te-lbl">12H</span><span class="te-val">${tfCell(v_c12)}</span></div>
+        <div class="te-cell"><span class="te-lbl">7D</span><span class="te-val">${tfCell(v_c7d)}</span></div>
         <div class="te-cell"><span class="te-lbl">VOL</span><span class="te-val">${safeMetric(qv, fmt)}</span></div>
         <div class="te-cell"><span class="te-lbl">HOT</span><span class="te-val" style="color:${hot>60?'var(--red)':'var(--txt2)'}">${hot}</span></div>
       </div>`;
@@ -1594,11 +1684,6 @@ function renderList() {
       // fallback chain, a row that came from the Binance-spot build
       // branch in markets.js (which leaves _c1/_c4/_c12/_c7d as
       // null) renders as the dead "-" placeholder.
-      const v_c1  = _pct(d, '_c1',  'price_change_percentage_1h_in_currency', 'price_change_percentage_1h', 'percent_change_1h', 'c1');
-      const v_c4  = _pct(d, '_c4',  'price_change_percentage_4h_in_currency', 'price_change_percentage_4h', 'percent_change_4h', 'c4');
-      const v_c12 = _pct(d, '_c12', 'price_change_percentage_12h_in_currency','price_change_percentage_12h','percent_change_12h','c12');
-      const v_c24 = _pct(d, '_c24', 'price_change_percentage_24h_in_currency','price_change_percentage_24h','percent_change_24h','c24');
-      const v_c7d = _pct(d, '_c7d', 'price_change_percentage_7d_in_currency', 'price_change_percentage_7d', 'percent_change_7d', 'c7d');
       // V8 ABACUS — every cell carries its raw pixel coordinate inline
       // (`left:${px}px;width:${px}px`). Because the string is re-interpolated
       // on every renderList() call, a WebSocket-driven innerHTML rebuild
