@@ -29,7 +29,9 @@ const DEFAULTS = {
   takeProfitPctMax: 0.20,
   stopLossPct: 0.03,
   maxHoldMs: 30 * 60 * 1000,
-  cooldownMs: 5 * 60 * 1000,
+  cooldownMs: 20 * 60 * 1000,
+  signalLockMs: 6 * 60 * 60 * 1000,
+  minQuoteVolumeUsd: 1000000,
   maxOpenPositions: 6,
   ledgerCap: 200,
   recentTradesCap: 25,
@@ -81,6 +83,8 @@ export class PaperBot extends EventEmitter {
     this._priceBuf = new Map();
     /** Per-symbol cooldown after a closed trade. */
     this._cooldown = new Map();
+    /** Consumed wick signal ids. Prevents historical signal reuse. */
+    this._consumedSignals = new Map();
     /** Last seen price per symbol — feeds equity mark-to-market. */
     this._lastPrice = new Map();
 
@@ -125,33 +129,37 @@ export class PaperBot extends EventEmitter {
   // ─────────────────────────────────────────────────────────
   _onTick(frame) {
     if (!frame || frame.t !== 'tick') return;
-    const sym = frame.s;
+    const sym = String(frame.s || '').toUpperCase();
     const px = Number(frame.p);
     if (!sym || !Number.isFinite(px) || px <= 0) return;
+    const now = Date.now();
+    const qv = Number(frame.qv);
 
     this._lastPrice.set(sym, px);
-    this._pushPrice(sym, px);
 
     // Update / close any position on this symbol first — exits take
     // priority over entries so a flip-flopping tick never enters a new
     // trade on the same frame that the prior one stops out.
     const pos = this.openPositions.get(sym);
     if (pos) {
+      this._pushPrice(sym, px, now);
       pos.lastPrice = px;
-      this._maybeClose(pos, px, frame.ts || Date.now());
+      this._maybeClose(pos, px, now);
       return;
     }
 
-    this._maybeOpen(sym, px, frame.ts || Date.now());
+    if (!this._isTradableMarket(sym, qv, now)) return;
+    this._pushPrice(sym, px, now);
+    this._maybeOpen(sym, px, now);
   }
 
-  _pushPrice(sym, px) {
+  _pushPrice(sym, px, ts) {
     let buf = this._priceBuf.get(sym);
     if (!buf) {
       buf = [];
       this._priceBuf.set(sym, buf);
     }
-    buf.push(px);
+    buf.push({ price: px, ts });
     if (buf.length > this.cfg.priceWindow) buf.shift();
   }
 
@@ -162,16 +170,18 @@ export class PaperBot extends EventEmitter {
     if (this.openPositions.size >= this.cfg.maxOpenPositions) return;
 
     const cdUntil = this._cooldown.get(sym) || 0;
-    if (ts < cdUntil) return;
+    if (Date.now() < cdUntil) return;
 
     const buf = this._priceBuf.get(sym);
     if (!buf || buf.length < 4) return;
 
-    const signal = this._detectFlush(buf);
+    const signal = this._detectFlush(sym, buf);
     if (!signal) return;
+    if (this._isSignalConsumed(signal.signalKey)) return;
 
     const notional = Math.min(this.cfg.riskPerTradeUsd / this.cfg.stopLossPct, this.balance * 0.5);
     if (notional <= 0) return;
+    this._consumeSignal(signal.signalKey);
     const qty = notional / px;
     const sideMul = signal.side === 'short' ? -1 : 1;
     const tpPct = this._takeProfitPctForSignal(signal);
@@ -187,6 +197,7 @@ export class PaperBot extends EventEmitter {
       sl: px * (1 - sideMul * slPct),
       tpPct,
       slPct,
+      signalKey: signal.signalKey,
       reason: signal.side === 'short' ? 'liquidation_flush_short' : 'liquidation_flush_long',
       openedAt: ts,
       lastPrice: px,
@@ -201,16 +212,16 @@ export class PaperBot extends EventEmitter {
     this._broadcastState();
   }
 
-  _detectFlush(buf) {
+  _detectFlush(sym, buf) {
     const n = Array.isArray(buf) ? buf.length : 0;
     if (n < 4) return null;
-    const last = Number(buf[n - 1]);
+    const last = this._bufPrice(buf[n - 1]);
     if (!Number.isFinite(last) || last <= 0) return null;
 
     let maxStep = 0;
     for (let i = Math.max(1, n - 12); i < n; i++) {
-      const a = Number(buf[i - 1]);
-      const b = Number(buf[i]);
+      const a = this._bufPrice(buf[i - 1]);
+      const b = this._bufPrice(buf[i]);
       if (a > 0 && b > 0) maxStep = Math.max(maxStep, Math.abs(b - a) / a);
     }
 
@@ -219,8 +230,8 @@ export class PaperBot extends EventEmitter {
     let best = null;
 
     for (let i = lookbackStart; i < n - 1; i++) {
-      const base = Number(buf[i - 1]);
-      const wick = Number(buf[i]);
+      const base = this._bufPrice(buf[i - 1]);
+      const wick = this._bufPrice(buf[i]);
       if (!(base > 0 && wick > 0)) continue;
 
       const flushPct = (wick - base) / base;
@@ -235,12 +246,15 @@ export class PaperBot extends EventEmitter {
       const strength = 21 + mag * 300 + Math.min(8, retrace * 10);
       const required = 16 * Math.sqrt(Math.max(this.cfg.cautionMin, this.cautionMultiplier));
       if (strength < required) continue;
+      const wickTs = this._bufTs(buf[i], i);
+      const baseTs = this._bufTs(buf[i - 1], i - 1);
+      const signalRoot = [sym, wickTs, baseTs, Math.round(wick * 1e8), Math.round(base * 1e8)].join(':');
 
       if (flushPct < 0 && last > wick && last <= base * 1.006) {
-        const candidate = { side: 'long', magnitude: mag, strength };
+        const candidate = { side: 'long', magnitude: mag, strength, signalKey: signalRoot + ':long' };
         if (!best || candidate.strength > best.strength) best = candidate;
       } else if (flushPct > 0 && last < wick && last >= base * 0.994) {
-        const candidate = { side: 'short', magnitude: mag, strength };
+        const candidate = { side: 'short', magnitude: mag, strength, signalKey: signalRoot + ':short' };
         if (!best || candidate.strength > best.strength) best = candidate;
       }
     }
@@ -258,6 +272,51 @@ export class PaperBot extends EventEmitter {
   // ─────────────────────────────────────────────────────────
   // Exit rule — TP / SL / time stop
   // ─────────────────────────────────────────────────────────
+  _bufPrice(point) {
+    return Number(point && typeof point === 'object' ? point.price : point);
+  }
+
+  _bufTs(point, fallback) {
+    const ts = Number(point && typeof point === 'object' ? point.ts : 0);
+    return Number.isFinite(ts) && ts > 0 ? ts : fallback;
+  }
+
+  _isTradableMarket(sym, quoteVolumeUsd, now = Date.now()) {
+    if (!sym || this._isToxicSymbol(sym)) return false;
+    if ((this._cooldown.get(sym) || 0) > now) return false;
+    if (!Number.isFinite(quoteVolumeUsd) || quoteVolumeUsd < this.cfg.minQuoteVolumeUsd) return false;
+    return true;
+  }
+
+  _isToxicSymbol(sym) {
+    const s = String(sym || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!s) return true;
+    const blocked = new Set([
+      'USDT','USDC','BUSD','FDUSD','TUSD','USDP','USDD','DAI','FRAX','LUSD','PYUSD','USDE','SUSDE','USD1','USTC',
+      'EUR','EURC','EURS','EURI','EURT','AEUR','SEUR','JPY','JPYC','GYEN','GBP','GBPT','CHF','AUD','CAD','BRL',
+      'REUSD','USDR','USDX','USDL','USDM','USDS','USDJ','XAUT',
+    ]);
+    if (blocked.has(s)) return true;
+    return /(?:USD|USDT|USDC|DAI|EUR|JPY|GBP|CHF|AUD|CAD)$/.test(s);
+  }
+
+  _isSignalConsumed(signalKey, now = Date.now()) {
+    if (!signalKey) return true;
+    this._pruneConsumedSignals(now);
+    return (this._consumedSignals.get(signalKey) || 0) > now;
+  }
+
+  _consumeSignal(signalKey, now = Date.now()) {
+    if (!signalKey) return;
+    this._consumedSignals.set(signalKey, now + this.cfg.signalLockMs);
+  }
+
+  _pruneConsumedSignals(now = Date.now()) {
+    for (const [key, until] of this._consumedSignals.entries()) {
+      if (until <= now) this._consumedSignals.delete(key);
+    }
+  }
+
   _maybeClose(pos, px, ts) {
     let reason = null;
     const sideMul = pos.side === 'short' ? -1 : 1;
@@ -298,12 +357,15 @@ export class PaperBot extends EventEmitter {
       closedAt: ts,
       holdMs: ts - pos.openedAt,
       cautionAtClose: this.cautionMultiplier,
+      signalKey: pos.signalKey,
     };
     this.ledger.unshift(closed);
     if (this.ledger.length > this.cfg.ledgerCap) this.ledger.length = this.cfg.ledgerCap;
 
     this.openPositions.delete(pos.symbol);
-    this._cooldown.set(pos.symbol, ts + this.cfg.cooldownMs);
+    this._cooldown.set(pos.symbol, Date.now() + this.cfg.cooldownMs);
+    this._consumeSignal(pos.signalKey);
+    this._priceBuf.set(pos.symbol, []);
 
     console.log(
       `[PAPERBOT] CLOSE ${pos.symbol} ${reason.toUpperCase()} ` +

@@ -5072,6 +5072,10 @@ class LocalPaperBot {
     this.takeProfitPct = (this.takeProfitPctMin + this.takeProfitPctMax) / 2; // 0.15 fallback
     this.feePct = Number(opts.feePct) || 0.0004;
     this.sleepGapMs = Number(opts.sleepGapMs) || 30 * 60 * 1000;
+    this.symbolCooldownMs = Number(opts.symbolCooldownMs) || 20 * 60 * 1000;
+    this.signalLockMs = Number(opts.signalLockMs) || 6 * 60 * 60 * 1000;
+    this.minTradeVolumeUsd = Number(opts.minTradeVolumeUsd) || 1000000;
+    this.maxSpreadPct = Number(opts.maxSpreadPct) || 0.015;
     this.priceHistory = new Map();
     this.lastPrices = new Map();
     this.state = this._loadState();
@@ -5107,6 +5111,7 @@ class LocalPaperBot {
       }
 
       if (slept || this.state.openPositions.length >= this.maxOpenPositions) continue;
+      if (!this._isTradableMarket(market, now)) continue;
       const signal = this._buildSignal(market, hist);
       if (signal) candidates.push(signal);
     }
@@ -5114,7 +5119,10 @@ class LocalPaperBot {
     if (candidates.length && this.state.openPositions.length < this.maxOpenPositions) {
       candidates.sort((a, b) => b.strength - a.strength);
       for (let i = 0; i < candidates.length && this.state.openPositions.length < this.maxOpenPositions; i++) {
-        if (!this._findOpen(candidates[i].symbol)) this._openPosition(candidates[i], now);
+        const candidate = candidates[i];
+        if (!this._findOpen(candidate.symbol) && this._isTradableMarket(candidate, now) && !this._isSignalConsumed(candidate.signalKey, now)) {
+          this._openPosition(candidate, now);
+        }
       }
     }
 
@@ -5137,6 +5145,8 @@ class LocalPaperBot {
       startedAt: Date.now(),
       totalClosed: 0,
       lastTickTime: Date.now(),
+      cooldowns: {},
+      consumedSignals: {},
     };
 
     try {
@@ -5155,6 +5165,8 @@ class LocalPaperBot {
         startedAt: this._finite(saved.startedAt, Date.now()),
         totalClosed: Math.max(0, this._finite(saved.totalClosed, (saved.wins | 0) + (saved.losses | 0)) | 0),
         lastTickTime: this._finite(saved.lastTickTime, Date.now()),
+        cooldowns: saved.cooldowns && typeof saved.cooldowns === 'object' ? saved.cooldowns : {},
+        consumedSignals: saved.consumedSignals && typeof saved.consumedSignals === 'object' ? saved.consumedSignals : {},
       };
     } catch {
       return fresh;
@@ -5175,6 +5187,8 @@ class LocalPaperBot {
         startedAt: this.state.startedAt,
         totalClosed: this.state.totalClosed,
         lastTickTime: this.state.lastTickTime,
+        cooldowns: this._prunedExpiryObject(this.state.cooldowns, Date.now()),
+        consumedSignals: this._prunedExpiryObject(this.state.consumedSignals, Date.now()),
       }));
     } catch {}
   }
@@ -5199,6 +5213,9 @@ class LocalPaperBot {
       trades24h: Math.max(0, this._finite(d.trades_24h, 0) | 0),
       high24: this._finite(d.high_24h, 0),
       low24: this._finite(d.low_24h, 0),
+      bid: this._finite(d.bid, 0),
+      ask: this._finite(d.ask, 0),
+      spreadPct: this._finite(d.spreadPct != null ? d.spreadPct : d.spread_pct, 0),
       score: this._finite(d._sig_score != null ? d._sig_score : d.score, 0),
       panic: this._finite(d._panic, 0),
       hotness: this._calcHotnessSafe(d),
@@ -5231,6 +5248,7 @@ class LocalPaperBot {
   _buildSignal(market, hist) {
     const guard = this._marketRiskGuard();
     if (guard.block) return null;
+    if (!this._isTradableMarket(market, Date.now())) return null;
 
     const raw = market && market.raw && typeof market.raw === 'object' ? market.raw : {};
     const scanner = market.scannerSignal || this._readScannerSignal(raw);
@@ -5246,7 +5264,7 @@ class LocalPaperBot {
     const divergence = this._readDivergenceSignal(market.symbol);
     const sniper = this._readSniperSignal(market.symbol);
     const flags = this._readScannerFlags(raw, scanner);
-    const liquid = market.volume <= 0 || market.volume >= 100000;
+    const liquid = market.volume >= this.minTradeVolumeUsd;
 
     if (!liquid) return null;
 
@@ -5255,6 +5273,7 @@ class LocalPaperBot {
     // liquidation flush, and only in the direction the flush reverses. ──
     const flush = this._detectFlush(hist, market, volEvent);
     if (!flush) return null;
+    if (this._isSignalConsumed(flush.signalKey, Date.now())) return null;
 
     let longStrength = 0;
     let shortStrength = 0;
@@ -5315,12 +5334,84 @@ class LocalPaperBot {
     // Direction is locked to the confirmed flush — we only take the side the
     // liquidation wick reversed into, and only if the stacked edge confirms.
     if (flush.side === 'long' && longStrength >= minStrength && longStrength >= shortStrength + edge) {
-      return { ...market, side: 'long', strength: longStrength, reason: this._reason(longReasons, 'liquidation_flush_long') };
+      return { ...market, side: 'long', strength: longStrength, reason: this._reason(longReasons, 'liquidation_flush_long'), signalKey: flush.signalKey };
     }
     if (flush.side === 'short' && shortStrength >= minStrength && shortStrength >= longStrength + edge) {
-      return { ...market, side: 'short', strength: shortStrength, reason: this._reason(shortReasons, 'liquidation_flush_short') };
+      return { ...market, side: 'short', strength: shortStrength, reason: this._reason(shortReasons, 'liquidation_flush_short'), signalKey: flush.signalKey };
     }
     return null;
+  }
+
+  _isTradableMarket(market, now) {
+    if (!market || !market.symbol) return false;
+    if (this._isSymbolCoolingDown(market.symbol, now)) return false;
+    if (this._isToxicSymbol(market.symbol)) return false;
+    const vol = Number(market.volume);
+    if (!Number.isFinite(vol) || vol < this.minTradeVolumeUsd) return false;
+    const spread = this._marketSpreadPct(market);
+    if (spread > this.maxSpreadPct) return false;
+    const high = Number(market.high24) || 0;
+    const low = Number(market.low24) || 0;
+    const price = Number(market.price) || 0;
+    const rangePct = high > 0 && low > 0 ? (high - low) / Math.max(low, price, 1e-12) : 0;
+    if (price > 0 && rangePct > 0 && rangePct < 0.004 && Math.abs(Number(market.c24) || 0) < 0.6) return false;
+    return true;
+  }
+
+  _isToxicSymbol(symbol) {
+    const s = String(symbol || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!s) return true;
+    const blocked = new Set([
+      'USDT','USDC','BUSD','FDUSD','TUSD','USDP','USDD','DAI','FRAX','LUSD','PYUSD','USDE','SUSDE','USD1','USTC',
+      'EUR','EURC','EURS','EURI','EURT','AEUR','SEUR','JPY','JPYC','GYEN','GBP','GBPT','CHF','AUD','CAD','BRL',
+      'REUSD','USDR','USDX','USDL','USDM','USDS','USDJ','XAUT',
+    ]);
+    if (blocked.has(s)) return true;
+    return /(?:USD|USDT|USDC|DAI|EUR|JPY|GBP|CHF|AUD|CAD)$/.test(s);
+  }
+
+  _marketSpreadPct(market) {
+    const explicit = Number(market.spreadPct);
+    if (Number.isFinite(explicit) && explicit > 0) return explicit > 1 ? explicit / 100 : explicit;
+    const bid = Number(market.bid) || 0;
+    const ask = Number(market.ask) || 0;
+    if (bid > 0 && ask > bid) return (ask - bid) / ((ask + bid) / 2);
+    return 0;
+  }
+
+  _isSymbolCoolingDown(symbol, now) {
+    const key = String(symbol || '').toUpperCase();
+    const until = Number(this.state.cooldowns && this.state.cooldowns[key]) || 0;
+    return until > now;
+  }
+
+  _setSymbolCooldown(symbol, now) {
+    const key = String(symbol || '').toUpperCase();
+    if (!key) return;
+    if (!this.state.cooldowns || typeof this.state.cooldowns !== 'object') this.state.cooldowns = {};
+    this.state.cooldowns[key] = now + this.symbolCooldownMs;
+  }
+
+  _isSignalConsumed(signalKey, now) {
+    if (!signalKey) return true;
+    const until = Number(this.state.consumedSignals && this.state.consumedSignals[signalKey]) || 0;
+    return until > now;
+  }
+
+  _consumeSignal(signalKey, now) {
+    if (!signalKey) return;
+    if (!this.state.consumedSignals || typeof this.state.consumedSignals !== 'object') this.state.consumedSignals = {};
+    this.state.consumedSignals[signalKey] = now + this.signalLockMs;
+  }
+
+  _prunedExpiryObject(obj, now) {
+    const out = {};
+    if (!obj || typeof obj !== 'object') return out;
+    for (const [k, v] of Object.entries(obj)) {
+      const until = Number(v) || 0;
+      if (until > now) out[k] = until;
+    }
+    return out;
   }
 
   // ── LIQUIDATION HUNTER ──────────────────────────────────────────────
@@ -5367,12 +5458,21 @@ class LocalPaperBot {
 
       const volBoost = volEvent ? Math.min(10, 4 + Math.abs(this._finite(volEvent.volRatio, 0))) : 0;
       const weight = 21 + flushMag * 300 + Math.min(8, retrace * 10) + volBoost;
+      const wickTs = Number(hist[i].ts) || i;
+      const baseTs = Number(hist[i - 1].ts) || (i - 1);
+      const signalRoot = [
+        market && market.symbol || 'UNKNOWN',
+        wickTs,
+        baseTs,
+        Math.round(wick * 1e8),
+        Math.round(base * 1e8),
+      ].join(':');
 
       if (flushPct < 0 && last > wick && last <= base * 1.006) {
-        const candidate = { side: 'long', magnitude: flushMag, weight };
+        const candidate = { side: 'long', magnitude: flushMag, weight, signalKey: signalRoot + ':long' };
         if (!best || candidate.weight > best.weight) best = candidate;
       } else if (flushPct > 0 && last < wick && last >= base * 0.994) {
-        const candidate = { side: 'short', magnitude: flushMag, weight };
+        const candidate = { side: 'short', magnitude: flushMag, weight, signalKey: signalRoot + ':short' };
         if (!best || candidate.weight > best.weight) best = candidate;
       }
     }
@@ -5587,6 +5687,8 @@ class LocalPaperBot {
   }
 
   _openPosition(signal, now) {
+    if (this._isSignalConsumed(signal.signalKey, now)) return;
+    this._consumeSignal(signal.signalKey, now);
     const sideMul = signal.side === 'short' ? -1 : 1;
     const notional = Math.max(25, this.state.balance * this.riskFraction / Math.max(1, this.state.cautionMultiplier));
     // ── STRICT RISK BOUNDS: 3% hard SL, dynamic 10%-20% TP ──
@@ -5614,6 +5716,7 @@ class LocalPaperBot {
       slPrice: sl,
       tpPct,
       slPct,
+      signalKey: signal.signalKey,
       openedAt: now,
       reason: signal.reason,
       entryMomentum: signal.c24,
@@ -5637,6 +5740,9 @@ class LocalPaperBot {
     this.state.realizedPnl = this._round(this.state.realizedPnl + pnl, 6);
     this.state.openPositions.splice(idx, 1);
     this.state.totalClosed = (this.state.totalClosed || 0) + 1;
+    this._setSymbolCooldown(pos.symbol, now);
+    this._consumeSignal(pos.signalKey, now);
+    this.priceHistory.set(pos.symbol, []);
 
     if (pnl >= 0) {
       this.state.wins += 1;
@@ -5683,6 +5789,7 @@ class LocalPaperBot {
       openedAt: pos.openedAt,
       closedAt: now,
       holdMs: now - (Number(pos.openedAt) || now),
+      signalKey: pos.signalKey,
       priceCurve,
     });
     if (this.state.recentTrades.length > this.recentTradeLimit) {
