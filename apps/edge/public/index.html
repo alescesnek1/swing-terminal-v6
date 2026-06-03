@@ -222,12 +222,9 @@
               <span data-col="c7d" class="tr" draggable="true" title="7d price change %">7D %<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
               <span data-col="qv"  class="tr" draggable="true" title="24h Quote Volume (USD)">24H VOL<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
               <span data-col="hot" class="tr" draggable="true" data-hot-tip data-tooltip="Real-time attention and volatility tracking index based on immediate trading frequency spikes.">HOT<span class="col-resize-handle" data-resize aria-hidden="true"></span></span>
-              <!-- V7.4.9: single static spacer. Inert (no drag, no
-                   drop, no resize) — exists solely to absorb the
-                   remaining 1fr of viewport width on wide displays.
-                   Pinned to the tail by _attachColumnDnD's drop
-                   invariant so it can never be displaced. -->
-              <span data-col="spacer" class="thdr-spacer no-handle" aria-hidden="true"></span>
+              <!-- V8 ABACUS — the inert grid spacer is gone; columns now
+                   float on absolute pixel coordinates. This static header is
+                   replaced wholesale by renderHeader() on boot. -->
               <span class="trow-toggle-hdr no-handle" aria-hidden="true">⋯</span>
             </div>
             <div id="clist"></div>

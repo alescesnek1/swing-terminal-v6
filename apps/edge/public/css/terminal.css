@@ -80,56 +80,39 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .scan-wrap{overflow-x:auto;overflow-y:visible;white-space:nowrap;-webkit-overflow-scrolling:touch;position:relative;width:100%;padding-right:40px;}
 .scan-wrap .thdr,.scan-wrap .trow{white-space:nowrap;}
 @media(min-width:641px){
-  /* V7.3 — full 13-column chain + toggle. */
-  .scan-wrap .thdr,.scan-wrap .trow{min-width:980px;}
+  /* V8 — the abacus canvas. Wide enough to hold the default cumulative
+     left-to-right arrangement (~1040px) and to give absolutely-positioned
+     columns room to be dragged across the void; overflow-x scrolls beyond. */
+  .scan-wrap .thdr,.scan-wrap .trow{min-width:1060px;}
 }
+/* V8 ABACUS — ABSOLUTE COORDINATE LAYOUT.
+   The CSS Grid is gone. The row is a plain block positioning context;
+   every cell is absolutely positioned by a raw pixel `left` offset that
+   terminal.js bakes inline (renderHeader / renderList) from the
+   `_columnPositions` map. Placement is 100% pixel-arbitrary (drop a column
+   anywhere over the void and it freezes there) and immune to WebSocket
+   re-render wipes, because every innerHTML rebuild re-stamps the exact X. */
 .thdr, .trow{
-  display:grid;
-  /* V7.4.6 — 15 cells in DEFAULT DOM order:
-     # | COIN | SIGNAL | SCORE | PANIC | PRICE | 1H% | 4H% | 12H%
-     | 24H% | 7D% | 24H VOL | HOT | SPACER(1fr) | toggle
-     COIN is now a FIXED 160px; the trailing `1fr` slot belongs to
-     the invisible `spacer` cell that absorbs the remaining viewport
-     width on wide displays so the data columns stay tight on the
-     left. This is the STATIC fallback template only. terminal.js
-     injects a dynamic #dynamic-cols <style> tag whose
-     grid-template-columns wins via !important. */
-  /* V7.4.9: 13 data + 1 spacer (1fr) + 1 toggle = 15 slots. */
-  grid-template-columns:32px 160px 80px 64px 70px 80px 56px 56px 56px 60px 56px 90px 50px 1fr 0px;
-  gap:4px;
-  padding:5px 10px;
-  align-items:center;
-  /* STRICT LEFT ALIGNMENT: pin all tracks to the start so data columns stay
-     grouped on the left. Only the spacer (1fr) absorbs slack and pushes the
-     empty space to the right edge. */
-  justify-content:flex-start;
-}
-/* Data columns are fixed-size tracks — never let them grow or shrink during
-   a drag. Only the spacer flexes. */
-.thdr > [data-col]:not([data-col="spacer"]),
-.trow > [data-col]:not([data-col="spacer"]){
-  flex-grow:0;
-  flex-shrink:0;
-}
-/* V7.4.9 — single static spacer at the tail. Strictly inert: no
-   drag source, no drop target, no resize handle. Exists solely as
-   a 1fr grid track that absorbs all remaining horizontal slack so
-   the data columns stay tight on the left edge of the row. */
-.thdr > .thdr-spacer{
+  position:relative;
+  display:block;
+  width:100%;
+  height:24px;
   padding:0;
-  background:transparent;
-  border:none;
-  cursor:default;
-  flex-grow:1;
-  min-width:100px;
-  pointer-events:auto;
-  transition:transform 0.2s cubic-bezier(0.2, 0, 0, 1);
+}
+/* Every cell is an absolutely-positioned bead on the wire. `left` + `width`
+   arrive inline; this rule supplies the constants shared by all of them. */
+.thdr > *, .trow > *{
+  position:absolute;
+  top:0;
+  height:100%;
+  box-sizing:border-box;
   will-change:transform;
+  display:flex;
+  align-items:center;
+  overflow:hidden;
 }
-.thdr > .thdr-spacer:hover{
-  background:transparent;
-  border-bottom:none;
-}
+/* Right-aligned numeric columns push their content to the cell's right edge. */
+.thdr > .tr, .trow > .tr{justify-content:flex-end;}
 /* Desktop: the mobile expand-toggle column collapses to zero width
    so the layout matches the historical 12-column grid pixel-for-pixel. */
 @media(min-width:641px){
@@ -139,16 +122,16 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .thdr{
   font-size:9px;color:var(--txt3);letter-spacing:.05em;border-bottom:1px solid var(--b1);background:var(--s1);
 }
-/* V7.3 — header cells are flat (no phantom resize-handle padding).
-   Draggable cells get a grab cursor + subtle border-bottom hover hint
-   so the affordance is obvious without an extra widget. */
-.thdr > * { position: relative; padding-left: 4px; padding-right: 4px; }
+/* V8 — header cells keep light horizontal padding (NOT position:relative —
+   the absolute base rule above already makes each cell its own positioning
+   context for the resize handle). Draggable cells get a grab cursor + a
+   subtle border-bottom hover hint. */
+.thdr > * { padding-left: 4px; padding-right: 4px; }
 .thdr > .no-handle { padding-left: 0; }
 .thdr > [data-sortable="true"] {
   cursor: grab;
   border-bottom: 1px solid transparent;
-  transition: background .15s, border-color .15s, transform 0.2s cubic-bezier(0.2, 0, 0, 1);
-  will-change:transform;
+  transition: background .15s, border-color .15s;
   touch-action:none;
 }
 .thdr > [data-sortable="true"]:hover {
@@ -156,53 +139,24 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   border-bottom-color: rgba(0,232,200,.40);
 }
 .thdr > [data-sortable="true"]:active { cursor: grabbing; }
+/* V8 ABACUS — the dragged column lifts above its neighbours and glows while
+   it floats freely over the void; no ghost clone, no sibling sliding. */
 .thdr > .col-dragging {
-  opacity: .55;
+  z-index: 50;
+  cursor: grabbing;
   background: rgba(0,232,200,.15) !important;
-  border-bottom-color: rgba(0,232,200,.85) !important;
-}
-.thdr > .col-drag-origin {
-  opacity:0;
-  visibility:hidden;
-  background:rgba(0,232,200,.10) !important;
-  border-bottom-color:rgba(0,232,200,.65) !important;
-}
-.col-sort-active > [data-sortable="true"]{
-  transition:transform 0.2s cubic-bezier(0.2, 0, 0, 1),background .15s,border-color .15s;
-}
-.col-sort-active > [data-col="spacer"]{
-  transition:transform 0.2s cubic-bezier(0.2, 0, 0, 1);
+  box-shadow: 0 0 0 1px rgba(0,232,200,.7), 0 8px 22px rgba(0,0,0,.45);
 }
 .col-sort-body{cursor:grabbing;user-select:none}
-.col-drag-ghost{
-  position:fixed;
-  z-index:2147483001;
-  pointer-events:none;
-  display:flex;
-  align-items:center;
-  padding:5px 4px;
-  color:var(--txt);
-  background:rgba(11,15,32,.96);
-  border:1px solid rgba(0,232,200,.55);
-  border-radius:4px;
-  box-shadow:0 12px 28px rgba(0,0,0,.45),0 0 18px rgba(0,232,200,.18);
-  will-change:transform;
-  transform:translate3d(0,0,0);
-}
-.col-drag-ghost .col-resize-handle{display:none}
-.thdr > .col-drop-target {
-  background: rgba(0,232,200,.10) !important;
-  outline: 1px dashed rgba(0,232,200,.60);
-  outline-offset: -2px;
-}
 .trow{
   border-bottom:1px solid rgba(255,255,255,.02);
   font-size:11px;transition:background .1s
 }
 .trow:hover{background:rgba(255,255,255,.03)}
-.trow.sel{background:rgba(255,255,255,.05);border-left:2px solid var(--acc);padding-left:8px}
+/* V8 — inset box-shadow instead of border-left so the selected marker
+   doesn't shift the absolute children by the border width. */
+.trow.sel{background:rgba(255,255,255,.05);box-shadow:inset 2px 0 0 var(--acc)}
 .trow>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:6px}
-.thdr > [data-col="spacer"],.trow > [data-col="spacer"]{flex-grow:1;min-width:100px;pointer-events:auto}
 .trow.alert-high{background:rgba(255,51,86,.03)}.trow.alert-med{background:rgba(255,176,32,.02)}
 .rn{color:var(--txt3);font-size:9px}
 .coin-cell{display:flex;flex-direction:column;align-items:flex-start;gap:0;min-width:0;overflow:hidden}
@@ -635,7 +589,18 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
     /* 5 explicit visible slots, ordered by CSS `order:` rules below */
     grid-template-columns:minmax(70px,1fr) 60px 44px 56px 24px !important;
     min-width:0 !important;
+    height:auto !important;
     gap:3px;padding:6px 6px;font-size:10px;
+  }
+  /* V8 ABACUS — neutralize the desktop absolute-coordinate system on phones.
+     The inline `left`/`width`/`position:absolute` baked into every cell by
+     terminal.js is overridden here (inline styles need !important to beat)
+     so the 5-slot mobile grid takes over cleanly. */
+  .thdr > *, .trow > *{
+    position:static !important;
+    left:auto !important;
+    width:auto !important;
+    height:auto !important;
   }
   /* Hide every column NOT in {coin, price, score, panic, toggle}.
      V7.4.9: also kill the trailing spacer so the 5-slot mobile grid
@@ -648,8 +613,7 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   .thdr > [data-col="c24"],    .trow > [data-col="c24"],
   .thdr > [data-col="c7d"],    .trow > [data-col="c7d"],
   .thdr > [data-col="qv"],     .trow > [data-col="qv"],
-  .thdr > [data-col="hot"],    .trow > [data-col="hot"],
-  .thdr > [data-col="spacer"], .trow > [data-col="spacer"]{display:none !important}
+  .thdr > [data-col="hot"],    .trow > [data-col="hot"]{display:none !important}
   /* Force visible cells back into inline-block context */
   .thdr > [data-col="coin"],  .trow > [data-col="coin"],
   .thdr > [data-col="price"], .trow > [data-col="price"],
@@ -1292,7 +1256,8 @@ html,body{overflow-x:hidden;max-width:100vw}
 .col-resize-handle{
   position:absolute;
   top:8%;bottom:8%;
-  right:-3px;                 /* straddle the cell seam */
+  right:0;                    /* V8 — inside the cell's right edge (cells are
+                                 overflow:hidden under the abacus layout) */
   width:6px;
   cursor:col-resize;
   z-index:6;

@@ -1599,28 +1599,30 @@ function renderList() {
       const v_c12 = _pct(d, '_c12', 'price_change_percentage_12h_in_currency','price_change_percentage_12h','percent_change_12h','c12');
       const v_c24 = _pct(d, '_c24', 'price_change_percentage_24h_in_currency','price_change_percentage_24h','percent_change_24h','c24');
       const v_c7d = _pct(d, '_c7d', 'price_change_percentage_7d_in_currency', 'price_change_percentage_7d', 'percent_change_7d', 'c7d');
+      // V8 ABACUS — every cell carries its raw pixel coordinate inline
+      // (`left:${px}px;width:${px}px`). Because the string is re-interpolated
+      // on every renderList() call, a WebSocket-driven innerHTML rebuild
+      // re-locks each cell to its exact X — zero layout drift.
+      const cs = (k) => _colStyle(k);
       const cellHTML = {
-        rank:   `<span data-col="rank" class="rn">${start + i + 1}</span>`,
-        coin:   `<div data-col="coin" class="coin-cell"><span class="csym">${escSym}${exchBadge}</span><span class="cnm">${escName}</span></div>`,
-        signal: `<span data-col="signal" class="sig-cell">${signalMarkup(s)}${divTag}${snipTag}</span>`,
-        score:  `<span data-col="score" data-cell="score" class="tr" style="color:${s.score>=6?'var(--grn)':'var(--txt2)'}"><b>${s.score}/10</b></span>`,
-        panic:  `<span data-col="panic" data-cell="panic" class="tr">${panicHTML}</span>`,
-        price:  `<span data-col="price" data-cell="price" class="tr">${safeMetric(price, fmt)}</span>`,
-        c1:     `<span data-col="c1"  data-cell="c1"  class="tr">${tfCell(v_c1)}</span>`,
-        c4:     `<span data-col="c4"  data-cell="c4"  class="tr">${tfCell(v_c4)}</span>`,
-        c12:    `<span data-col="c12" data-cell="c12" class="tr">${tfCell(v_c12)}</span>`,
-        c24:    `<span data-col="c24" data-cell="c24" class="tr">${tfCell(v_c24)}</span>`,
-        c7d:    `<span data-col="c7d" data-cell="c7d" class="tr">${tfCell(v_c7d)}</span>`,
-        qv:     `<span data-col="qv"  data-cell="qv"  class="tr">${safeMetric(qv, fmt)}</span>`,
-        hot:    `<span data-col="hot" class="tr" style="color:${hot>60?'var(--red)':'var(--txt2)'}"><b>${hot}</b></span>`,
-        // V7.4.9 — row-side mirror of the static spacer so the grid
-        // column count stays aligned with the header DOM.
-        spacer: `<span data-col="spacer" aria-hidden="true"></span>`,
+        rank:   `<span data-col="rank" class="rn" style="${cs('rank')}">${start + i + 1}</span>`,
+        coin:   `<div data-col="coin" class="coin-cell" style="${cs('coin')}"><span class="csym">${escSym}${exchBadge}</span><span class="cnm">${escName}</span></div>`,
+        signal: `<span data-col="signal" class="sig-cell" style="${cs('signal')}">${signalMarkup(s)}${divTag}${snipTag}</span>`,
+        score:  `<span data-col="score" data-cell="score" class="tr" style="${cs('score')}color:${s.score>=6?'var(--grn)':'var(--txt2)'}"><b>${s.score}/10</b></span>`,
+        panic:  `<span data-col="panic" data-cell="panic" class="tr" style="${cs('panic')}">${panicHTML}</span>`,
+        price:  `<span data-col="price" data-cell="price" class="tr" style="${cs('price')}">${safeMetric(price, fmt)}</span>`,
+        c1:     `<span data-col="c1"  data-cell="c1"  class="tr" style="${cs('c1')}">${tfCell(v_c1)}</span>`,
+        c4:     `<span data-col="c4"  data-cell="c4"  class="tr" style="${cs('c4')}">${tfCell(v_c4)}</span>`,
+        c12:    `<span data-col="c12" data-cell="c12" class="tr" style="${cs('c12')}">${tfCell(v_c12)}</span>`,
+        c24:    `<span data-col="c24" data-cell="c24" class="tr" style="${cs('c24')}">${tfCell(v_c24)}</span>`,
+        c7d:    `<span data-col="c7d" data-cell="c7d" class="tr" style="${cs('c7d')}">${tfCell(v_c7d)}</span>`,
+        qv:     `<span data-col="qv"  data-cell="qv"  class="tr" style="${cs('qv')}">${safeMetric(qv, fmt)}</span>`,
+        hot:    `<span data-col="hot" class="tr" style="${cs('hot')}color:${hot>60?'var(--red)':'var(--txt2)'}"><b>${hot}</b></span>`,
       };
       // Fallback: any key in _columnOrder that has no cellHTML entry
-      // (e.g. a future column added mid-session) gets an empty span
-      // so the grid layout doesn't desync.
-      const cells = _columnOrder.map(k => cellHTML[k] || `<span data-col="${_esc(k)}" aria-hidden="true"></span>`).join('');
+      // (e.g. a future column added mid-session) still gets its absolute
+      // coordinate so it lands on the wire instead of stacking at left:0.
+      const cells = _columnOrder.map(k => cellHTML[k] || `<span data-col="${_esc(k)}" style="${cs(k)}" aria-hidden="true"></span>`).join('');
       htmls.push(`<div class="trow${SEL===d.id?' sel':''}${s.score>=7?' alert-high':s.score>=6?' alert-med':''}" data-coin-id="${idAttr}">
         ${cells}
         <span class="trow-toggle" data-trow-toggle="1" aria-label="Expand">⋯</span>
@@ -1629,12 +1631,12 @@ function renderList() {
       console.error('[TERMINAL] Error rendering coin:', d, err.message);
       const fallbackId = _esc(String((d && d.id) || (d && d.symbol) || `row-${start + i}`));
       const fallbackCells = _columnOrder.map(k => {
+        const fcs = _colStyle(k);
         if (k === 'coin') {
-          return `<div data-col="coin" class="coin-cell"><span class="csym">${_esc(String((d && d.symbol) || 'N/A'))}</span><span class="cnm">${_esc(String((d && d.name) || 'Malformed row'))}</span></div>`;
+          return `<div data-col="coin" class="coin-cell" style="${fcs}"><span class="csym">${_esc(String((d && d.symbol) || 'N/A'))}</span><span class="cnm">${_esc(String((d && d.name) || 'Malformed row'))}</span></div>`;
         }
-        if (k === 'signal') return `<span data-col="signal" class="sig-cell">${emptySignal}</span>`;
-        if (k === 'spacer') return '<span data-col="spacer" aria-hidden="true"></span>';
-        return `<span data-col="${_esc(k)}" class="tr">${emptyData}</span>`;
+        if (k === 'signal') return `<span data-col="signal" class="sig-cell" style="${fcs}">${emptySignal}</span>`;
+        return `<span data-col="${_esc(k)}" class="tr" style="${fcs}">${emptyData}</span>`;
       }).join('');
       htmls.push(`<div class="trow" data-coin-id="${fallbackId}">
         ${fallbackCells}
@@ -4323,60 +4325,38 @@ const COLUMN_DEFS = {
   qv:     { label: '24H VOL', width: 90,     tip: '24h Quote Volume (USD)',                                                 align: 'right', dragOK: true  },
   hot:    { label: 'HOT',     width: 50,     tip: '',                                                                       align: 'right', dragOK: true,
             tooltip: 'Real-time attention and volatility tracking index based on immediate trading frequency spikes.' },
-  // ABACUS BEAD (spacer). A single 1fr grid track that absorbs all remaining
-  // horizontal slack. It is a FLUID bead on the wire — it may sit at ANY index
-  // in _columnOrder, splitting the row into a left group and a right group with
-  // a static void between them.
-  //   • Not draggable (dragOK:false) — the void itself can't be grabbed…
-  //   • …but it IS a drop neighbour: columns drop to its LEFT or RIGHT based on
-  //     the pointer vs. its center, so its position is fully fluid.
-  //   • Not resizable — renderHeader emits no .col-resize-handle.
-  //   • Exactly one instance is enforced at load (state normalization) and on
-  //     every reorder; its index is preserved, never re-pinned to the tail.
-  spacer: { label: '',        width: 'flex', tip: '',                                                                       align: 'left',  dragOK: false },
+  // V8 ABACUS — the `spacer` bead is gone. The grid that needed a 1fr
+  // slack-absorber no longer exists; columns float on raw pixel
+  // coordinates over the void, so there is nothing left to absorb.
 };
 // Default visual sequence. The mobile-only expand toggle is appended
 // AFTER this chain in DOM order and never participates in reorder.
-// V7.4.9: `spacer` always tails the list and the drop handler
-// re-pins it on every reorder, so it never drifts.
-const DEFAULT_COLUMN_ORDER = ['rank','coin','signal','score','panic','price','c1','c4','c12','c24','c7d','qv','hot','spacer'];
+const DEFAULT_COLUMN_ORDER = ['rank','coin','signal','score','panic','price','c1','c4','c12','c24','c7d','qv','hot'];
 const COLUMN_ORDER_STORAGE_KEY = 'swing_col_order_v73';
 const COLUMN_WIDTHS_STORAGE_KEY = 'swing_col_widths_v74';
 const MIN_COL_PX = 36;     // hard floor — narrower than this and the label gets ellipsised away.
 const MIN_COIN_PX = 90;    // flex absorber needs a useful minimum.
 
+// V8 ABACUS — `_columnOrder` no longer drives layout (raw pixel `left`
+// coordinates do that). It now only enumerates WHICH columns exist so the
+// renderers know what to paint. Visual sequence comes purely from
+// `_columnPositions`. The legacy `spacer` key is filtered out on load.
 let _columnOrder = (() => {
-  // STATE NORMALIZATION: guarantee EXACTLY ONE spacer while PRESERVING its
-  // position. The spacer is now a fluid bead on the wire (abacus layout) and
-  // may legitimately sit at any index, so we no longer force it to the tail —
-  // we only drop duplicate spacers, and append one solely if none exists.
-  const normalize = (arr) => {
-    const out = [];
-    let seen = false;
-    for (const k of arr) {
-      if (k === 'spacer') { if (seen) continue; seen = true; }
-      out.push(k);
-    }
-    if (!seen) out.push('spacer');
-    return out;
-  };
   try {
     const raw = localStorage.getItem(COLUMN_ORDER_STORAGE_KEY);
-    if (!raw) return normalize(DEFAULT_COLUMN_ORDER.slice());
+    if (!raw) return DEFAULT_COLUMN_ORDER.slice();
     const arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) return normalize(DEFAULT_COLUMN_ORDER.slice());
+    if (!Array.isArray(arr)) return DEFAULT_COLUMN_ORDER.slice();
     // Drop anything that doesn't map to a current COLUMN_DEFS entry —
-    // protects against a column being removed in a future sprint
-    // (e.g. V7.4.7's g1/g2/g3 ghosts, removed in V7.4.9) while the
-    // user still has the old key cached.
+    // this also purges the retired `spacer` key from caches written by
+    // any pre-V8 build.
     const cleaned = arr.filter(k => COLUMN_DEFS[k]);
     // Append any defs the saved order didn't know about so a new
-    // column added in a future release still shows up by default
-    // rather than silently disappearing.
+    // column added in a future release still shows up by default.
     const seen = new Set(cleaned);
     for (const k of DEFAULT_COLUMN_ORDER) if (!seen.has(k)) cleaned.push(k);
-    return normalize(cleaned.length ? cleaned : DEFAULT_COLUMN_ORDER.slice());
-  } catch { return normalize(DEFAULT_COLUMN_ORDER.slice()); }
+    return cleaned.length ? cleaned : DEFAULT_COLUMN_ORDER.slice();
+  } catch { return DEFAULT_COLUMN_ORDER.slice(); }
 })();
 
 let _columnWidths = (() => {
@@ -4399,6 +4379,27 @@ let _columnWidths = (() => {
   return out;
 })();
 
+// ─────────────────────────────────────────────────────────────
+// V8 ABACUS — ABSOLUTE PIXEL COORDINATE MAP.
+//
+// `_columnPositions` maps a column key directly to its `left` pixel
+// offset, e.g. { coin:0, price:180, signal:550, qv:650 }. This is the
+// SINGLE source of truth for horizontal placement. renderHeader /
+// renderList stamp every cell with an inline `left:${px}px` so a
+// WebSocket-driven innerHTML rebuild re-locks each cell to its exact
+// X-coordinate every frame — total immunity to re-render drift, and
+// 100% pixel-arbitrary placement (drop a column anywhere over the void
+// and it freezes precisely where the cursor was released).
+// ─────────────────────────────────────────────────────────────
+const COLUMN_POSITIONS_STORAGE_KEY = 'terminal.v7.columnPositions';
+const COLUMN_GAP_PX = 10; // default padding inserted between columns on first boot
+
+let _columnPositions = JSON.parse(localStorage.getItem(COLUMN_POSITIONS_STORAGE_KEY) || '{}');
+
+function _persistColumnPositions() {
+  try { localStorage.setItem(COLUMN_POSITIONS_STORAGE_KEY, JSON.stringify(_columnPositions)); } catch {}
+}
+
 function _persistColumnOrder() {
   try { localStorage.setItem(COLUMN_ORDER_STORAGE_KEY, JSON.stringify(_columnOrder)); } catch {}
 }
@@ -4416,64 +4417,65 @@ function _persistColumnWidths() {
   } catch {}
 }
 
-function _widthExpr(key) {
-  // V7.4.9 — spacer is a pure `1fr` with no minimum so it can
-  // shrink to zero on a narrow viewport without clamping any data
-  // column. (The old COIN-flex path used `minmax(MIN_COIN_PX, 1fr)`
-  // — that's kept as a defensive fallback for any FUTURE flex
-  // column that needs a floor.)
-  if (key === 'spacer') return 'minmax(100px, 1fr)';
+// V8 ABACUS — resolve a column's pixel WIDTH. User-resized widths in
+// `_columnWidths` win; otherwise fall back to the static COLUMN_DEFS
+// width, then a hard 80px default per the layout contract.
+function _colWidth(key) {
   const w = _columnWidths[key];
-  if (w === 'flex') return `minmax(${MIN_COIN_PX}px, 1fr)`;
+  if (Number.isFinite(w)) return Math.max(key === 'coin' ? MIN_COIN_PX : MIN_COL_PX, Math.round(w));
   const def = COLUMN_DEFS[key] || {};
-  const fallback = Number.isFinite(def.width) ? def.width : MIN_COL_PX;
-  const px = Math.max(key === 'coin' ? MIN_COIN_PX : MIN_COL_PX, Math.round(Number(w) || fallback));
-  return `${px}px`;
+  return Number.isFinite(def.width) ? def.width : 80;
 }
 
-function _gridTemplateFromOrder() {
-  // Trailing 0px slot is the mobile expand toggle; it always closes
-  // the row in DOM order so the mobile @media rule can show it as
-  // 24px without recalculating its position.
-  return _columnOrder.map(_widthExpr).join(' ') + ' 0px';
+// V8 ABACUS — resolve a column's pixel LEFT offset from the coordinate map.
+function _colLeft(key) {
+  const v = _columnPositions[key];
+  return Number.isFinite(v) ? Math.round(v) : 0;
 }
 
-function _applyGridTemplate() {
-  let el = document.getElementById('dynamic-cols');
-  if (!el) {
-    el = document.createElement('style');
-    el.id = 'dynamic-cols';
-    document.head.appendChild(el);
-  }
-  const tpl = _gridTemplateFromOrder();
-  // Desktop-only override; the mobile @media block keeps full control
-  // below 640px. `!important` defeats the static base rule in
-  // terminal.css so a user reorder always wins.
-  el.textContent = `@media(min-width:641px){
-    .scan-wrap .thdr, .scan-wrap .trow {
-      grid-template-columns: ${tpl} !important;
+// V8 ABACUS — inline style string baked into every cell's opening tag.
+function _colStyle(key) {
+  return `left:${_colLeft(key)}px;width:${_colWidth(key)}px;`;
+}
+
+// V8 ABACUS — BOOT INITIALIZATION. If `_columnPositions` carries no
+// coordinate for a column, lay it out left-to-right in DEFAULT_COLUMN_ORDER
+// — cumulative (width + COLUMN_GAP_PX) — so a first load (or a freshly
+// added column) starts neatly arranged rather than stacked at left:0.
+function _ensureColumnPositions() {
+  // Place in DEFAULT_COLUMN_ORDER first (the neat canonical arrangement),
+  // then sweep _columnOrder so any column the default list doesn't know
+  // about still lands on the wire rather than stacking at left:0.
+  const order = DEFAULT_COLUMN_ORDER.concat(_columnOrder.filter(k => !DEFAULT_COLUMN_ORDER.includes(k)));
+  let cursor = 0;
+  // Seed the running edge past anything already placed so new keys append
+  // to the right of the existing arrangement instead of overlapping it.
+  for (const k of order) {
+    if (Number.isFinite(_columnPositions[k])) {
+      cursor = Math.max(cursor, _columnPositions[k] + _colWidth(k) + COLUMN_GAP_PX);
     }
-  }`;
+  }
+  for (const k of order) {
+    if (!Number.isFinite(_columnPositions[k])) {
+      _columnPositions[k] = cursor;
+      cursor += _colWidth(k) + COLUMN_GAP_PX;
+    }
+  }
 }
 
-// V7.4 — Rebuild the header from _columnOrder. Each cell gets a
-// trailing absolute-positioned `.col-resize-handle` so the user can
-// drag the right edge to scale that column's pixel width directly.
-// The [?] button was retired in V7.4 — the PANIC header is now its
-// own clickable affordance (data-panic-help on the cell itself) so
-// the row stays visually quieter while the manual remains reachable.
+// V8 ABACUS — Rebuild the header from _columnOrder. Every cell is stamped
+// with an inline `left:${px}px;width:${px}px` from `_columnPositions` /
+// `_colWidth`, so the header floats on the same absolute coordinate grid as
+// the rows. Each cell still carries a trailing `.col-resize-handle` so the
+// user can drag the right edge to scale that column's pixel width.
+// The PANIC header is its own clickable affordance (data-panic-help).
 function renderHeader() {
   const hdr = document.querySelector('.thdr');
   if (!hdr) return;
+  _ensureColumnPositions();
   const cells = _columnOrder.map(k => {
     const def = COLUMN_DEFS[k];
     if (!def) return '';
-    // V7.4.9 — spacer: naked, no-drag, no-drop, no-resize, no-label.
-    // Just a 1fr grid track that absorbs every spare pixel on the
-    // right edge of the row.
-    if (k === 'spacer') {
-      return `<span data-col="spacer" class="thdr-spacer no-handle" aria-hidden="true"></span>`;
-    }
     const tipAttr = def.tip ? ` title="${_esc(def.tip)}"` : '';
     const dragAttr = def.dragOK ? ' data-sortable="true"' : '';
     const classes = [];
@@ -4486,11 +4488,11 @@ function renderHeader() {
     const tooltipAttr = def.tooltip ? ` data-tooltip="${_esc(def.tooltip)}"` : '';
     const panicAttr = k === 'panic' ? ' data-panic-help' : '';
     const hotTip = k === 'hot' ? ' data-hot-tip' : '';
-    // The resize handle is appended INSIDE the cell so the absolute-
-    // position anchor (the cell, which becomes position:relative via
-    // the .thdr > * rule) is correct on every reorder.
+    // The resize handle is appended INSIDE the cell; the cell is its own
+    // positioning context (it is itself position:absolute) so the handle
+    // anchors to the cell's right edge on every repaint.
     const handle = '<span class="col-resize-handle" data-resize aria-hidden="true"></span>';
-    return `<span data-col="${k}"${classAttr}${dragAttr}${tipAttr}${tooltipAttr}${panicAttr}${hotTip}>`
+    return `<span data-col="${k}"${classAttr}${dragAttr} style="${_colStyle(k)}"${tipAttr}${tooltipAttr}${panicAttr}${hotTip}>`
          + `${_esc(def.label)}${handle}`
          + `</span>`;
   }).join('');
@@ -4505,7 +4507,7 @@ function renderHeader() {
 let _isResizing = false;
 let _columnDrag = null;
 
-function _attachFluidColumnDnD() {
+function _attachColumnDnD() {
   const hdr = document.querySelector('.thdr');
   if (!hdr) return;
   hdr.querySelectorAll('[data-sortable="true"]').forEach(el => {
@@ -4513,67 +4515,43 @@ function _attachFluidColumnDnD() {
   });
 }
 
+// V8 ABACUS — DRAG PHYSICS: pure free placement.
+//
+// pointerdown : capture the initial mouse X and the column's initial
+//               `_columnPositions[key]` left offset.
+// pointermove : translate the dragged cell's inline `left` in real time by
+//               the raw mouse delta. Siblings are NEVER pushed around —
+//               the user moves the column with total freedom over the void.
+// pointerup   : read the final visual `left`, persist it into
+//               `_columnPositions[key]` + localStorage, then fire a single
+//               clean renderHeader() + renderList() so the row cells re-lock
+//               to the new X-coordinate. The column freezes EXACTLY where
+//               the cursor was released.
 function _onColumnPointerDown(e) {
   if (e.button !== 0 || _isResizing) return;
   if (e.target && e.target.closest && e.target.closest('[data-resize]')) return;
   const source = e.currentTarget;
   const key = source && source.dataset ? source.dataset.col : '';
-  if (!key || key === 'spacer' || !COLUMN_DEFS[key] || !COLUMN_DEFS[key].dragOK) return;
-
-  const hdr = source.closest('.thdr');
-  if (!hdr) return;
-  const items = Array.from(hdr.querySelectorAll('[data-col]'))
-    .filter(el => el.dataset.col && COLUMN_DEFS[el.dataset.col]);
-  const from = items.indexOf(source);
-  if (from < 0) return;
+  if (!key || !COLUMN_DEFS[key] || !COLUMN_DEFS[key].dragOK) return;
 
   e.preventDefault();
   try { source.setPointerCapture(e.pointerId); } catch {}
 
-  const srcRect = source.getBoundingClientRect();
   const startX = e.clientX;
-  const startY = e.clientY;
-  const slots = items.map((el, index) => {
-    const rect = el.getBoundingClientRect();
-    return {
-      el,
-      key: el.dataset.col,
-      index,
-      left: rect.left,
-      right: rect.right,
-      width: rect.width,
-      center: rect.left + rect.width / 2,
-    };
-  });
+  const startLeft = _colLeft(key);
 
-  const ghost = source.cloneNode(true);
-  ghost.classList.add('col-drag-ghost');
-  ghost.style.left = `${srcRect.left}px`;
-  ghost.style.top = `${srcRect.top}px`;
-  ghost.style.width = `${srcRect.width}px`;
-  ghost.style.height = `${srcRect.height}px`;
-  ghost.style.transform = 'translate3d(0,0,0)';
-  document.body.appendChild(ghost);
-
-  source.classList.add('col-drag-origin');
-  hdr.classList.add('col-sort-active');
+  source.classList.add('col-dragging');
   document.body.classList.add('col-sort-body');
 
   _columnDrag = {
-    hdr,
     source,
-    ghost,
-    items,
-    slots,
     key,
-    from,
-    to: from,
     startX,
-    startY,
+    startLeft,
+    curLeft: startLeft,
     pointerId: e.pointerId,
     raf: 0,
     lastX: e.clientX,
-    lastY: e.clientY,
   };
 
   document.addEventListener('pointermove', _onColumnPointerMove, { passive: false });
@@ -4586,44 +4564,13 @@ function _onColumnPointerMove(e) {
   if (!st) return;
   e.preventDefault();
   st.lastX = e.clientX;
-  st.lastY = e.clientY;
   if (st.raf) return;
   st.raf = requestAnimationFrame(() => {
     st.raf = 0;
-    _paintColumnDrag(st);
-  });
-}
-
-function _paintColumnDrag(st) {
-  const dx = st.lastX - st.startX;
-  const dy = st.lastY - st.startY;
-  st.ghost.style.transform = `translate3d(${dx}px,${dy}px,0)`;
-
-  // ABACUS COLLISION: the spacer is now a first-class bead on the wire, so it
-  // participates in the hit-test exactly like a data column. Walk EVERY slot in
-  // DOM order and compare the LIVE pointer X against each slot's center; the
-  // dragged column inserts before the first slot whose center the pointer
-  // hasn't reached. Because the spacer is a wide track, its center is the
-  // divider of the void — dropping left of it lands the column on the left
-  // group, right of it on the right group. Past everything → insert at the end.
-  let to = st.slots.length;
-  for (let i = 0; i < st.slots.length; i++) {
-    const slot = st.slots[i];
-    if (slot.index === st.from) continue;
-    if (st.lastX < slot.left + slot.width / 2) { to = slot.index; break; }
-  }
-  st.to = to;
-
-  // Preview: open a dragged-width gap at the insertion point. Siblings between
-  // the origin and the target slide by exactly the dragged column's width, so
-  // the visual gap mirrors the splice the drop handler will perform.
-  const draggedWidth = st.slots[st.from].width;
-  st.slots.forEach(slot => {
-    if (slot.index === st.from || slot.key === 'spacer') { slot.el.style.transform = ''; return; }
-    let tx = 0;
-    if (to > st.from && slot.index > st.from && slot.index < to) tx = -draggedWidth;
-    else if (to < st.from && slot.index >= to && slot.index < st.from) tx = draggedWidth;
-    slot.el.style.transform = tx ? `translateX(${tx}px)` : '';
+    // Raw pixel delta — clamp the left edge at 0 so a column can't be
+    // dragged off the left of the canvas, but otherwise total freedom.
+    st.curLeft = Math.max(0, st.startLeft + (st.lastX - st.startX));
+    st.source.style.left = `${st.curLeft}px`;
   });
 }
 
@@ -4632,59 +4579,32 @@ function _onColumnPointerUp(e) {
   if (!st) return;
   e.preventDefault();
   if (st.raf) cancelAnimationFrame(st.raf);
-  _paintColumnDrag(st);
+  // Final reconciliation of the delta in case the last rAF never fired.
+  st.curLeft = Math.max(0, st.startLeft + (st.lastX - st.startX));
 
   document.removeEventListener('pointermove', _onColumnPointerMove);
   document.removeEventListener('pointerup', _onColumnPointerUp);
   document.removeEventListener('pointercancel', _onColumnPointerUp);
   try { st.source.releasePointerCapture(st.pointerId); } catch {}
 
-  st.items.forEach(el => { el.style.transform = ''; });
-  st.source.classList.remove('col-drag-origin');
-  st.hdr.classList.remove('col-sort-active');
+  st.source.classList.remove('col-dragging');
   document.body.classList.remove('col-sort-body');
-  if (st.ghost && st.ghost.parentNode) st.ghost.parentNode.removeChild(st.ghost);
 
-  // ABACUS SPLICE: the spacer is a positional bead — it stays wherever it sits
-  // in _columnOrder, so we reorder the FULL array (spacer included) and never
-  // re-pin it to the tail. `st.to` is an insertion index in the ORIGINAL full
-  // index space (0..length, where `length` means "after the last slot").
-  // Order of operations is critical:
-  //   1. Clamp `to` against the ORIGINAL length — so a drop can reach the very
-  //      end, not stall one slot short of it.
-  //   2. Remove the dragged key. This shifts everything after `from` left by 1.
-  //   3. Decrement `to` when it sat past the origin, then re-clamp. The splice
-  //      lands exactly on the previewed slot — which may be to the LEFT or the
-  //      RIGHT of the spacer, leaving a fluid void in the middle.
-  const keys = _columnOrder.slice();
-  const from = keys.indexOf(st.key);
-  if (from >= 0) {
-    let to = Math.max(0, Math.min(keys.length, st.to));
-    const moved = keys.splice(from, 1)[0];
-    if (to > from) to -= 1;
-    to = Math.max(0, Math.min(keys.length, to));
-    keys.splice(to, 0, moved);
-    if (keys.join('|') !== _columnOrder.join('|')) {
-      _columnOrder = keys;
-      _persistColumnOrder();
-      _applyGridTemplate();
-      renderHeader();
-      try { renderList(); } catch {}
-    }
-  }
+  // Freeze the column at the EXACT released pixel coordinate.
+  _columnPositions[st.key] = Math.round(st.curLeft);
+  _persistColumnPositions();
+  renderHeader();
+  try { renderList(); } catch {}
+
   _columnDrag = null;
 }
 
-function _attachColumnDnD() {
-  _attachFluidColumnDnD();
-}
-
-// V7.4 - Mouse-driven column resize.
-// One mousedown listener per `.col-resize-handle`. Captures the
-// cell's starting width, then on every mousemove projects (startW +
-// dx) into _columnWidths[key] and re-emits the grid template. The
-// row container reads the same template via _gridTemplateFromOrder,
-// so the render path stays unchanged — no per-row inline-style work.
+// V8 - Mouse-driven column resize.
+// One mousedown listener per `.col-resize-handle`. Captures the cell's
+// starting width, then on every mousemove projects (startW + dx) into
+// _columnWidths[key] and live-updates the dragged header cell's inline
+// width. On pointer-up a single renderHeader() + renderList() bakes the
+// new width into every cell across the absolute coordinate grid.
 function _attachColumnResize() {
   const hdr = document.querySelector('.thdr');
   if (!hdr) return;
@@ -4719,12 +4639,11 @@ function _attachColumnResize() {
       const onMove = (ev) => {
         const dx = ev.clientX - startX;
         const next = Math.max(minPx, Math.round(startW + dx));
-        // Dragging COIN's right edge converts it from 'flex' to a
-        // fixed pixel width — once the user has resized it, that's
-        // their explicit choice. Resetting layout (window.resetLayout)
-        // restores the original flex behavior.
         _columnWidths[key] = next;
-        _applyGridTemplate();
+        // V8 ABACUS — width is baked inline per cell, so live-update the
+        // dragged HEADER cell's width directly. The rows pick up the new
+        // width on the single re-render at pointer-up.
+        cell.style.width = `${next}px`;
       };
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
@@ -4733,6 +4652,10 @@ function _attachColumnResize() {
         document.body.style.userSelect = '';
         cell.classList.remove('col-resizing');
         _persistColumnWidths();
+        // Re-stamp header + rows so the new width is baked into every
+        // cell's inline style across the absolute coordinate grid.
+        renderHeader();
+        try { renderList(); } catch {}
         // Tiny debounce before clearing the flag so a stray pointer
         // queued during the same gesture stays blocked.
         setTimeout(() => { _isResizing = false; }, 0);
@@ -4824,21 +4747,24 @@ function _initHeaderTooltips() {
 // before the header DOM is in the document — renderHeader() looks up
 // the element lazily and bails if absent.
 function initColumnDnD() {
-  _applyGridTemplate();
+  _ensureColumnPositions(); // V8 — seed absolute coordinates on first boot
   renderHeader();
   _initHeaderTooltips(); // V7.4 hover popups — idempotent
 }
 
 // Reset action exposed for the user-facing "reset layout" footer link
-// so a broken order / oversized column can be flushed without devtools.
+// so a broken order / oversized column / scattered abacus can be flushed
+// without devtools.
 window.resetLayout = function() {
   try {
     localStorage.removeItem(COLUMN_ORDER_STORAGE_KEY);
     localStorage.removeItem(COLUMN_WIDTHS_STORAGE_KEY); // V7.4
+    localStorage.removeItem(COLUMN_POSITIONS_STORAGE_KEY); // V8 abacus
   } catch {}
   _columnOrder = DEFAULT_COLUMN_ORDER.slice();
   for (const k of Object.keys(COLUMN_DEFS)) _columnWidths[k] = COLUMN_DEFS[k].width;
-  _applyGridTemplate();
+  _columnPositions = {};
+  _ensureColumnPositions();
   renderHeader();
   try { renderList(); } catch {}
 };
