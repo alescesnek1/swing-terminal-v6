@@ -3894,6 +3894,13 @@ function renderPaperBot(state) {
 // — no row reflow, no full renderList.
 // ─────────────────────────────────────────────────────────────
 const STREAM_DEFAULT_URL = 'wss://swing-terminal-ingest.fly.dev/api/stream-markets';
+// LEGACY / DEAD INFRA: the Fly.io PaperBot/market-stream WebSocket
+// (swing-terminal-ingest.fly.dev) is decommissioned. It also forwarded the
+// Supabase JWT in the URL query string (?token=...), which Firefox leaked
+// into the console on connection errors. It is disabled at runtime here.
+// Market data still flows via the /api/markets REST poll. Do not re-enable
+// without standing the server back up and fixing the token leak first.
+const LEGACY_FLY_STREAM_ENABLED = false;
 const STREAM_BACKOFF_MIN_MS = 1000;
 const STREAM_BACKOFF_MAX_MS = 30000;
 const STREAM_FALLBACK_POLL_MS = 5 * 60 * 1000; // 5min — long-tail safety net
@@ -4123,6 +4130,25 @@ function _applyTick(frame) {
 }
 
 async function connectStream() {
+  if (!LEGACY_FLY_STREAM_ENABLED) {
+    // Dead infra: no token URL is built and no WebSocket is opened — keep
+    // market data fresh through the REST poll, and show the bot as stopped.
+    console.warn('[Stream] Legacy Fly.io WebSocket disabled. Using REST /api/markets only.');
+    renderPaperBot({
+      status: 'stopped',
+      balance: 0,
+      realizedPnl: 0,
+      unrealizedPnl: 0,
+      winRate: 0,
+      openPositions: [],
+      recentTrades: [],
+      cautionMultiplier: 1,
+      ts: Date.now(),
+      message: 'Legacy Fly.io stream disabled'
+    });
+    _enableAggressivePoll();
+    return;
+  }
   if (window.STREAM_DISABLED) return;
   if (_streamSocket && (_streamSocket.readyState === 0 || _streamSocket.readyState === 1)) return;
 
