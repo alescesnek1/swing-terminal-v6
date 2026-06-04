@@ -1,63 +1,75 @@
-// ─────────────────────────────────────────────────────────────
-// Swing Terminal V6 — Paper Trading Engine (24/7 sandbox)
-//
-// Subscribes to the same `tick` event on the Aggregator that powers
-// alerts and the client stream. Runs a basic momentum-breakout entry
-// rule per symbol, manages open positions with TP / SL / time-stop,
-// keeps a ledger of closed trades, and feeds a self-tuning
-// `cautionMultiplier` learning loop that tightens the entry trigger
-// after losses and decays it after wins.
-//
-// The bot lives on the server, ticks independently of every client
-// connection, and exposes its state two ways:
-//   • `pb` event (consumed by stream.js → fanned to WS clients).
-//   • `getState()` / `getLedger()` (consumed by the REST polling
-//     fallback wired into health.js).
-//
-// Frame contract (matches client expectations):
-//   { t:'pb', status, balance, equity, pnl, pnlPct, winRate,
-//     wins, losses, openCount, cautionMultiplier, openPositions,
-//     recentTrades, ts }
-// ─────────────────────────────────────────────────────────────
-
 import { EventEmitter } from 'node:events';
+import crypto from 'node:crypto';
+import ccxt from 'ccxt';
+
+const envBool = (key, fallback = false) => {
+  const raw = process.env[key];
+  if (raw == null || raw === '') return fallback;
+  return /^(1|true|yes|on)$/i.test(String(raw));
+};
+
+const envNum = (key, fallback) => {
+  const n = Number(process.env[key]);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const DEFAULTS = {
-  startingBalance: 10_000,
-  riskPerTradeUsd: 250,
+  liveExecution: envBool('PAPERBOT_LIVE', false),
+  startingBalance: envNum('PAPERBOT_BANKROLL_USD', 10),
+  maxBankrollUsd: envNum('PAPERBOT_MAX_BANKROLL_USD', 10),
+  minOrderNotionalUsd: envNum('PAPERBOT_MIN_NOTIONAL_USD', 5.10),
+  maxOrderNotionalUsd: envNum('PAPERBOT_MAX_ORDER_NOTIONAL_USD', 5.10),
+  feePct: envNum('PAPERBOT_FEE_PCT', 0.001),
   takeProfitPctMin: 0.10,
   takeProfitPctMax: 0.20,
   stopLossPct: 0.03,
   maxHoldMs: 30 * 60 * 1000,
   cooldownMs: 20 * 60 * 1000,
   signalLockMs: 6 * 60 * 60 * 1000,
-  minQuoteVolumeUsd: 1000000,
-  maxOpenPositions: 6,
+  minQuoteVolumeUsd: 1_000_000,
+  maxOpenPositions: 1,
   ledgerCap: 200,
   recentTradesCap: 25,
-  // Momentum window: last N ticks held per symbol. Breakout fires
-  // when the latest price clears the rolling max by `entryEdgePct *
-  // cautionMultiplier`. A tight window keeps the bot reactive on
-  // 50ms tick cadence without needing kline buffers.
-  priceWindow: 36,
+  priceWindow: 64,
+  volumeWindow: 20,
+  atrWindow: 14,
+  atrNormalWindow: 20,
   flushMinPct: 0.0035,
-  // Learning loop. Loss → tighten; win → relax. Clamped so the bot
-  // never freezes (mult ≤ MAX) and never trades on noise (mult ≥ MIN).
-  cautionOnLoss: 1.18,
-  cautionOnWin: 0.93,
-  cautionMin: 0.5,
-  cautionMax: 4.0,
-  // State broadcast cadence. Decoupled from the tick fan-out so a
-  // 50ms tick storm doesn't drown the WS in pb frames.
+  volumeAnomalyRatio: 2.5,
+  maxAtrExpansion: 3,
+  maxSpreadPct: 0.005,
+  maxConsecutiveStopLosses: 3,
+  circuitPauseMs: 30 * 60 * 1000,
   broadcastIntervalMs: 2000,
+  entryPostOnlyOffsetPct: 0.0005,
+  entryFillTimeoutMs: 45_000,
+  orderPollMs: 1500,
+  http429PauseMs: 60_000,
+  ollamaEnabled: envBool('PAPERBOT_OLLAMA', true),
+  ollamaUrl: process.env.OLLAMA_URL || 'http://127.0.0.1:11434/api/generate',
+  ollamaModel: process.env.OLLAMA_MODEL || 'llama3',
+  ollamaTimeoutMs: envNum('OLLAMA_TIMEOUT_MS', 6000),
+  advisoryCap: 80,
+};
+
+const CORRELATION_CLASS = {
+  BTC: 'MAJOR_BTC_ETH',
+  ETH: 'MAJOR_BTC_ETH',
+  SOL: 'L1_BETA',
+  AVAX: 'L1_BETA',
+  NEAR: 'L1_BETA',
+  SUI: 'L1_BETA',
+  APT: 'L1_BETA',
+  DOGE: 'MEME',
+  SHIB: 'MEME',
+  PEPE: 'MEME',
+  WIF: 'MEME',
+  BONK: 'MEME',
 };
 
 export class PaperBot extends EventEmitter {
-  /**
-   * @param {object} opts
-   * @param {import('./aggregator.js').Aggregator} opts.aggregator
-   * @param {Partial<typeof DEFAULTS>} [opts.config]
-   */
   constructor({ aggregator, config = {} } = {}) {
     super();
     if (!aggregator) throw new Error('PaperBot: aggregator is required');
@@ -65,30 +77,36 @@ export class PaperBot extends EventEmitter {
 
     this.aggregator = aggregator;
     this.cfg = { ...DEFAULTS, ...config };
+    this.liveExecution = !!this.cfg.liveExecution;
 
     this.startedAt = 0;
     this.status = 'idle';
-    this.balance = this.cfg.startingBalance;
+    this.pauseUntil = 0;
+    this.balance = Math.min(this.cfg.startingBalance, this.cfg.maxBankrollUsd);
     this.realizedPnl = 0;
     this.wins = 0;
     this.losses = 0;
+    this.consecutiveStopLosses = 0;
     this.cautionMultiplier = 1.0;
+    this.exchange = null;
+    this.exchangeReady = false;
+    this.rateLimitedUntil = 0;
+    this.emergencyActive = false;
 
-    /** @type {Map<string, { side:'long', symbol:string, entryPrice:number, qty:number, notional:number, tp:number, sl:number, openedAt:number, lastPrice:number }>} */
     this.openPositions = new Map();
-    /** @type {Array<object>} closed-trade ledger, newest first, capped. */
     this.ledger = [];
+    this.advisoryLogs = [];
 
-    /** Per-symbol rolling price window for breakout detection. */
     this._priceBuf = new Map();
-    /** Per-symbol cooldown after a closed trade. */
     this._cooldown = new Map();
-    /** Consumed wick signal ids. Prevents historical signal reuse. */
     this._consumedSignals = new Map();
-    /** Last seen price per symbol — feeds equity mark-to-market. */
+    this._inflightSignals = new Map();
     this._lastPrice = new Map();
+    this._lastQuoteVolume = new Map();
+    this._marketSymbolCache = new Map();
+    this._lastOrderBookCheck = new Map();
 
-    this._tickListener = (frame) => this._onTick(frame);
+    this._tickListener = (frame) => { void this._onTick(frame); };
     this._broadcastTimer = null;
   }
 
@@ -96,127 +114,144 @@ export class PaperBot extends EventEmitter {
     if (this.status === 'running') return;
     this.startedAt = Date.now();
     this.status = 'running';
+    if (this.liveExecution) {
+      void this._initExchange().catch((err) => {
+        this.status = 'paused';
+        this.pauseUntil = Date.now() + this.cfg.circuitPauseMs;
+        this._advise('risk', 'Live exchange initialization failed; bot paused', { error: err.message });
+        this._broadcastState();
+      });
+    }
     this.aggregator.on('tick', this._tickListener);
-    this._broadcastTimer = setInterval(
-      () => this._broadcastState(),
-      this.cfg.broadcastIntervalMs,
-    );
-    console.log(
-      `[PAPERBOT] Started — balance $${this.balance.toFixed(2)}, ` +
-      `risk $${this.cfg.riskPerTradeUsd}/trade, ` +
-      `TP ${(this.cfg.takeProfitPctMin * 100).toFixed(2)}-${(this.cfg.takeProfitPctMax * 100).toFixed(2)}% / ` +
-      `SL ${(this.cfg.stopLossPct * 100).toFixed(2)}%`,
-    );
+    this._broadcastTimer = setInterval(() => this._broadcastState(), this.cfg.broadcastIntervalMs);
+    this._advise('system', 'Liquidation Flush Hunter online', {
+      mode: this.liveExecution ? 'live_binance_spot' : 'paper',
+      bankrollUsd: this.balance,
+      minNotionalUsd: this.cfg.minOrderNotionalUsd,
+      stopLossPct: this.cfg.stopLossPct,
+    });
     this._broadcastState();
   }
 
   stop() {
-    if (this.status !== 'running') return;
+    if (this.status !== 'running' && this.status !== 'paused') return;
     this.aggregator.off('tick', this._tickListener);
     if (this._broadcastTimer) clearInterval(this._broadcastTimer);
     this._broadcastTimer = null;
     this.status = 'stopped';
-    console.log(
-      `[PAPERBOT] Stopped — closed ${this.ledger.length} trades, ` +
-      `PnL $${this.realizedPnl.toFixed(2)}, ` +
-      `W/L ${this.wins}/${this.losses}, ` +
-      `caution ${this.cautionMultiplier.toFixed(2)}`,
-    );
+    this._broadcastState();
   }
 
-  // ─────────────────────────────────────────────────────────
-  // Tick handling
-  // ─────────────────────────────────────────────────────────
-  _onTick(frame) {
+  async _initExchange() {
+    if (this.exchangeReady) return;
+    const apiKey = process.env.BINANCE_API_KEY || '';
+    const secret = process.env.BINANCE_API_SECRET || '';
+    if (!apiKey || !secret) throw new Error('PaperBot live mode requires BINANCE_API_KEY and BINANCE_API_SECRET');
+    this.exchange = new ccxt.binance({
+      apiKey,
+      secret,
+      enableRateLimit: true,
+      options: { defaultType: 'spot' },
+    });
+    await this.exchange.loadMarkets();
+    this.exchangeReady = true;
+  }
+
+  async _onTick(frame) {
     if (!frame || frame.t !== 'tick') return;
-    const sym = String(frame.s || '').toUpperCase();
+    const sym = String(frame.s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
     const px = Number(frame.p);
     if (!sym || !Number.isFinite(px) || px <= 0) return;
-    const now = Date.now();
-    const qv = Number(frame.qv);
 
+    const now = Date.now();
+    const quoteVolume = Number(frame.qv);
+    const point = this._pushMarketPoint(sym, px, quoteVolume, now);
     this._lastPrice.set(sym, px);
 
-    // Update / close any position on this symbol first — exits take
-    // priority over entries so a flip-flopping tick never enters a new
-    // trade on the same frame that the prior one stops out.
     const pos = this.openPositions.get(sym);
     if (pos) {
-      this._pushPrice(sym, px, now);
       pos.lastPrice = px;
-      this._maybeClose(pos, px, now);
+      await this._maybeClose(pos, px, now);
       return;
     }
 
-    if (!this._isTradableMarket(sym, qv, now)) return;
-    this._pushPrice(sym, px, now);
-    this._maybeOpen(sym, px, now);
+    if (this.status !== 'running' || this.emergencyActive) return;
+    if (this.pauseUntil > now) return;
+    if (this.rateLimitedUntil > now) return;
+    if (!this._isTradableMarket(sym, quoteVolume, now)) return;
+    await this._maybeOpen(sym, px, point, now);
   }
 
-  _pushPrice(sym, px, ts) {
+  _pushMarketPoint(sym, price, quoteVolume, ts) {
     let buf = this._priceBuf.get(sym);
     if (!buf) {
       buf = [];
       this._priceBuf.set(sym, buf);
     }
-    buf.push({ price: px, ts });
+
+    const prevQv = this._lastQuoteVolume.get(sym);
+    const qv = Number.isFinite(quoteVolume) && quoteVolume > 0 ? quoteVolume : null;
+    const volumeDelta = qv != null && Number.isFinite(prevQv) ? Math.max(0, qv - prevQv) : 0;
+    if (qv != null) this._lastQuoteVolume.set(sym, qv);
+
+    const prev = buf[buf.length - 1];
+    const trPct = prev && prev.price > 0 ? Math.abs(price - prev.price) / prev.price : 0;
+    const point = { price, ts, qv, volumeDelta, trPct };
+    buf.push(point);
     if (buf.length > this.cfg.priceWindow) buf.shift();
+    return point;
   }
 
-  // ─────────────────────────────────────────────────────────
-  // Entry rule — momentum breakout
-  // ─────────────────────────────────────────────────────────
-  _maybeOpen(sym, px, ts) {
+  async _maybeOpen(sym, px, point, ts) {
     if (this.openPositions.size >= this.cfg.maxOpenPositions) return;
-
-    const cdUntil = this._cooldown.get(sym) || 0;
-    if (Date.now() < cdUntil) return;
+    if ((this._cooldown.get(sym) || 0) > ts) return;
 
     const buf = this._priceBuf.get(sym);
-    if (!buf || buf.length < 4) return;
+    if (!buf || buf.length < Math.max(24, this.cfg.volumeWindow + 2)) return;
 
-    const signal = this._detectFlush(sym, buf);
+    const signal = this._detectFlush(sym, buf, point);
     if (!signal) return;
+    if (signal.side !== 'long') return this._reject(signal, 'spot_short_disabled');
     if (this._isSignalConsumed(signal.signalKey)) return;
+    if (this._inflightSignals.has(signal.signalKey)) return;
 
-    const notional = Math.min(this.cfg.riskPerTradeUsd / this.cfg.stopLossPct, this.balance * 0.5);
-    if (notional <= 0) return;
+    const correlation = this._correlationClass(sym);
+    for (const p of this.openPositions.values()) {
+      if (p.side === signal.side && p.correlationClass === correlation) {
+        return this._reject(signal, `correlation_guard:${correlation}`);
+      }
+    }
+
+    const micro = await this._preflightMicrostructure(sym, px);
+    if (micro.block) return this._reject(signal, micro.reason, micro);
+
+    const notional = this._sizedNotional(micro.minNotionalUsd);
+    if (notional <= 0) return this._reject(signal, 'bankroll_or_min_notional_failed', { notional });
+
     this._consumeSignal(signal.signalKey);
-    const qty = notional / px;
-    const sideMul = signal.side === 'short' ? -1 : 1;
-    const tpPct = this._takeProfitPctForSignal(signal);
-    const slPct = 0.03;
-
-    const pos = {
-      side: signal.side,
-      symbol: sym,
-      entryPrice: px,
-      qty,
-      notional,
-      tp: px * (1 + sideMul * tpPct),
-      sl: px * (1 - sideMul * slPct),
-      tpPct,
-      slPct,
-      signalKey: signal.signalKey,
-      reason: signal.side === 'short' ? 'liquidation_flush_short' : 'liquidation_flush_long',
-      openedAt: ts,
-      lastPrice: px,
-    };
-    this.openPositions.set(sym, pos);
-
-    console.log(
-      `[PAPERBOT] OPEN ${signal.side.toUpperCase()} ${sym} @ ${px.toFixed(6)} ` +
-      `qty=${qty.toFixed(4)} tp=${pos.tp.toFixed(6)} sl=${pos.sl.toFixed(6)} ` +
-      `caution=${this.cautionMultiplier.toFixed(2)}`,
-    );
-    this._broadcastState();
+    this._inflightSignals.set(signal.signalKey, ts + 60_000);
+    try {
+      await this._openPosition({ ...signal, symbol: sym, price: px, notional, correlationClass: correlation, micro }, ts);
+    } finally {
+      this._inflightSignals.delete(signal.signalKey);
+    }
   }
 
   _detectFlush(sym, buf) {
     const n = Array.isArray(buf) ? buf.length : 0;
-    if (n < 4) return null;
+    if (n < Math.max(24, this.cfg.volumeWindow + 2)) return null;
     const last = this._bufPrice(buf[n - 1]);
-    if (!Number.isFinite(last) || last <= 0) return null;
+    if (!(last > 0)) return null;
+
+    const volumeSlice = buf.slice(Math.max(0, n - this.cfg.volumeWindow - 1), n - 1);
+    const avgVol = this._avg(volumeSlice.map((p) => Number(p.volumeDelta) || 0).filter((v) => v > 0));
+    const currentVol = Number(buf[n - 1].volumeDelta) || Number(buf[n - 2].volumeDelta) || 0;
+    if (!(avgVol > 0) || currentVol < avgVol * this.cfg.volumeAnomalyRatio) {
+      return this._softReject(sym, 'volume_anomaly_failed', { currentVol, avgVol });
+    }
+
+    const atrGuard = this._atrGuard(buf);
+    if (atrGuard.block) return this._softReject(sym, atrGuard.reason, atrGuard);
 
     let maxStep = 0;
     for (let i = Math.max(1, n - 12); i < n; i++) {
@@ -243,42 +278,488 @@ export class PaperBot extends EventEmitter {
       const stabilized = Math.abs(reactionPct) <= mag * 0.18;
       if (retrace < 0.08 && !stabilized) continue;
 
-      const strength = 21 + mag * 300 + Math.min(8, retrace * 10);
-      const required = 16 * Math.sqrt(Math.max(this.cfg.cautionMin, this.cautionMultiplier));
+      const strength = 21 + mag * 300 + Math.min(8, retrace * 10) + Math.min(10, currentVol / Math.max(avgVol, 1));
+      const required = 16 * Math.sqrt(Math.max(this.cfg.cautionMin || 0.75, this.cautionMultiplier));
       if (strength < required) continue;
       const wickTs = this._bufTs(buf[i], i);
       const baseTs = this._bufTs(buf[i - 1], i - 1);
       const signalRoot = [sym, wickTs, baseTs, Math.round(wick * 1e8), Math.round(base * 1e8)].join(':');
+      const meta = { magnitude: mag, strength, volumeRatio: currentVol / avgVol, atrRatio: atrGuard.ratio };
 
       if (flushPct < 0 && last > wick && last <= base * 1.006) {
-        const candidate = { side: 'long', magnitude: mag, strength, signalKey: signalRoot + ':long' };
+        const candidate = { side: 'long', signalKey: signalRoot + ':long', ...meta };
         if (!best || candidate.strength > best.strength) best = candidate;
       } else if (flushPct > 0 && last < wick && last >= base * 0.994) {
-        const candidate = { side: 'short', magnitude: mag, strength, signalKey: signalRoot + ':short' };
+        const candidate = { side: 'short', signalKey: signalRoot + ':short', ...meta };
         if (!best || candidate.strength > best.strength) best = candidate;
       }
     }
     return best;
   }
 
+  _softReject(sym, reason, extra = {}) {
+    const key = `${sym}:${reason}:${Math.floor(Date.now() / 60_000)}`;
+    if (!this._isSignalConsumed(key)) {
+      this._consumeSignal(key, Date.now(), 60_000);
+      this._advise('reject', `Signal rejected: ${reason}`, { symbol: sym, reason, ...extra });
+    }
+    return null;
+  }
+
+  _atrGuard(buf) {
+    const ranges = buf.map((p) => Number(p.trPct) || 0).filter((v) => v > 0);
+    const current = this._avg(ranges.slice(-this.cfg.atrWindow));
+    const normal = this._avg(ranges.slice(-(this.cfg.atrWindow + this.cfg.atrNormalWindow), -this.cfg.atrWindow));
+    const ratio = normal > 0 ? current / normal : 1;
+    return {
+      block: normal > 0 && ratio > this.cfg.maxAtrExpansion,
+      reason: 'atr_extreme_chop',
+      currentAtrPct: current,
+      normalAtrPct: normal,
+      ratio,
+    };
+  }
+
+  async _preflightMicrostructure(sym, px) {
+    const cached = this._lastOrderBookCheck.get(sym);
+    if (cached && Date.now() - cached.ts < 5000) return cached;
+    let out = { block: false, spreadPct: 0, minNotionalUsd: this.cfg.minOrderNotionalUsd };
+    if (!this.exchangeReady && this.liveExecution) await this._initExchange();
+    if (!this.exchange) {
+      this.exchange = new ccxt.binance({ enableRateLimit: true, options: { defaultType: 'spot' } });
+      await this.exchange.loadMarkets();
+    }
+    try {
+      const marketSymbol = await this._resolveMarketSymbol(sym);
+      const market = this.exchange.markets[marketSymbol] || {};
+      const minCost = Number(market?.limits?.cost?.min);
+      const book = await this._safeExchangeCall(() => this.exchange.fetchOrderBook(marketSymbol, 5));
+      const bid = Number(book?.bids?.[0]?.[0]) || 0;
+      const ask = Number(book?.asks?.[0]?.[0]) || 0;
+      const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : px;
+      const spreadPct = bid > 0 && ask > bid ? (ask - bid) / mid : 0;
+      out = {
+        block: spreadPct > this.cfg.maxSpreadPct,
+        reason: 'spread_guard',
+        marketSymbol,
+        bid,
+        ask,
+        spreadPct,
+        minNotionalUsd: Math.max(this.cfg.minOrderNotionalUsd, Number.isFinite(minCost) ? minCost : 0),
+      };
+    } catch (err) {
+      out = { block: true, reason: 'liquidity_preflight_failed', error: err.message, minNotionalUsd: this.cfg.minOrderNotionalUsd };
+    }
+    out.ts = Date.now();
+    this._lastOrderBookCheck.set(sym, out);
+    return out;
+  }
+
+  async _openPosition(signal, ts) {
+    const sideMul = 1;
+    const tpPct = this._takeProfitPctForSignal(signal);
+    const grossTpPct = tpPct + this.cfg.feePct * 2;
+    const slPct = this.cfg.stopLossPct;
+    const entryPrice = signal.price;
+    const notional = signal.notional;
+    const qty = notional / entryPrice;
+    const pos = {
+      side: 'long',
+      symbol: signal.symbol,
+      marketSymbol: signal.micro.marketSymbol || `${signal.symbol}/USDT`,
+      entryPrice,
+      qty,
+      notional,
+      tp: entryPrice * (1 + sideMul * grossTpPct),
+      sl: entryPrice * (1 - sideMul * slPct),
+      tpPct,
+      grossTpPct,
+      slPct,
+      signalKey: signal.signalKey,
+      reason: 'liquidation_flush_long',
+      openedAt: ts,
+      lastPrice: entryPrice,
+      correlationClass: signal.correlationClass,
+      mode: this.liveExecution ? 'live' : 'paper',
+      feesPct: this.cfg.feePct,
+    };
+
+    if (this.liveExecution) {
+      const live = await this._executeLiveEntry(pos, signal);
+      Object.assign(pos, live);
+    }
+
+    this.openPositions.set(pos.symbol, pos);
+    this._advise('executed', `Executed deterministic LONG ${pos.symbol}`, {
+      symbol: pos.symbol,
+      mode: pos.mode,
+      notional,
+      exchangeRiskUsd: notional * slPct,
+      sl: pos.sl,
+      tp: pos.tp,
+      signal,
+    });
+    this._broadcastState();
+  }
+
+  async _executeLiveEntry(pos) {
+    await this._initExchange();
+    const symbol = pos.marketSymbol;
+    const entryLimit = pos.entryPrice * (1 - this.cfg.entryPostOnlyOffsetPct);
+    const amount = this._amountToPrecision(symbol, pos.qty);
+    const price = this._priceToPrecision(symbol, entryLimit);
+    const clientOrderId = this._clientOrderId('lfh_entry', pos.signalKey);
+
+    const entryOrder = await this._safeExchangeCall(() => this.exchange.createLimitBuyOrder(symbol, amount, price, {
+      newClientOrderId: clientOrderId,
+    }));
+
+    const filled = await this._waitForFill(symbol, entryOrder.id, this.cfg.entryFillTimeoutMs);
+    if (!filled.filled) {
+      await this._safeExchangeCall(() => this.exchange.cancelOrder(entryOrder.id, symbol)).catch(() => {});
+      throw new Error(`entry_not_filled:${symbol}`);
+    }
+
+    const filledQty = this._amountToPrecision(symbol, filled.amount || amount);
+    const average = Number(filled.average) || pos.entryPrice;
+    pos.entryPrice = average;
+    pos.qty = Number(filledQty);
+    pos.notional = pos.qty * average;
+    pos.sl = average * (1 - this.cfg.stopLossPct);
+    pos.tp = average * (1 + pos.grossTpPct);
+
+    const stop = await this._safeExchangeCall(() => this.exchange.createOrder(
+      symbol,
+      'STOP_LOSS',
+      'sell',
+      this._amountToPrecision(symbol, pos.qty),
+      undefined,
+      {
+        stopPrice: this._priceToPrecision(symbol, pos.sl),
+        newClientOrderId: this._clientOrderId('lfh_stop', pos.signalKey),
+      },
+    ));
+
+    let tpOrder = null;
+    try {
+      tpOrder = await this._safeExchangeCall(() => this.exchange.createLimitSellOrder(
+        symbol,
+        this._amountToPrecision(symbol, pos.qty),
+        this._priceToPrecision(symbol, pos.tp),
+        { newClientOrderId: this._clientOrderId('lfh_tp', pos.signalKey) },
+      ));
+    } catch (err) {
+      this._advise('system', 'TP limit order not placed; deterministic TP monitor remains active', {
+        symbol: pos.symbol,
+        reason: err.message,
+      });
+    }
+
+    return {
+      entryOrderId: entryOrder.id,
+      stopOrderId: stop.id,
+      tpOrderId: tpOrder && tpOrder.id,
+      entryClientOrderId: clientOrderId,
+    };
+  }
+
+  async _waitForFill(symbol, orderId, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const order = await this._safeExchangeCall(() => this.exchange.fetchOrder(orderId, symbol));
+      const status = String(order?.status || '').toLowerCase();
+      const filled = Number(order?.filled) || 0;
+      if (status === 'closed' || filled > 0) {
+        return { filled: true, amount: filled || Number(order?.amount), average: Number(order?.average) || Number(order?.price) };
+      }
+      if (status === 'canceled' || status === 'rejected' || status === 'expired') break;
+      await sleep(this.cfg.orderPollMs);
+    }
+    return { filled: false };
+  }
+
+  async _maybeClose(pos, px, ts) {
+    let reason = null;
+    pos.tpPct = Math.max(this.cfg.takeProfitPctMin, Math.min(this.cfg.takeProfitPctMax, Number(pos.tpPct) || this.cfg.takeProfitPctMin));
+    pos.grossTpPct = pos.tpPct + this.cfg.feePct * 2;
+    pos.slPct = this.cfg.stopLossPct;
+    pos.tp = pos.entryPrice * (1 + pos.grossTpPct);
+    pos.sl = pos.entryPrice * (1 - pos.slPct);
+
+    if (px >= pos.tp) reason = 'tp';
+    else if (px <= pos.sl) reason = 'sl';
+    else if (ts - pos.openedAt >= this.cfg.maxHoldMs) reason = 'time';
+    if (!reason) return;
+
+    if (this.liveExecution) {
+      if (reason === 'tp' && pos.tpOrderId) {
+        await this._maybeFinalizeLiveOrder(pos, pos.tpOrderId, 'tp', ts);
+      } else if (reason === 'sl' && pos.stopOrderId) {
+        await this._maybeFinalizeLiveOrder(pos, pos.stopOrderId, 'sl', ts);
+      } else {
+        await this._closeLivePosition(pos, reason, ts);
+      }
+    } else {
+      await this._finalizeClose(pos, reason === 'sl' ? pos.sl : px, reason, ts);
+    }
+  }
+
+  async _maybeFinalizeLiveOrder(pos, orderId, reason, ts) {
+    await this._initExchange();
+    const order = await this._safeExchangeCall(() => this.exchange.fetchOrder(orderId, pos.marketSymbol));
+    const status = String(order?.status || '').toLowerCase();
+    const filled = Number(order?.filled) || 0;
+    if (status !== 'closed' && filled < Number(pos.qty) * 0.99) return;
+
+    if (reason === 'tp' && pos.stopOrderId) {
+      await this._safeExchangeCall(() => this.exchange.cancelOrder(pos.stopOrderId, pos.marketSymbol)).catch(() => {});
+    }
+    if (reason === 'sl' && pos.tpOrderId) {
+      await this._safeExchangeCall(() => this.exchange.cancelOrder(pos.tpOrderId, pos.marketSymbol)).catch(() => {});
+    }
+
+    const exit = Number(order?.average) || Number(order?.price) || (reason === 'sl' ? pos.sl : pos.tp);
+    await this._finalizeClose(pos, exit, reason, ts, { orderId });
+  }
+
+  async _closeLivePosition(pos, reason, ts) {
+    await this._initExchange();
+    const symbol = pos.marketSymbol;
+    if (pos.tpOrderId) await this._safeExchangeCall(() => this.exchange.cancelOrder(pos.tpOrderId, symbol)).catch(() => {});
+    if (reason !== 'sl' && pos.stopOrderId) await this._safeExchangeCall(() => this.exchange.cancelOrder(pos.stopOrderId, symbol)).catch(() => {});
+    const order = await this._safeExchangeCall(() => this.exchange.createMarketSellOrder(
+      symbol,
+      this._amountToPrecision(symbol, pos.qty),
+      { newClientOrderId: this._clientOrderId(`lfh_exit_${reason}`, pos.signalKey) },
+    ));
+    const exit = Number(order?.average) || Number(order?.price) || pos.lastPrice || pos.entryPrice;
+    await this._finalizeClose(pos, exit, reason, ts, { orderId: order?.id });
+  }
+
+  async _finalizeClose(pos, exitPrice, reason, ts, extra = {}) {
+    const pnlPctGross = ((exitPrice - pos.entryPrice) / pos.entryPrice) * 100;
+    const grossPnl = (pnlPctGross / 100) * pos.notional;
+    const fees = pos.notional * this.cfg.feePct * 2;
+    const pnl = grossPnl - fees;
+
+    this.balance = Math.min(this.cfg.maxBankrollUsd, this.balance + pnl);
+    this.realizedPnl += pnl;
+    const win = pnl > 0;
+    if (win) {
+      this.wins++;
+      this.consecutiveStopLosses = 0;
+    } else {
+      this.losses++;
+      if (reason === 'sl') this.consecutiveStopLosses++;
+    }
+    this._adjustCaution(win);
+
+    const closed = {
+      symbol: pos.symbol,
+      side: pos.side,
+      entryPrice: pos.entryPrice,
+      exitPrice,
+      qty: pos.qty,
+      notional: pos.notional,
+      pnl,
+      pnlPct: pnlPctGross,
+      fees,
+      reason,
+      openedAt: pos.openedAt,
+      closedAt: ts,
+      holdMs: ts - pos.openedAt,
+      signalKey: pos.signalKey,
+      mode: pos.mode,
+      ...extra,
+    };
+    this.ledger.unshift(closed);
+    if (this.ledger.length > this.cfg.ledgerCap) this.ledger.length = this.cfg.ledgerCap;
+
+    this.openPositions.delete(pos.symbol);
+    this._cooldown.set(pos.symbol, Date.now() + this.cfg.cooldownMs);
+    this._consumeSignal(pos.signalKey);
+    this._priceBuf.set(pos.symbol, []);
+
+    if (this.consecutiveStopLosses >= this.cfg.maxConsecutiveStopLosses) {
+      this.pauseUntil = Date.now() + this.cfg.circuitPauseMs;
+      this.status = 'paused';
+      this._advise('risk', 'Circuit breaker: 3 consecutive stop-losses; bot paused 30 minutes', {
+        pauseUntil: this.pauseUntil,
+      });
+    }
+
+    this._advise('closed', `Closed ${pos.symbol} ${reason.toUpperCase()}`, closed);
+    this._broadcastState();
+  }
+
+  async emergencyCloseAll({ source = 'unknown' } = {}) {
+    this.emergencyActive = true;
+    this.status = 'emergency';
+    const now = Date.now();
+    const report = { source, ts: now, cancelled: [], closed: [], errors: [] };
+
+    for (const pos of [...this.openPositions.values()]) {
+      try {
+        if (this.liveExecution) {
+          await this._initExchange();
+          if (pos.tpOrderId) {
+            await this._safeExchangeCall(() => this.exchange.cancelOrder(pos.tpOrderId, pos.marketSymbol)).catch((e) => report.errors.push(e.message));
+            report.cancelled.push(pos.tpOrderId);
+          }
+          if (pos.stopOrderId) {
+            await this._safeExchangeCall(() => this.exchange.cancelOrder(pos.stopOrderId, pos.marketSymbol)).catch((e) => report.errors.push(e.message));
+            report.cancelled.push(pos.stopOrderId);
+          }
+          const order = await this._safeExchangeCall(() => this.exchange.createMarketSellOrder(
+            pos.marketSymbol,
+            this._amountToPrecision(pos.marketSymbol, pos.qty),
+            { newClientOrderId: this._clientOrderId('lfh_emergency', `${pos.signalKey}:${now}`) },
+          ));
+          const exit = Number(order?.average) || Number(order?.price) || pos.lastPrice || pos.entryPrice;
+          await this._finalizeClose(pos, exit, 'emergency', now, { emergencySource: source, orderId: order?.id });
+          report.closed.push(pos.symbol);
+        } else {
+          const exit = this._lastPrice.get(pos.symbol) || pos.lastPrice || pos.entryPrice;
+          await this._finalizeClose(pos, exit, 'emergency', now, { emergencySource: source });
+          report.closed.push(pos.symbol);
+        }
+      } catch (err) {
+        report.errors.push(`${pos.symbol}:${err.message}`);
+      }
+    }
+
+    this.status = 'paused';
+    this.pauseUntil = Date.now() + this.cfg.circuitPauseMs;
+    this._advise('risk', 'EMERGENCY_CLOSE_ALL completed', report);
+    this._broadcastState();
+    return { ...report, flat: this.openPositions.size === 0 };
+  }
+
+  _sizedNotional(minNotionalUsd) {
+    const min = Math.max(this.cfg.minOrderNotionalUsd, Number(minNotionalUsd) || 0);
+    const max = Math.min(this.cfg.maxOrderNotionalUsd, this.cfg.maxBankrollUsd, this.balance);
+    if (max < min) return 0;
+    return Math.min(max, Math.max(min, this.cfg.minOrderNotionalUsd));
+  }
+
   _takeProfitPctForSignal(signal) {
-    const min = 0.10;
-    const max = 0.20;
-    const mag = Number(signal && signal.magnitude) || 0;
+    const mag = Number(signal?.magnitude) || 0;
     const scale = Math.max(0, Math.min(1, mag / 0.035));
-    return min + (max - min) * scale;
+    return this.cfg.takeProfitPctMin + (this.cfg.takeProfitPctMax - this.cfg.takeProfitPctMin) * scale;
   }
 
-  // ─────────────────────────────────────────────────────────
-  // Exit rule — TP / SL / time stop
-  // ─────────────────────────────────────────────────────────
-  _bufPrice(point) {
-    return Number(point && typeof point === 'object' ? point.price : point);
+  async _resolveMarketSymbol(base) {
+    const key = String(base || '').toUpperCase();
+    if (this._marketSymbolCache.has(key)) return this._marketSymbolCache.get(key);
+    if (!this.exchange) {
+      this.exchange = new ccxt.binance({ enableRateLimit: true, options: { defaultType: 'spot' } });
+      await this.exchange.loadMarkets();
+    }
+    const candidates = [`${key}/USDT`, `${key}/USDC`, `${key}/FDUSD`];
+    const found = candidates.find((s) => this.exchange.markets[s]?.active);
+    if (!found) throw new Error(`spot_market_not_found:${key}`);
+    this._marketSymbolCache.set(key, found);
+    return found;
   }
 
-  _bufTs(point, fallback) {
-    const ts = Number(point && typeof point === 'object' ? point.ts : 0);
-    return Number.isFinite(ts) && ts > 0 ? ts : fallback;
+  async _safeExchangeCall(fn) {
+    try {
+      return await fn();
+    } catch (err) {
+      const code = Number(err?.status || err?.code);
+      const msg = String(err?.message || '');
+      const rateLimitClass = ccxt.RateLimitExceeded;
+      const ddosClass = ccxt.DDoSProtection;
+      const isRateLimited = code === 429
+        || /429|rate limit|Too Many Requests/i.test(msg)
+        || (typeof rateLimitClass === 'function' && err instanceof rateLimitClass)
+        || (typeof ddosClass === 'function' && err instanceof ddosClass);
+      if (isRateLimited) {
+        this.rateLimitedUntil = Date.now() + this.cfg.http429PauseMs;
+        this._advise('risk', 'HTTP 429/rate-limit guard: trading paused temporarily', {
+          rateLimitedUntil: this.rateLimitedUntil,
+          message: msg,
+        });
+      }
+      throw err;
+    }
+  }
+
+  _amountToPrecision(symbol, amount) {
+    return Number(this.exchange.amountToPrecision(symbol, amount));
+  }
+
+  _priceToPrecision(symbol, price) {
+    return Number(this.exchange.priceToPrecision(symbol, price));
+  }
+
+  _clientOrderId(prefix, key) {
+    const digest = crypto.createHash('sha256').update(String(key)).digest('hex').slice(0, 18);
+    return `${prefix}_${digest}`.slice(0, 32);
+  }
+
+  _reject(signal, reason, extra = {}) {
+    this._consumeSignal(signal.signalKey);
+    this._advise('reject', `Signal rejected: ${reason}`, { signal, reason, ...extra });
+  }
+
+  _advise(type, message, context = {}) {
+    const evt = {
+      id: `bot_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      ts: Date.now(),
+      type,
+      message,
+      context: this._compactContext(context),
+    };
+    this.advisoryLogs.unshift(evt);
+    if (this.advisoryLogs.length > this.cfg.advisoryCap) this.advisoryLogs.length = this.cfg.advisoryCap;
+    void this._ollamaExplain(evt);
+  }
+
+  async _ollamaExplain(evt) {
+    if (!this.cfg.ollamaEnabled) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.cfg.ollamaTimeoutMs);
+    try {
+      const prompt = JSON.stringify({
+        role: 'quant_analyst',
+        rule: 'Explain only. Never recommend or place trades.',
+        event: evt,
+        state: this._compactContext(this.getState()),
+      });
+      const res = await fetch(this.cfg.ollamaUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: this.cfg.ollamaModel,
+          prompt,
+          stream: false,
+          options: { temperature: 0.2, num_predict: 80 },
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const text = String(data?.response || '').trim().replace(/\s+/g, ' ').slice(0, 600);
+      if (text) evt.analysis = text;
+      this._broadcastState();
+    } catch {
+      // Ollama is advisory only; execution never depends on it.
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  _compactContext(obj) {
+    try {
+      return JSON.parse(JSON.stringify(obj, (_k, v) => {
+        if (typeof v === 'number') return Number.isFinite(v) ? Math.round(v * 1e8) / 1e8 : null;
+        if (typeof v === 'string') return v.slice(0, 300);
+        return v;
+      }));
+    } catch {
+      return {};
+    }
   }
 
   _isTradableMarket(sym, quoteVolumeUsd, now = Date.now()) {
@@ -300,105 +781,41 @@ export class PaperBot extends EventEmitter {
     return /(?:USD|USDT|USDC|DAI|EUR|JPY|GBP|CHF|AUD|CAD)$/.test(s);
   }
 
+  _correlationClass(sym) {
+    const s = String(sym || '').toUpperCase();
+    return CORRELATION_CLASS[s] || `SINGLE_${s}`;
+  }
+
   _isSignalConsumed(signalKey, now = Date.now()) {
     if (!signalKey) return true;
     this._pruneConsumedSignals(now);
     return (this._consumedSignals.get(signalKey) || 0) > now;
   }
 
-  _consumeSignal(signalKey, now = Date.now()) {
+  _consumeSignal(signalKey, now = Date.now(), ttl = this.cfg.signalLockMs) {
     if (!signalKey) return;
-    this._consumedSignals.set(signalKey, now + this.cfg.signalLockMs);
+    this._consumedSignals.set(signalKey, now + ttl);
   }
 
   _pruneConsumedSignals(now = Date.now()) {
     for (const [key, until] of this._consumedSignals.entries()) {
       if (until <= now) this._consumedSignals.delete(key);
     }
+    for (const [key, until] of this._inflightSignals.entries()) {
+      if (until <= now) this._inflightSignals.delete(key);
+    }
   }
 
-  _maybeClose(pos, px, ts) {
-    let reason = null;
-    const sideMul = pos.side === 'short' ? -1 : 1;
-    pos.slPct = 0.03;
-    pos.sl = pos.entryPrice * (1 - sideMul * 0.03);
-    pos.tpPct = Math.max(0.10, Math.min(0.20, Number(pos.tpPct) || this.cfg.takeProfitPctMin));
-    pos.tp = pos.entryPrice * (1 + sideMul * pos.tpPct);
-
-    if (pos.side === 'short') {
-      if (px <= pos.tp) reason = 'tp';
-      else if (px >= pos.sl) reason = 'sl';
-    } else if (px >= pos.tp) reason = 'tp';
-    else if (px <= pos.sl) reason = 'sl';
-    else if (ts - pos.openedAt >= this.cfg.maxHoldMs) reason = 'time';
-    if (!reason) return;
-
-    const effectiveExit = reason === 'sl' ? pos.sl : px;
-    const pnlPct = sideMul * ((effectiveExit - pos.entryPrice) / pos.entryPrice) * 100;
-    const pnl = (pnlPct / 100) * pos.notional;
-    this.balance += pnl;
-    this.realizedPnl += pnl;
-
-    const win = pnl > 0;
-    if (win) this.wins++; else this.losses++;
-    this._adjustCaution(win);
-
-    const closed = {
-      symbol: pos.symbol,
-      side: pos.side,
-      entryPrice: pos.entryPrice,
-      exitPrice: effectiveExit,
-      qty: pos.qty,
-      notional: pos.notional,
-      pnl,
-      pnlPct,
-      reason,
-      openedAt: pos.openedAt,
-      closedAt: ts,
-      holdMs: ts - pos.openedAt,
-      cautionAtClose: this.cautionMultiplier,
-      signalKey: pos.signalKey,
-    };
-    this.ledger.unshift(closed);
-    if (this.ledger.length > this.cfg.ledgerCap) this.ledger.length = this.cfg.ledgerCap;
-
-    this.openPositions.delete(pos.symbol);
-    this._cooldown.set(pos.symbol, Date.now() + this.cfg.cooldownMs);
-    this._consumeSignal(pos.signalKey);
-    this._priceBuf.set(pos.symbol, []);
-
-    console.log(
-      `[PAPERBOT] CLOSE ${pos.symbol} ${reason.toUpperCase()} ` +
-      `@ ${effectiveExit.toFixed(6)} pnl=$${pnl.toFixed(2)} (${pnlPct.toFixed(2)}%) ` +
-      `bal=$${this.balance.toFixed(2)} W/L=${this.wins}/${this.losses} ` +
-      `caution=${this.cautionMultiplier.toFixed(2)}`,
-    );
-
-    this._broadcastState();
-  }
-
-  // ─────────────────────────────────────────────────────────
-  // Learning loop — tighten on loss, relax on win, clamped.
-  // ─────────────────────────────────────────────────────────
   _adjustCaution(win) {
-    const next = win
-      ? this.cautionMultiplier * this.cfg.cautionOnWin
-      : this.cautionMultiplier * this.cfg.cautionOnLoss;
-    this.cautionMultiplier = Math.max(
-      this.cfg.cautionMin,
-      Math.min(this.cfg.cautionMax, next),
-    );
+    const next = win ? this.cautionMultiplier * 0.93 : this.cautionMultiplier * 1.18;
+    this.cautionMultiplier = Math.max(0.5, Math.min(4, next));
   }
 
-  // ─────────────────────────────────────────────────────────
-  // State + broadcast
-  // ─────────────────────────────────────────────────────────
   _unrealizedPnl() {
     let u = 0;
     for (const p of this.openPositions.values()) {
       const px = this._lastPrice.get(p.symbol) || p.lastPrice || p.entryPrice;
-      const sideMul = p.side === 'short' ? -1 : 1;
-      u += sideMul * ((px - p.entryPrice) / p.entryPrice) * p.notional;
+      u += ((px - p.entryPrice) / p.entryPrice) * p.notional;
     }
     return u;
   }
@@ -414,8 +831,7 @@ export class PaperBot extends EventEmitter {
     const openPositions = [];
     for (const p of this.openPositions.values()) {
       const px = this._lastPrice.get(p.symbol) || p.lastPrice || p.entryPrice;
-      const sideMul = p.side === 'short' ? -1 : 1;
-      const currentPnlPct = p.entryPrice > 0 ? sideMul * ((px - p.entryPrice) / p.entryPrice) * 100 : 0;
+      const currentPnlPct = p.entryPrice > 0 ? ((px - p.entryPrice) / p.entryPrice) * 100 : 0;
       const currentPnl = (currentPnlPct / 100) * p.notional;
       openPositions.push({
         symbol: p.symbol,
@@ -430,7 +846,7 @@ export class PaperBot extends EventEmitter {
         tpPrice: p.tp,
         slPrice: p.sl,
         tpPct: p.tpPct,
-        slPct: 0.03,
+        slPct: p.slPct,
         pnl: currentPnl,
         pnlPct: currentPnlPct,
         currentPnl,
@@ -438,12 +854,16 @@ export class PaperBot extends EventEmitter {
         reason: p.reason,
         openedAt: p.openedAt,
         ageMs: Date.now() - p.openedAt,
+        mode: p.mode,
+        stopOrderId: p.stopOrderId,
       });
     }
 
     return {
       t: 'pb',
-      status: this.status,
+      mode: this.liveExecution ? 'live_binance_spot' : 'paper',
+      status: this.pauseUntil > Date.now() && this.status === 'paused' ? 'paused' : this.status,
+      pauseUntil: this.pauseUntil,
       startedAt: this.startedAt,
       uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,
       startingBalance: this.cfg.startingBalance,
@@ -455,12 +875,20 @@ export class PaperBot extends EventEmitter {
       unrealizedPnl: unrealized,
       wins: this.wins,
       losses: this.losses,
+      consecutiveStopLosses: this.consecutiveStopLosses,
       totalClosed,
       winRate,
       openCount: this.openPositions.size,
       cautionMultiplier: this.cautionMultiplier,
+      risk: {
+        minOrderNotionalUsd: this.cfg.minOrderNotionalUsd,
+        stopLossPct: this.cfg.stopLossPct,
+        maxExchangeRiskUsd: this.cfg.minOrderNotionalUsd * this.cfg.stopLossPct,
+        feePct: this.cfg.feePct,
+      },
       openPositions,
       recentTrades: this.ledger.slice(0, this.cfg.recentTradesCap),
+      advisoryLogs: this.advisoryLogs.slice(0, 30),
       ts: Date.now(),
     };
   }
@@ -475,5 +903,19 @@ export class PaperBot extends EventEmitter {
     } catch (e) {
       console.warn('[PAPERBOT] broadcast failed:', e && e.message);
     }
+  }
+
+  _bufPrice(point) {
+    return Number(point && typeof point === 'object' ? point.price : point);
+  }
+
+  _bufTs(point, fallback) {
+    const ts = Number(point && typeof point === 'object' ? point.ts : 0);
+    return Number.isFinite(ts) && ts > 0 ? ts : fallback;
+  }
+
+  _avg(arr) {
+    if (!Array.isArray(arr) || !arr.length) return 0;
+    return arr.reduce((a, b) => a + b, 0) / arr.length;
   }
 }

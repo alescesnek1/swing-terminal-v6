@@ -1466,8 +1466,10 @@ async function fetchData() {
       });
     }
 
-    try { paperBotInstance.processMarkets(rawData); }
-    catch (e) { console.warn('[PAPERBOT] local engine failed:', e && e.message); }
+    if (window.LOCAL_PAPERBOT_ENABLED === true && !window.__serverPaperBotSeen) {
+      try { paperBotInstance.processMarkets(rawData); }
+      catch (e) { console.warn('[PAPERBOT] local engine failed:', e && e.message); }
+    }
 
     live = rawData;
     SRC = 'BINANCE-LIVE';
@@ -3331,6 +3333,7 @@ async function doRefresh() {
 // ─────────────────────────────────────────────────────────────
 const PB_LEDGER_DOM_CAP = 50;
 const _pbRowKeys = new Set(); // de-dupe by closedAt|symbol|pnl
+const _pbAdvisoryKeys = new Set();
 
 function _pbFmtUsd(v) {
   const n = Number(v) || 0;
@@ -3393,6 +3396,56 @@ function _pbTradeKey(trade) {
     trade && trade.exitPrice != null ? trade.exitPrice : '',
     trade && trade.pnl != null ? trade.pnl : '',
   ].join('|');
+}
+
+function _pbEnsureAnalystPanel() {
+  const view = document.getElementById('view-bot') || document.getElementById('v-bot');
+  if (!view) return null;
+  let panel = document.getElementById('pb-analyst-feed');
+  if (panel) return panel;
+  panel = document.createElement('div');
+  panel.id = 'pb-analyst-feed';
+  panel.className = 'pb-analyst-feed';
+  panel.innerHTML =
+    '<div class="pb-analyst-feed__head">'
+    + '<span class="pb-analyst-feed__title">QUANT ANALYST</span>'
+    + '<span class="pb-analyst-feed__meta" id="pb-analyst-count">0 logs</span>'
+    + '</div>'
+    + '<div class="pb-analyst-feed__list" id="pb-analyst-list"></div>';
+  const ledger = view.querySelector('.bot-ledger-wrap');
+  if (ledger) view.insertBefore(panel, ledger);
+  else view.appendChild(panel);
+  return panel;
+}
+
+function _pbRenderAnalystFeed(state) {
+  const logs = Array.isArray(state && state.advisoryLogs) ? state.advisoryLogs : [];
+  const panel = _pbEnsureAnalystPanel();
+  if (!panel) return;
+  const count = document.getElementById('pb-analyst-count');
+  const list = document.getElementById('pb-analyst-list');
+  if (count) count.textContent = logs.length + ' logs';
+  if (!list) return;
+  if (!logs.length) {
+    list.innerHTML = '<div class="pb-analyst-empty">Waiting for deterministic bot events.</div>';
+    return;
+  }
+  list.innerHTML = logs.slice(0, 8).map((evt) => {
+    const type = String(evt.type || 'system').toLowerCase();
+    const ts = _pbFmtTime(evt.ts);
+    const text = evt.analysis || evt.message || 'Bot event';
+    const ctx = evt.context && evt.context.reason ? ' · ' + evt.context.reason : '';
+    const id = String(evt.id || evt.ts || text);
+    if (!_pbAdvisoryKeys.has(id)) {
+      _pbAdvisoryKeys.add(id);
+      try { LiveFeed.push(text, 'ai', { source: 'PaperBot Quant Analyst' }); } catch {}
+    }
+    return '<div class="pb-analyst-item pb-analyst-item--' + _esc(type) + '">'
+      + '<span class="pb-analyst-item__ts">' + _esc(ts) + '</span>'
+      + '<span class="pb-analyst-item__type">' + _esc(type.toUpperCase()) + '</span>'
+      + '<span class="pb-analyst-item__msg">' + _esc(text + ctx) + '</span>'
+      + '</div>';
+  }).join('');
 }
 
 // ── TRADE RECEIPT: PnL sparkline renderer (pure Canvas 2D API) ──
@@ -3681,7 +3734,9 @@ function renderPaperBot(state) {
   const statusEl = document.getElementById('pb-status');
   if (statusEl) {
     let txt, klass;
-    if (state.status === 'stopped') { txt = 'STOPPED'; klass = 'pb-status-stopped'; }
+    if (state.status === 'emergency') { txt = 'EMERGENCY'; klass = 'pb-status-stopped'; }
+    else if (state.status === 'paused') { txt = 'PAUSED'; klass = 'pb-status-stopped'; }
+    else if (state.status === 'stopped') { txt = 'STOPPED'; klass = 'pb-status-stopped'; }
     else if (openCount > 0) { txt = 'IN TRADE (' + openCount + ')'; klass = 'pb-status-intrade'; }
     else { txt = 'SEARCHING'; klass = 'pb-status-searching'; }
     let statusText = document.getElementById('pb-status-text') || statusEl.querySelector('.pb-status-text');
@@ -3731,6 +3786,7 @@ function renderPaperBot(state) {
   [cautionCard, cautionEl, cautionHintEl].forEach((el) => { if (el) el.title = cautionTitle; });
 
   _pbSetText('pb-balance', _pbFmtBalance(state.balance) + ' balance');
+  _pbRenderAnalystFeed(state);
 
   const ledger = document.getElementById('pb-ledger');
   if (!ledger) return;
@@ -3838,11 +3894,60 @@ const STREAM_DEFAULT_URL = 'wss://swing-terminal-ingest.fly.dev/api/stream-marke
 const STREAM_BACKOFF_MIN_MS = 1000;
 const STREAM_BACKOFF_MAX_MS = 30000;
 const STREAM_FALLBACK_POLL_MS = 5 * 60 * 1000; // 5min — long-tail safety net
+const PAPERBOT_EMERGENCY_PATH = '/api/paperbot/emergency-close';
 let _streamSocket = null;
 let _streamBackoff = STREAM_BACKOFF_MIN_MS;
 let _streamReconnectTimer = null;
 let _streamClosedByUs = false;
+let _paperbotKillSwitchSent = false;
 const _SYMBOL_INDEX = new Map(); // upper(base) -> DATA[] index
+
+function _paperbotRestBase() {
+  const explicit = window.PAPERBOT_REST_URL || window.INGEST_REST_URL || '';
+  if (explicit) return explicit.replace(/\/+$/, '');
+  const ws = window.STREAM_URL || STREAM_DEFAULT_URL;
+  return String(ws)
+    .replace(/^wss:\/\//i, 'https://')
+    .replace(/^ws:\/\//i, 'http://')
+    .replace(/\/api\/stream-markets.*$/i, '');
+}
+
+function _paperbotEmergencyCloseAll(source) {
+  if (_paperbotKillSwitchSent) return;
+  _paperbotKillSwitchSent = true;
+  const url = _paperbotRestBase() + PAPERBOT_EMERGENCY_PATH;
+  const payload = JSON.stringify({
+    t: 'EMERGENCY_CLOSE_ALL',
+    source: source || 'terminal',
+    visibilityState: document.visibilityState || 'unknown',
+    ts: Date.now(),
+  });
+  try {
+    if (navigator.sendBeacon) {
+      const blob = new Blob([payload], { type: 'application/json' });
+      if (navigator.sendBeacon(url, blob)) return;
+    }
+  } catch {}
+  try {
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+      keepalive: true,
+      cache: 'no-store',
+    }).catch(() => {});
+  } catch {}
+}
+
+function _wirePaperbotSessionKillSwitch() {
+  if (window.__paperbotKillSwitchWired) return;
+  window.__paperbotKillSwitchWired = true;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') _paperbotEmergencyCloseAll('visibilitychange:hidden');
+  }, { capture: true });
+  window.addEventListener('beforeunload', () => _paperbotEmergencyCloseAll('beforeunload'), { capture: true });
+  window.addEventListener('pagehide', () => _paperbotEmergencyCloseAll('pagehide'), { capture: true });
+}
 
 function _rebuildSymbolIndex() {
   _SYMBOL_INDEX.clear();
@@ -3988,8 +4093,10 @@ function _applyTick(frame) {
       _updateDetailPanel(d, newPrice, prevPrice, prevPanic);
     }
 
-    try { paperBotInstance.processMarkets([d]); }
-    catch (e) { console.warn('[PAPERBOT] tick engine failed:', e && e.message); }
+    if (window.LOCAL_PAPERBOT_ENABLED === true && !window.__serverPaperBotSeen) {
+      try { paperBotInstance.processMarkets([d]); }
+      catch (e) { console.warn('[PAPERBOT] tick engine failed:', e && e.message); }
+    }
   } catch (e) {
     // Frame processing must never throw — a bad payload from upstream
     // should drop the frame, not poison the rest of the stream.
@@ -4040,9 +4147,10 @@ async function connectStream() {
     try { frame = JSON.parse(ev.data); } catch { return; }
     if (!frame || typeof frame !== 'object') return;
     if (frame.t === 'tick') return _applyTick(frame);
-    // LocalPaperBot owns the Bot Intelligence panel; ignore legacy
-    // server-side PaperBot frames if an old stream still emits them.
-    if (frame.t === 'pb') return;
+    if (frame.t === 'pb') {
+      window.__serverPaperBotSeen = true;
+      return renderPaperBot(frame);
+    }
     if (frame.t === 'ping') {
       try { sock.send('{"t":"pong"}'); } catch {}
       return;
@@ -4156,6 +4264,7 @@ async function initTerminalApp() {
   initColumnDnD();           // V7.3 — drag-to-reorder header
   initPanicManual();         // V7.3 — [?] info modal
   initHotnessTooltip();
+  _wirePaperbotSessionKillSwitch();
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
   fetchBinancePairs();
   await doRefresh();

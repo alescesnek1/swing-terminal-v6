@@ -24,10 +24,17 @@ export function startHealthServer({ port = 8080, statusFn, paperBot }) {
   // The endpoints are read-only and emit only public sandbox data.
   app.use('/api/paperbot', (_req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.setHeader('Cache-Control', 'no-store');
+    if (_req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
     next();
   });
+
+  app.use('/api/paperbot', express.json({ type: '*/*', limit: '16kb' }));
 
   // ── Liveness: "Is the process alive?" ──
   app.get('/healthz', (_req, res) => {
@@ -86,6 +93,21 @@ export function startHealthServer({ port = 8080, statusFn, paperBot }) {
       count: paperBot.ledger.length,
       trades: paperBot.getLedger().slice(0, limit),
     });
+  });
+
+  app.post('/api/paperbot/emergency-close', async (req, res) => {
+    if (!paperBot || typeof paperBot.emergencyCloseAll !== 'function') {
+      res.status(503).json({ error: 'paperbot_unavailable' });
+      return;
+    }
+    try {
+      const report = await paperBot.emergencyCloseAll({
+        source: req.body && req.body.source || 'terminal',
+      });
+      res.status(report.flat ? 200 : 500).json(report);
+    } catch (err) {
+      res.status(500).json({ error: 'emergency_close_failed', detail: err.message });
+    }
   });
 
   const server = app.listen(port, () => {
