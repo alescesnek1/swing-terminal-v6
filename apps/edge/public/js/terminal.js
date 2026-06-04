@@ -3735,6 +3735,8 @@ function renderPaperBot(state) {
   if (statusEl) {
     let txt, klass;
     if (state.status === 'emergency') { txt = 'EMERGENCY'; klass = 'pb-status-stopped'; }
+    else if (state.status === 'awaiting_keys') { txt = 'AWAITING KEYS'; klass = 'pb-status-stopped'; }
+    else if (state.status === 'awaiting_session') { txt = 'AWAITING SESSION'; klass = 'pb-status-stopped'; }
     else if (state.status === 'paused') { txt = 'PAUSED'; klass = 'pb-status-stopped'; }
     else if (state.status === 'stopped') { txt = 'STOPPED'; klass = 'pb-status-stopped'; }
     else if (openCount > 0) { txt = 'IN TRADE (' + openCount + ')'; klass = 'pb-status-intrade'; }
@@ -3787,6 +3789,7 @@ function renderPaperBot(state) {
 
   _pbSetText('pb-balance', _pbFmtBalance(state.balance) + ' balance');
   _pbRenderAnalystFeed(state);
+  _paperbotPromptReconnect(state);
 
   const ledger = document.getElementById('pb-ledger');
   if (!ledger) return;
@@ -3894,59 +3897,76 @@ const STREAM_DEFAULT_URL = 'wss://swing-terminal-ingest.fly.dev/api/stream-marke
 const STREAM_BACKOFF_MIN_MS = 1000;
 const STREAM_BACKOFF_MAX_MS = 30000;
 const STREAM_FALLBACK_POLL_MS = 5 * 60 * 1000; // 5min — long-tail safety net
-const PAPERBOT_EMERGENCY_PATH = '/api/paperbot/emergency-close';
+const PAPERBOT_HEARTBEAT_MS = 4000;
 let _streamSocket = null;
 let _streamBackoff = STREAM_BACKOFF_MIN_MS;
 let _streamReconnectTimer = null;
 let _streamClosedByUs = false;
-let _paperbotKillSwitchSent = false;
+let _paperbotHeartbeatTimer = null;
+let _paperbotReconnectPromptOpen = false;
 const _SYMBOL_INDEX = new Map(); // upper(base) -> DATA[] index
 
-function _paperbotRestBase() {
-  const explicit = window.PAPERBOT_REST_URL || window.INGEST_REST_URL || '';
-  if (explicit) return explicit.replace(/\/+$/, '');
-  const ws = window.STREAM_URL || STREAM_DEFAULT_URL;
-  return String(ws)
-    .replace(/^wss:\/\//i, 'https://')
-    .replace(/^ws:\/\//i, 'http://')
-    .replace(/\/api\/stream-markets.*$/i, '');
-}
-
-function _paperbotEmergencyCloseAll(source) {
-  if (_paperbotKillSwitchSent) return;
-  _paperbotKillSwitchSent = true;
-  const url = _paperbotRestBase() + PAPERBOT_EMERGENCY_PATH;
-  const payload = JSON.stringify({
-    t: 'EMERGENCY_CLOSE_ALL',
-    source: source || 'terminal',
-    visibilityState: document.visibilityState || 'unknown',
-    ts: Date.now(),
-  });
+function _paperbotSessionId() {
   try {
-    if (navigator.sendBeacon) {
-      const blob = new Blob([payload], { type: 'application/json' });
-      if (navigator.sendBeacon(url, blob)) return;
+    let id = sessionStorage.getItem('paperbot.sessionId');
+    if (!id) {
+      id = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : 'pb_' + Date.now() + '_' + Math.floor(Math.random() * 1e9);
+      sessionStorage.setItem('paperbot.sessionId', id);
     }
-  } catch {}
-  try {
-    fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: payload,
-      keepalive: true,
-      cache: 'no-store',
-    }).catch(() => {});
-  } catch {}
+    return id;
+  } catch {
+    return 'pb_' + Date.now() + '_' + Math.floor(Math.random() * 1e9);
+  }
 }
 
-function _wirePaperbotSessionKillSwitch() {
-  if (window.__paperbotKillSwitchWired) return;
-  window.__paperbotKillSwitchWired = true;
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') _paperbotEmergencyCloseAll('visibilitychange:hidden');
-  }, { capture: true });
-  window.addEventListener('beforeunload', () => _paperbotEmergencyCloseAll('beforeunload'), { capture: true });
-  window.addEventListener('pagehide', () => _paperbotEmergencyCloseAll('pagehide'), { capture: true });
+function _paperbotSendWs(payload) {
+  const sock = _streamSocket;
+  if (!sock || sock.readyState !== 1) return false;
+  try { sock.send(JSON.stringify(payload)); return true; } catch { return false; }
+}
+
+function _paperbotSendHeartbeat() {
+  return _paperbotSendWs({
+    t: 'pb_heartbeat',
+    sessionId: _paperbotSessionId(),
+    ts: Date.now(),
+    visible: document.visibilityState !== 'hidden',
+  });
+}
+
+function _startPaperbotHeartbeat() {
+  _stopPaperbotHeartbeat();
+  _paperbotSendHeartbeat();
+  _paperbotHeartbeatTimer = setInterval(_paperbotSendHeartbeat, PAPERBOT_HEARTBEAT_MS);
+}
+
+function _stopPaperbotHeartbeat() {
+  if (_paperbotHeartbeatTimer) clearInterval(_paperbotHeartbeatTimer);
+  _paperbotHeartbeatTimer = null;
+}
+
+function _paperbotPromptReconnect(state) {
+  if (_paperbotReconnectPromptOpen) return;
+  if (!state || !state.session || !state.session.requiresApiKeyReinput) return;
+  _paperbotReconnectPromptOpen = true;
+  setTimeout(() => {
+    try {
+      window.Toast?.warn('PaperBot deadman switch', 'Session timed out. Reconnect and re-enter Binance API keys.');
+      const apiKey = window.prompt('PaperBot session was halted. Re-enter Binance API key:');
+      if (!apiKey) return;
+      const apiSecret = window.prompt('Re-enter Binance API secret:');
+      if (!apiSecret) return;
+      _paperbotSendWs({
+        t: 'pb_reconnect',
+        sessionId: _paperbotSessionId(),
+        apiKey,
+        apiSecret,
+        ts: Date.now(),
+      });
+    } finally {
+      _paperbotReconnectPromptOpen = false;
+    }
+  }, 50);
 }
 
 function _rebuildSymbolIndex() {
@@ -4139,6 +4159,7 @@ async function connectStream() {
     // V7.4.7 — WS healthy: stop the aggressive 10s poll, the regular
     // 5min safety-net interval is enough for non-Binance coins.
     _disableAggressivePoll();
+    _startPaperbotHeartbeat();
   });
 
   sock.addEventListener('message', (ev) => {
@@ -4150,6 +4171,17 @@ async function connectStream() {
     if (frame.t === 'pb') {
       window.__serverPaperBotSeen = true;
       return renderPaperBot(frame);
+    }
+    if (frame.t === 'pb_heartbeat_ack') return;
+    if (frame.t === 'pb_reconnect_ok') {
+      window.Toast?.success('PaperBot reconnected', 'Heartbeat session restored.');
+      if (frame.state) renderPaperBot(frame.state);
+      _paperbotSendHeartbeat();
+      return;
+    }
+    if (frame.t === 'pb_reconnect_error') {
+      window.Toast?.error('PaperBot reconnect failed', frame.error || 'API key re-input failed');
+      return;
     }
     if (frame.t === 'ping') {
       try { sock.send('{"t":"pong"}'); } catch {}
@@ -4163,6 +4195,7 @@ async function connectStream() {
 
   sock.addEventListener('close', () => {
     if (_streamClosedByUs) return;
+    _stopPaperbotHeartbeat();
     const sts = document.getElementById('sts');
     if (sts) {
       sts.textContent = 'RECONNECTING';
@@ -4264,7 +4297,6 @@ async function initTerminalApp() {
   initColumnDnD();           // V7.3 — drag-to-reorder header
   initPanicManual();         // V7.3 — [?] info modal
   initHotnessTooltip();
-  _wirePaperbotSessionKillSwitch();
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
   fetchBinancePairs();
   await doRefresh();

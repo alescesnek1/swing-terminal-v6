@@ -161,6 +161,28 @@ export function startStreamServer({ server, aggregator, paperBot }) {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
       if (msg && msg.t === 'pong') ws._missedPings = 0;
+      if (msg && msg.t === 'pb_heartbeat' && paperBot && typeof paperBot.recordSessionHeartbeat === 'function') {
+        const ok = paperBot.recordSessionHeartbeat({
+          sessionId: msg.sessionId,
+          transport: 'ws',
+          remoteAddress: '',
+        });
+        if (ok && ws.readyState === 1) {
+          try { ws.send(JSON.stringify({ t: 'pb_heartbeat_ack', ts: Date.now() })); } catch {}
+        }
+      }
+      if (msg && msg.t === 'pb_reconnect' && paperBot && typeof paperBot.reconnectSession === 'function') {
+        void paperBot.reconnectSession({
+          sessionId: msg.sessionId,
+          apiKey: msg.apiKey,
+          apiSecret: msg.apiSecret,
+          transport: 'ws',
+        }).then((state) => {
+          if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'pb_reconnect_ok', state, ts: Date.now() }));
+        }).catch((err) => {
+          if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'pb_reconnect_error', error: err.message, ts: Date.now() }));
+        });
+      }
     });
 
     ws.on('close', () => { /* gc handled by ws */ });

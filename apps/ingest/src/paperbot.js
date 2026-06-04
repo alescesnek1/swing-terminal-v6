@@ -47,6 +47,9 @@ const DEFAULTS = {
   entryFillTimeoutMs: 45_000,
   orderPollMs: 1500,
   http429PauseMs: 60_000,
+  requireSessionHeartbeat: envBool('PAPERBOT_REQUIRE_SESSION_HEARTBEAT', true),
+  heartbeatTimeoutMs: envNum('PAPERBOT_HEARTBEAT_TIMEOUT_MS', 15_000),
+  deadmanCheckMs: envNum('PAPERBOT_DEADMAN_CHECK_MS', 5000),
   ollamaEnabled: envBool('PAPERBOT_OLLAMA', true),
   ollamaUrl: process.env.OLLAMA_URL || 'http://127.0.0.1:11434/api/generate',
   ollamaModel: process.env.OLLAMA_MODEL || 'llama3',
@@ -90,8 +93,17 @@ export class PaperBot extends EventEmitter {
     this.cautionMultiplier = 1.0;
     this.exchange = null;
     this.exchangeReady = false;
+    this.runtimeApiKey = '';
+    this.runtimeApiSecret = '';
     this.rateLimitedUntil = 0;
     this.emergencyActive = false;
+    this.sessionActive = false;
+    this.sessionHalted = this.cfg.requireSessionHeartbeat;
+    this.apiKeysCleared = false;
+    this.lastSessionHeartbeatTs = 0;
+    this.heartbeatSessionId = '';
+    this.deadmanTriggeredAt = 0;
+    this.deadmanReason = '';
 
     this.openPositions = new Map();
     this.ledger = [];
@@ -108,6 +120,8 @@ export class PaperBot extends EventEmitter {
 
     this._tickListener = (frame) => { void this._onTick(frame); };
     this._broadcastTimer = null;
+    this._deadmanTimer = null;
+    this._deadmanClosing = false;
   }
 
   start() {
@@ -124,28 +138,32 @@ export class PaperBot extends EventEmitter {
     }
     this.aggregator.on('tick', this._tickListener);
     this._broadcastTimer = setInterval(() => this._broadcastState(), this.cfg.broadcastIntervalMs);
+    this._deadmanTimer = setInterval(() => { void this._deadmanCheck(); }, this.cfg.deadmanCheckMs);
     this._advise('system', 'Liquidation Flush Hunter online', {
       mode: this.liveExecution ? 'live_binance_spot' : 'paper',
       bankrollUsd: this.balance,
       minNotionalUsd: this.cfg.minOrderNotionalUsd,
       stopLossPct: this.cfg.stopLossPct,
+      heartbeatTimeoutMs: this.cfg.heartbeatTimeoutMs,
     });
     this._broadcastState();
   }
 
   stop() {
-    if (this.status !== 'running' && this.status !== 'paused') return;
+    if (this.status !== 'running' && this.status !== 'paused' && this.status !== 'awaiting_session' && this.status !== 'awaiting_keys') return;
     this.aggregator.off('tick', this._tickListener);
     if (this._broadcastTimer) clearInterval(this._broadcastTimer);
+    if (this._deadmanTimer) clearInterval(this._deadmanTimer);
     this._broadcastTimer = null;
+    this._deadmanTimer = null;
     this.status = 'stopped';
     this._broadcastState();
   }
 
   async _initExchange() {
     if (this.exchangeReady) return;
-    const apiKey = process.env.BINANCE_API_KEY || '';
-    const secret = process.env.BINANCE_API_SECRET || '';
+    const apiKey = this.runtimeApiKey || process.env.BINANCE_API_KEY || '';
+    const secret = this.runtimeApiSecret || process.env.BINANCE_API_SECRET || '';
     if (!apiKey || !secret) throw new Error('PaperBot live mode requires BINANCE_API_KEY and BINANCE_API_SECRET');
     this.exchange = new ccxt.binance({
       apiKey,
@@ -155,6 +173,97 @@ export class PaperBot extends EventEmitter {
     });
     await this.exchange.loadMarkets();
     this.exchangeReady = true;
+  }
+
+  recordSessionHeartbeat({ sessionId = '', transport = 'ws', remoteAddress = '' } = {}) {
+    const sid = String(sessionId || '').slice(0, 80);
+    if (!sid) return false;
+    const now = Date.now();
+    const isNewSession = sid !== this.heartbeatSessionId;
+    this.heartbeatSessionId = sid;
+    this.lastSessionHeartbeatTs = now;
+    this.sessionActive = true;
+    this.sessionHalted = false;
+    if (!this.apiKeysCleared && (this.status === 'awaiting_session' || this.status === 'idle')) {
+      this.status = 'running';
+    }
+    if (isNewSession) {
+      this._advise('system', 'Terminal heartbeat session established', { sessionId: sid, transport, remoteAddress });
+    }
+    this._broadcastState();
+    return true;
+  }
+
+  async reconnectSession({ sessionId = '', apiKey = '', apiSecret = '', transport = 'ws' } = {}) {
+    const sid = String(sessionId || '').slice(0, 80);
+    if (!sid) throw new Error('session_id_required');
+    if (this.liveExecution) {
+      const key = String(apiKey || '').trim();
+      const secret = String(apiSecret || '').trim();
+      if (!key || !secret) throw new Error('api_key_reinput_required');
+      this.runtimeApiKey = key;
+      this.runtimeApiSecret = secret;
+      this.apiKeysCleared = false;
+      this.exchangeReady = false;
+      if (this.exchange) {
+        try { await this.exchange.close(); } catch {}
+      }
+      this.exchange = null;
+      await this._initExchange();
+    }
+    this.emergencyActive = false;
+    this.deadmanReason = '';
+    this.recordSessionHeartbeat({ sessionId: sid, transport });
+    this.status = 'running';
+    this._advise('system', 'Terminal session reconnected after deadman halt', { sessionId: sid, liveExecution: this.liveExecution });
+    this._broadcastState();
+    return this.getState();
+  }
+
+  async _deadmanCheck() {
+    if (!this.cfg.requireSessionHeartbeat || this.status === 'stopped') return;
+    const now = Date.now();
+    if (!this.lastSessionHeartbeatTs) {
+      if (this.status === 'running') this.status = 'awaiting_session';
+      this.sessionHalted = true;
+      return;
+    }
+    if (this.sessionHalted && this.deadmanTriggeredAt && this.lastSessionHeartbeatTs < this.deadmanTriggeredAt) return;
+    const silenceMs = now - this.lastSessionHeartbeatTs;
+    if (silenceMs <= this.cfg.heartbeatTimeoutMs || this._deadmanClosing) return;
+    this._deadmanClosing = true;
+    this.deadmanTriggeredAt = now;
+    this.deadmanReason = `heartbeat_silence_${silenceMs}ms`;
+    this.sessionActive = false;
+    this.sessionHalted = true;
+    try {
+      await this.emergencyCloseAll({
+        source: 'deadman_heartbeat_timeout',
+        clearApiKeys: true,
+        haltStatus: this.liveExecution ? 'awaiting_keys' : 'awaiting_session',
+      });
+    } finally {
+      this._deadmanClosing = false;
+    }
+  }
+
+  async _clearApiKeysFromMemory() {
+    if (this.exchange) {
+      try { await this.exchange.close(); } catch {}
+    }
+    this.exchange = null;
+    this.exchangeReady = false;
+    this.runtimeApiKey = '';
+    this.runtimeApiSecret = '';
+    delete process.env.BINANCE_API_KEY;
+    delete process.env.BINANCE_API_SECRET;
+    this.apiKeysCleared = true;
+  }
+
+  _hasLiveSession(now = Date.now()) {
+    if (!this.cfg.requireSessionHeartbeat) return true;
+    if (!this.sessionActive || this.sessionHalted || !this.lastSessionHeartbeatTs) return false;
+    return now - this.lastSessionHeartbeatTs <= this.cfg.heartbeatTimeoutMs;
   }
 
   async _onTick(frame) {
@@ -176,6 +285,7 @@ export class PaperBot extends EventEmitter {
     }
 
     if (this.status !== 'running' || this.emergencyActive) return;
+    if (!this._hasLiveSession(now)) return;
     if (this.pauseUntil > now) return;
     if (this.rateLimitedUntil > now) return;
     if (!this._isTradableMarket(sym, quoteVolume, now)) return;
@@ -592,7 +702,7 @@ export class PaperBot extends EventEmitter {
     this._broadcastState();
   }
 
-  async emergencyCloseAll({ source = 'unknown' } = {}) {
+  async emergencyCloseAll({ source = 'unknown', clearApiKeys = false, haltStatus = 'paused' } = {}) {
     this.emergencyActive = true;
     this.status = 'emergency';
     const now = Date.now();
@@ -628,8 +738,11 @@ export class PaperBot extends EventEmitter {
       }
     }
 
-    this.status = 'paused';
-    this.pauseUntil = Date.now() + this.cfg.circuitPauseMs;
+    if (clearApiKeys) await this._clearApiKeysFromMemory();
+    this.sessionActive = false;
+    this.sessionHalted = true;
+    this.status = haltStatus;
+    this.pauseUntil = haltStatus === 'paused' ? Date.now() + this.cfg.circuitPauseMs : 0;
     this._advise('risk', 'EMERGENCY_CLOSE_ALL completed', report);
     this._broadcastState();
     return { ...report, flat: this.openPositions.size === 0 };
@@ -821,6 +934,7 @@ export class PaperBot extends EventEmitter {
   }
 
   getState() {
+    const now = Date.now();
     const unrealized = this._unrealizedPnl();
     const equity = this.balance + unrealized;
     const totalClosed = this.wins + this.losses;
@@ -862,7 +976,7 @@ export class PaperBot extends EventEmitter {
     return {
       t: 'pb',
       mode: this.liveExecution ? 'live_binance_spot' : 'paper',
-      status: this.pauseUntil > Date.now() && this.status === 'paused' ? 'paused' : this.status,
+      status: this.pauseUntil > now && this.status === 'paused' ? 'paused' : this.status,
       pauseUntil: this.pauseUntil,
       startedAt: this.startedAt,
       uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,
@@ -886,10 +1000,22 @@ export class PaperBot extends EventEmitter {
         maxExchangeRiskUsd: this.cfg.minOrderNotionalUsd * this.cfg.stopLossPct,
         feePct: this.cfg.feePct,
       },
+      session: {
+        active: this._hasLiveSession(now),
+        halted: this.sessionHalted,
+        lastPing: this.lastSessionHeartbeatTs,
+        ageMs: this.lastSessionHeartbeatTs ? now - this.lastSessionHeartbeatTs : null,
+        timeoutMs: this.cfg.heartbeatTimeoutMs,
+        checkMs: this.cfg.deadmanCheckMs,
+        sessionId: this.heartbeatSessionId,
+        deadmanTriggeredAt: this.deadmanTriggeredAt,
+        deadmanReason: this.deadmanReason,
+        requiresApiKeyReinput: this.liveExecution && this.apiKeysCleared,
+      },
       openPositions,
       recentTrades: this.ledger.slice(0, this.cfg.recentTradesCap),
       advisoryLogs: this.advisoryLogs.slice(0, 30),
-      ts: Date.now(),
+      ts: now,
     };
   }
 
