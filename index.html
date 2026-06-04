@@ -368,6 +368,7 @@ body.col-resizing *{cursor:col-resize!important}
   <div class="tab" onclick="sv('topcharts',this)">TOP CHARTS</div>
   <div class="tab" onclick="sv('alerts',this)">ALERTS <span id="abadge" class="cnt"></span></div>
   <div class="tab" onclick="sv('config',this)">CONFIG</div>
+  <div class="tab" onclick="sv('bot',this)">BOT</div>
 </div>
 
 <div class="view on" id="v-scanner">
@@ -489,6 +490,33 @@ body.col-resizing *{cursor:col-resize!important}
       <div>Refresh: kazde 2 minuty (konfigurovatelne)</div>
     </div>
   </div>
+</div>
+
+<div class="view" id="v-bot">
+  <div class="ph"><span class="pt">BOT PAPER TRADING</span><span class="ps">frontend-only dry run sandbox</span></div>
+  <div style="padding:12px;border-bottom:1px solid var(--b1)">
+    <div style="background:rgba(255,51,86,.1);border:1px solid rgba(255,51,86,.3);border-radius:var(--rad);padding:8px;margin-bottom:8px">
+      <div style="font-size:10px;font-weight:600;color:var(--red);letter-spacing:.05em">WARNING</div>
+      <div style="font-size:9px;color:var(--txt2);margin-top:2px">Live trading is disabled in this phase.</div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+      <span style="background:rgba(255,176,32,.1);border:1px solid rgba(255,176,32,.25);color:var(--amb);font-size:9px;font-weight:600;letter-spacing:.04em;padding:3px 8px;border-radius:var(--rad)">DRY RUN ONLY</span>
+      <span style="font-size:9px;color:var(--txt3)">|</span>
+      <span>State: <span id="bot-state-badge" style="font-size:9px;font-weight:600;color:var(--txt3)">DISABLED</span></span>
+      <span style="font-size:9px;color:var(--txt3)">|</span>
+      <span>Heartbeat: <span id="bot-hb-badge" style="font-size:9px;font-weight:600;color:var(--txt3)">inactive</span></span>
+      <span style="font-size:9px;color:var(--txt3)">|</span>
+      <span>Mode: <span id="bot-mode-badge" style="font-size:9px;font-weight:600;color:var(--amb)">DRY_RUN</span></span>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+      <button class="s-btn" onclick="startDryRun()">Start Dry Run</button>
+      <button class="s-btn" onclick="stopDryRun()">Stop Dry Run</button>
+      <button class="s-btn" onclick="addMockFeedEvent()">Add Mock Feed Event</button>
+    </div>
+    <div style="font-size:9px;color:var(--txt3)">Events in feed: <span id="bot-event-count">0</span>/50</div>
+  </div>
+  <div style="padding:8px 12px;background:var(--s2);border-bottom:1px solid var(--b1);font-size:9px;font-weight:600;color:var(--acc);letter-spacing:.1em">BOT FEED (MOCK)</div>
+  <div id="bot-feed" style="max-height:calc(100vh - 280px);overflow-y:auto"></div>
 </div>
 
 <div id="botbar">
@@ -1786,6 +1814,94 @@ async function doRefresh() {
   renderHeatmap();
   renderTopCharts();
   if (SEL) pickCoin(SEL);
+}
+
+// ========== BOT STATE (FRONTEND-ONLY DRY RUN) ==========
+let botState = 'DISABLED';
+let botFeed = [];
+let botHeartbeatTimer = null;
+let botEventCount = 0;
+
+function pushMockEvent(eventType, severity, message) {
+  if (botFeed.length >= 50) botFeed.pop();
+  const event = {
+    timestamp: new Date().toLocaleTimeString('cs-CZ'),
+    event_type: eventType,
+    severity: severity,
+    message: message,
+    state: botState
+  };
+  botFeed.unshift(event);
+  botEventCount = botFeed.length;
+  updateBotUI();
+}
+
+function startDryRun() {
+  if (botState === 'READY') return;
+  botState = 'READY';
+  botFeed = [];
+  botEventCount = 0;
+  pushMockEvent('BOT_DRY_RUN_STARTED', 'OK', 'Dry run session initialized');
+  if (botHeartbeatTimer) clearInterval(botHeartbeatTimer);
+  botHeartbeatTimer = setInterval(botHeartbeat, 3000);
+  updateBotUI();
+}
+
+function stopDryRun() {
+  if (botState === 'DISABLED') return;
+  if (botHeartbeatTimer) clearInterval(botHeartbeatTimer);
+  botHeartbeatTimer = null;
+  botState = 'DISABLED';
+  pushMockEvent('BOT_DRY_RUN_STOPPED', 'WARN', 'Dry run session terminated');
+  updateBotUI();
+}
+
+function botHeartbeat() {
+  if (botState !== 'READY') return;
+  const eventTypes = ['MARKET_SCAN_SKIPPED', 'RISK_CHECK_FAILED'];
+  const severities = ['OK', 'WARN', 'ERR'];
+  const idx = Math.floor(Math.random() * eventTypes.length);
+  const sevIdx = Math.floor(Math.random() * severities.length);
+  const et = eventTypes[idx];
+  const sev = severities[sevIdx];
+  const msg = et === 'MARKET_SCAN_SKIPPED' ? 'No qualified setups in current market regime' : 'Position sizing rejected by risk filter';
+  pushMockEvent(et, sev, msg);
+}
+
+function addMockFeedEvent() {
+  if (botState !== 'READY') {
+    alert('Start dry run first');
+    return;
+  }
+  const eventTypes = ['MARKET_SCAN_SKIPPED', 'RISK_CHECK_FAILED'];
+  const idx = Math.floor(Math.random() * eventTypes.length);
+  const et = eventTypes[idx];
+  const msg = et === 'MARKET_SCAN_SKIPPED' ? 'Manual trigger: market scan skipped' : 'Manual trigger: risk check failed';
+  pushMockEvent(et, 'WARN', msg);
+}
+
+function updateBotUI() {
+  document.getElementById('bot-state-badge').textContent = botState;
+  document.getElementById('bot-state-badge').style.color = botState === 'READY' ? 'var(--grn)' : 'var(--txt3)';
+  
+  const hbText = botHeartbeatTimer ? 'active' : 'inactive';
+  document.getElementById('bot-hb-badge').textContent = hbText;
+  document.getElementById('bot-hb-badge').style.color = botHeartbeatTimer ? 'var(--grn)' : 'var(--txt3)';
+  
+  document.getElementById('bot-event-count').textContent = botEventCount;
+  
+  const feedHtml = botFeed.length ? botFeed.map(e => {
+    const sevCol = e.severity === 'OK' ? 'var(--grn)' : e.severity === 'WARN' ? 'var(--amb)' : 'var(--red)';
+    return `<div class="alrt" style="border-left:2px solid ${sevCol};padding:6px 10px;border-bottom:1px solid rgba(15,21,40,.9)">
+      <div class="abody">
+        <div class="atitle" style="font-size:9px;font-weight:600;color:${sevCol}">[${e.severity}] ${e.event_type}</div>
+        <div class="adesc" style="font-size:9px;color:var(--txt2);margin-top:2px">${e.message}</div>
+        <div class="atime" style="font-size:8px;color:var(--txt3);margin-top:1px">${e.timestamp}</div>
+      </div>
+    </div>`;
+  }).join('') : '<div style="padding:12px;text-align:center;color:var(--txt3);font-size:9px">No events yet</div>';
+  
+  document.getElementById('bot-feed').innerHTML = feedHtml;
 }
 
 // ========== INIT ==========
