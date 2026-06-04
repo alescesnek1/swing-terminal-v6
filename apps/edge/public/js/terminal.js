@@ -3946,27 +3946,25 @@ function _stopPaperbotHeartbeat() {
 }
 
 function _paperbotPromptReconnect(state) {
-  if (_paperbotReconnectPromptOpen) return;
+  // SAFETY MODE: browser API-key entry and server trading reconnect are
+  // disabled in this build until the execution backend is audited. We must
+  // never call window.prompt, never read a Binance key/secret from the
+  // browser, and never send pb_reconnect with credentials. Surface a clear
+  // read-only status instead and return.
   if (!state || !state.session || !state.session.requiresApiKeyReinput) return;
-  _paperbotReconnectPromptOpen = true;
-  setTimeout(() => {
-    try {
-      window.Toast?.warn('PaperBot deadman switch', 'Session timed out. Reconnect and re-enter Binance API keys.');
-      const apiKey = window.prompt('PaperBot session was halted. Re-enter Binance API key:');
-      if (!apiKey) return;
-      const apiSecret = window.prompt('Re-enter Binance API secret:');
-      if (!apiSecret) return;
-      _paperbotSendWs({
-        t: 'pb_reconnect',
-        sessionId: _paperbotSessionId(),
-        apiKey,
-        apiSecret,
-        ts: Date.now(),
-      });
-    } finally {
-      _paperbotReconnectPromptOpen = false;
-    }
-  }, 50);
+
+  console.warn('[PaperBot] API key entry disabled in this build: server requested key re-input, blocked by SAFETY MODE.');
+
+  const statusText = document.getElementById('pb-status-text');
+  if (statusText) statusText.textContent = 'KEY ENTRY DISABLED';
+
+  const status = document.getElementById('pb-status');
+  if (status) {
+    status.classList.remove('pb-status-searching', 'pb-status-intrade');
+    status.classList.add('pb-status-stopped');
+  }
+
+  return;
 }
 
 function _rebuildSymbolIndex() {
