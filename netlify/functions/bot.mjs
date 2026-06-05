@@ -1022,22 +1022,39 @@ async function handleTestnetOrder(req, auth) {
   }));
 }
 
+function isWorkerRoute(route) {
+  return route === 'execution-intent' || route === 'execution-result';
+}
+
+function checkWorkerToken(req) {
+  const expected = process.env.BOT_WORKER_TOKEN || '';
+  const provided = req.headers.get('x-bot-worker-token') || '';
+  return Boolean(expected && provided && provided === expected);
+}
+
 export default async function handler(req) {
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsHeaders(req) });
   }
 
-  const origin = checkOrigin(req);
-  if (!origin.ok) {
-    return json(req, { ok: false, error: 'Origin not allowed', reason: origin.reason }, 403);
-  }
-
-  const auth = await verifyAuth(req);
-  if (!auth.ok) {
-    return json(req, { ok: false, error: 'Unauthorized', reason: auth.reason, authMode: auth.authMode }, auth.status || 401);
-  }
-
   const route = routeName(req);
+  let auth = { ok: true, authMode: 'worker' };
+
+  if (isWorkerRoute(route)) {
+    if (!checkWorkerToken(req)) {
+      return json(req, { ok: false, error: 'Forbidden', reason: 'Invalid or missing X-BOT-WORKER-TOKEN' }, 403);
+    }
+  } else {
+    const origin = checkOrigin(req);
+    if (!origin.ok) {
+      return json(req, { ok: false, error: 'Origin not allowed', reason: origin.reason }, 403);
+    }
+
+    auth = await verifyAuth(req);
+    if (!auth.ok) {
+      return json(req, { ok: false, error: 'Unauthorized', reason: auth.reason, authMode: auth.authMode }, auth.status || 401);
+    }
+  }
   if (route === 'state') {
     if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
     return json(req, publicState({ authMode: auth.authMode }));
@@ -1051,11 +1068,6 @@ export default async function handler(req) {
 
   if (route === 'execution-intent') {
     if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
-    const workerToken = req.headers.get('x-bot-worker-token');
-    const expectedToken = process.env.BOT_WORKER_TOKEN;
-    if (!expectedToken || workerToken !== expectedToken) {
-      return json(req, { ok: false, error: 'Forbidden', reason: 'Invalid or missing X-BOT-WORKER-TOKEN' }, 403);
-    }
     let intent = botControlState.executionIntent;
     if (intent && intent.status === 'pending') {
       if (new Date(intent.expiresAt).getTime() < Date.now()) {
@@ -1177,10 +1189,8 @@ export default async function handler(req) {
   }
 
   if (route === 'execution-result') {
-    const workerToken = req.headers.get('x-bot-worker-token');
-    const expectedToken = process.env.BOT_WORKER_TOKEN;
-    if (!expectedToken || workerToken !== expectedToken) {
-      return json(req, { ok: false, error: 'Forbidden', reason: 'Invalid or missing X-BOT-WORKER-TOKEN' }, 403);
+    if (!body || !body.id || !body.idempotencyKey || !body.status) {
+      return json(req, { ok: false, error: 'Invalid payload' }, 400);
     }
     
     const intent = botControlState.executionIntent;
