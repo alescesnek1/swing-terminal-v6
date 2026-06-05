@@ -3668,11 +3668,19 @@ function _pbRenderExecutionPreview(state) {
   const preview = state && state.executionPreview;
   const card = _pbEnsureExecutionPreviewCard();
   if (!card) return;
+  const intent = state && state.executionIntent;
+  const recentResult = state && state.executionResults && state.executionResults.length > 0 ? state.executionResults[0] : null;
+  const testnetExecutionEnabled = state && state.testnetExecutionEnabled;
+  const isNoSetup = state && state.status === 'no_setup';
+
   if (!preview || !preview.enabled) {
-    card.hidden = true;
-    card.innerHTML = '';
-    return;
+    if (!intent && !recentResult && !(isNoSetup && testnetExecutionEnabled)) {
+      card.hidden = true;
+      card.innerHTML = '';
+      return;
+    }
   }
+
   const binanceConfig = (state && state.binanceConfig) || {};
   const paperPosition = state && state.paperPosition && state.paperPosition.status === 'open' ? state.paperPosition : null;
   const testnetOrder = state && state.testnetOrder ? state.testnetOrder : null;
@@ -3684,18 +3692,21 @@ function _pbRenderExecutionPreview(state) {
     && !!preview
     && realOrderSubmitted === false;
 
-  const intent = state && state.executionIntent;
-  const recentResult = state && state.executionResults && state.executionResults.length > 0 ? state.executionResults[0] : null;
+  const showSmokeIntentButton = isNoSetup && testnetExecutionEnabled && !intent && !recentResult;
 
   let statusLabel = 'LIVE EXECUTION LOCKED';
   if (recentResult) statusLabel = 'LOCAL WORKER ' + (recentResult.status === 'failed' ? 'FAILED' : 'SUBMITTED TESTNET ORDER');
+  else if (intent && intent.smokeFallback) statusLabel = 'WAITING FOR SMOKE VALIDATION';
   else if (intent) statusLabel = 'WAITING FOR LOCAL WORKER';
-  else if (preview.testnetSymbolAvailable || preview.smokeFallback) statusLabel = 'TESTNET READY';
+  else if (preview && (preview.testnetSymbolAvailable || preview.smokeFallback)) statusLabel = 'TESTNET READY';
+  else if (showSmokeIntentButton) statusLabel = 'TESTNET SMOKE VALIDATION READY';
 
   let message = 'Testnet adapter is the next required gate. No production order can be submitted from this build.';
   if (recentResult) message = recentResult.status === 'failed' ? 'Local worker failed: ' + (recentResult.error || 'Unknown') : 'Binance Spot Testnet order submitted by local worker.';
+  else if (intent && intent.smokeFallback) message = 'Smoke intent created. Start local worker to submit Binance Spot Testnet order. This is not a strategy signal.';
   else if (intent) message = 'Intent created. Start local worker to submit Binance Spot Testnet order.';
-  else if (isTestnet) message = 'TESTNET ONLY - no production order submitted. This adapter can only place Binance Spot Testnet orders.';
+  else if (isTestnet && preview) message = 'TESTNET ONLY - no production order submitted. This adapter can only place Binance Spot Testnet orders.';
+  else if (showSmokeIntentButton) message = 'No compatible strategy setup found. You can run a testnet smoke order to validate the local worker.';
 
   card.hidden = false;
   let html =
@@ -3703,18 +3714,21 @@ function _pbRenderExecutionPreview(state) {
     + '<span class="pb-execution-preview-card__title">EXECUTION PREVIEW</span>'
     + '<span class="pb-execution-preview-card__status">' + _esc(statusLabel) + '</span>'
     + '</div>'
-    + '<div class="pb-execution-preview-card__message">' + _esc(message) + '</div>'
-    + '<div class="pb-execution-preview-card__grid">'
-    + '<div><span>Symbol</span><b>' + _esc(preview.symbol) + '</b></div>'
-    + '<div><span>Side</span><b>' + _esc(preview.side) + '</b></div>'
-    + '<div><span>Quote Asset</span><b>' + _esc(preview.quoteAsset || 'USDC') + '</b></div>'
-    + '<div><span>Position value</span><b>$' + _esc(preview.positionUsd) + ' eq.</b></div>'
-    + '<div><span>Entry Reference</span><b>' + _esc(preview.entryReference) + '</b></div>'
-    + '<div><span>Stop Loss</span><b>' + _esc(preview.stopLoss) + '</b></div>'
-    + '<div><span>Take Profit</span><b>' + _esc(preview.takeProfit) + '</b></div>'
-    + '<div><span>Mode</span><b>' + _esc(preview.mode) + '</b></div>'
-    + '<div><span>Real Order</span><b>NO</b></div>'
-    + '</div>';
+    + '<div class="pb-execution-preview-card__message">' + _esc(message) + '</div>';
+
+  if (preview) {
+    html += '<div class="pb-execution-preview-card__grid">'
+      + '<div><span>Symbol</span><b>' + _esc(preview.symbol) + '</b></div>'
+      + '<div><span>Side</span><b>' + _esc(preview.side) + '</b></div>'
+      + '<div><span>Quote Asset</span><b>' + _esc(preview.quoteAsset || 'USDC') + '</b></div>'
+      + '<div><span>Position value</span><b>$' + _esc(preview.positionUsd) + ' eq.</b></div>'
+      + '<div><span>Entry Reference</span><b>' + _esc(preview.entryReference) + '</b></div>'
+      + '<div><span>Stop Loss</span><b>' + _esc(preview.stopLoss) + '</b></div>'
+      + '<div><span>Take Profit</span><b>' + _esc(preview.takeProfit) + '</b></div>'
+      + '<div><span>Mode</span><b>' + _esc(preview.mode) + '</b></div>'
+      + '<div><span>Real Order</span><b>NO</b></div>'
+      + '</div>';
+  }
 
   const isFallback = (state && state.candidate && state.candidate.strategyFallback === true) || (Array.isArray(state && state.events) && state.events.some(e => e.type === 'TESTNET_COMPATIBLE_FALLBACK_SELECTED'));
   const isSmokeFallback = (state && state.candidate && state.candidate.smokeFallback === true) || (state && state.paperPosition && state.paperPosition.smokeFallback === true) || (Array.isArray(state && state.events) && state.events.some(e => e.type === 'TESTNET_SMOKE_QUOTE_FALLBACK_SELECTED'));
@@ -3763,6 +3777,12 @@ function _pbRenderExecutionPreview(state) {
       + '<button class="pb-execution-preview-card__testnet-btn" type="button" onclick="createPaperBotExecutionIntent()">Create Testnet Intent</button>'
       + '<span class="pb-execution-preview-card__actions-note">Requires running local worker to execute</span>'
       + '</div>';
+  } else if (showSmokeIntentButton) {
+    html +=
+      '<div class="pb-execution-preview-card__actions">'
+      + '<button class="pb-execution-preview-card__testnet-btn" type="button" onclick="createPaperBotSmokeIntent()">Create Worker Smoke Intent</button>'
+      + '<span class="pb-execution-preview-card__actions-note">Requires running local worker to execute</span>'
+      + '</div>';
   }
 
   const errorMessage = state && state.blockedReason ? state.blockedReason : (state && state.binanceMessage ? state.binanceMessage : null);
@@ -3775,7 +3795,7 @@ function _pbRenderExecutionPreview(state) {
     }
   }
 
-  html += '<div class="pb-execution-preview-card__reason">' + _esc(preview.reason || 'Execution preview only. No Binance order submitted.') + '</div>';
+  html += '<div class="pb-execution-preview-card__reason">' + _esc((preview && preview.reason) || 'Execution preview only. No Binance order submitted.') + '</div>';
   card.innerHTML = html;
 }
 
@@ -3858,6 +3878,35 @@ function createPaperBotExecutionIntent() {
   _createPaperbotExecutionIntentRequest().catch((err) => {
     console.warn('[PaperBot] Intent creation failed:', err.message);
     window.Toast?.error('Intent failed', err.message);
+  });
+}
+
+async function _createPaperbotSmokeIntentRequest() {
+  const authHeaders = await _getAuthHeaders();
+  const res = await fetch('/api/bot/create-smoke-execution-intent', {
+    method: 'POST',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', ...authHeaders },
+    body: '{}',
+  });
+  const payload = await res.json().catch(() => ({}));
+  
+  if (payload && typeof payload === 'object' && ('status' in payload || 'events' in payload || 'ok' in payload)) {
+    renderPaperBot(_paperbotStateFromControlResponse(payload));
+  }
+
+  if (!res.ok || payload.ok === false) {
+    let msg = payload.error || 'Failed to create smoke intent';
+    throw new Error(msg);
+  }
+  
+  try { window.Toast?.success('SMOKE INTENT CREATED', 'Smoke intent created. Local worker will validate BTCUSDT on Binance Spot Testnet and submit a testnet-only order.'); } catch {}
+  return payload;
+}
+
+function createPaperBotSmokeIntent() {
+  _createPaperbotSmokeIntentRequest().catch((err) => {
+    console.warn('[PaperBot] Smoke Intent creation failed:', err.message);
+    window.Toast?.error('Smoke Intent failed', err.message);
   });
 }
 

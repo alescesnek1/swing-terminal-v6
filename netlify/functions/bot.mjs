@@ -1090,7 +1090,7 @@ export default async function handler(req) {
     return json(req, { ok: true, intent });
   }
 
-  if (route !== 'wake' && route !== 'stop' && route !== 'testnet-order' && route !== 'clear-paper-position' && route !== 'create-execution-intent' && route !== 'execution-result') {
+  if (route !== 'wake' && route !== 'stop' && route !== 'testnet-order' && route !== 'clear-paper-position' && route !== 'create-execution-intent' && route !== 'create-smoke-execution-intent' && route !== 'execution-result') {
     return json(req, { ok: false, error: 'Not Found' }, 404);
   }
   if (req.method !== 'POST') {
@@ -1178,6 +1178,73 @@ export default async function handler(req) {
 
     botControlState.executionIntent = intent;
     const createEvent = event('TESTNET_EXECUTION_INTENT_CREATED', 'info', `Testnet execution intent created for ${binanceSym}. Waiting for local worker.`, { intentId });
+    botControlState.events = [createEvent, ...botControlState.events].slice(0, 30);
+    botControlState.updatedAt = createEvent.ts;
+
+    return json(req, publicState({
+      ok: true,
+      executionIntent: intent,
+      events: [createEvent]
+    }));
+  }
+
+  if (route === 'create-smoke-execution-intent') {
+    const allowTestnetOrders = process.env.BOT_ALLOW_TESTNET_ORDERS === 'true';
+    const liveTradingEnabled = process.env.BOT_LIVE_TRADING_ENABLED === 'true';
+    const allowRealOrders = process.env.BOT_ALLOW_REAL_ORDERS === 'true';
+    const allowQuoteFallback = process.env.BOT_TESTNET_ALLOW_QUOTE_FALLBACK === 'true';
+    const maxPositionUsd = envNumber('BOT_MAX_POSITION_USD', 10);
+    
+    if (liveTradingEnabled || allowRealOrders) {
+      return json(req, { ok: false, error: 'Live trading flags are active. Cannot create testnet intent.' }, 403);
+    }
+    if (!allowTestnetOrders) {
+      return json(req, { ok: false, error: 'Testnet execution is not allowed.' }, 403);
+    }
+    if (!allowQuoteFallback) {
+      return json(req, { ok: false, error: 'Testnet quote fallback is not allowed. Cannot create smoke intent.' }, 403);
+    }
+
+    if (botControlState.executionIntent && (botControlState.executionIntent.status === 'pending' || botControlState.executionIntent.status === 'claimed')) {
+      if (new Date(botControlState.executionIntent.expiresAt).getTime() > Date.now()) {
+        return json(req, { ok: false, error: 'An execution intent is already pending or claimed.' }, 409);
+      }
+    }
+
+    const intentId = `intent_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const symbol = 'BTCUSDT';
+    const idempotencyKey = `paperbot_smoke_${symbol}_${Date.now()}`;
+
+    if (botControlState.usedIdempotencyKeys && botControlState.usedIdempotencyKeys.includes(idempotencyKey)) {
+      return json(req, { ok: false, error: 'Idempotency key already used.' }, 409);
+    }
+
+    const intent = {
+      id: intentId,
+      idempotencyKey,
+      mode: 'testnet',
+      symbol,
+      side: 'BUY',
+      type: 'MARKET',
+      positionUsd: maxPositionUsd > 10 ? 10 : maxPositionUsd,
+      entryReference: null,
+      stopLoss: null,
+      takeProfit: null,
+      quoteAsset: 'USDT',
+      productionQuoteAsset: 'USDC',
+      smokeFallback: true,
+      strategyFallback: true,
+      fallbackReason: 'local_worker_testnet_smoke_validation',
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 120 * 1000).toISOString(),
+      status: 'pending',
+      realOrderSubmitted: false,
+      testnet: true,
+      realProductionOrder: false
+    };
+
+    botControlState.executionIntent = intent;
+    const createEvent = event('TESTNET_SMOKE_INTENT_CREATED', 'info', `Created BTCUSDT testnet smoke intent for local worker. This is not a strategy signal. Production strategy remains USDC-only.`, { intentId });
     botControlState.events = [createEvent, ...botControlState.events].slice(0, 30);
     botControlState.updatedAt = createEvent.ts;
 
