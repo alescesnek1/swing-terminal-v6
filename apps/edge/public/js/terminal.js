@@ -3757,6 +3757,44 @@ function _pbRenderExecutionPreview(state) {
   card.innerHTML = html;
 }
 
+function _pbEnsureDiagnosticsCard() {
+  const view = document.getElementById('view-bot') || document.getElementById('v-bot');
+  if (!view) return null;
+  let card = document.getElementById('pb-diagnostics-card');
+  if (card) return card;
+  card = document.createElement('div');
+  card.id = 'pb-diagnostics-card';
+  card.style.margin = '10px 15px';
+  const ledger = view.querySelector('.bot-ledger-wrap');
+  if (ledger) view.insertBefore(card, ledger);
+  else view.appendChild(card);
+  return card;
+}
+
+function _pbRenderDiagnostics(state) {
+  const meta = state && state.scanMeta;
+  const card = _pbEnsureDiagnosticsCard();
+  if (!card) return;
+  if (!meta || state.status !== 'no_setup') {
+    card.hidden = true;
+    card.innerHTML = '';
+    return;
+  }
+  
+  card.hidden = false;
+  card.innerHTML = '<div style="font-size: 11px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.05); padding: 10px; border-radius: 4px; text-align: left; font-family: monospace;">'
+      + '<b style="color: #8899aa; display: block; margin-bottom: 6px;">TESTNET FALLBACK DIAGNOSTICS</b>'
+      + '<span style="color: #667788">Fallback Enabled:</span> <span style="color: #fff">' + meta.testnetFallbackEnabled + '</span><br>'
+      + '<span style="color: #667788">Fallback Attempted:</span> <span style="color: #fff">' + meta.fallbackAttempted + '</span><br>'
+      + '<span style="color: #667788">Fallback Selected:</span> <span style="color: #fff">' + meta.fallbackSelected + '</span><br>'
+      + '<span style="color: #667788">Testnet USDC Symbols:</span> <span style="color: #fff">' + meta.testnetUsdcSymbolsCount + '</span><br>'
+      + '<span style="color: #667788">Markets Checked:</span> <span style="color: #fff">' + meta.compatibleMarketSymbolsChecked + '</span><br>'
+      + '<span style="color: #667788">Skipped Non-USDC:</span> <span style="color: #fff">' + meta.skippedCount + '</span><br>'
+      + '<span style="color: #667788">Top Skipped:</span> <span style="color: #fff">' + _esc((meta.topSkippedSymbols || []).join(', ')) + '</span><br>'
+      + '<span style="color: #667788">Fallback Blocked Reason:</span> <span style="color: #fff">' + _esc(meta.fallbackBlockedReason || 'None') + '</span>'
+      + '</div>';
+}
+
 async function _paperbotTestnetOrderRequest() {
   // TESTNET ONLY. No secrets, apiKey or apiSecret are ever sent from the browser.
   const authHeaders = await _getAuthHeaders();
@@ -4265,6 +4303,7 @@ function renderPaperBot(state) {
   _pbRenderLastSignal(state);
   _pbRenderManualPlan(state);
   _pbRenderExecutionPreview(state);
+  _pbRenderDiagnostics(state);
   _pbRenderAnalystFeed(state);
   _paperbotPromptReconnect(state);
 

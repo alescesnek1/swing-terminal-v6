@@ -501,6 +501,7 @@ function publicState(extra = {}) {
     realizedPnl: botControlState.realizedPnl,
     unrealizedPnl: botControlState.unrealizedPnl,
     events: botControlState.events,
+    scanMeta: botControlState.scanMeta || null,
     ...extra,
   };
 }
@@ -791,9 +792,14 @@ async function runDryRunScanFromMarkets(markets) {
     break;
   }
 
+  let fallbackAttempted = false;
+  let fallbackSelected = false;
+  let fallbackBlockedReason = null;
+
   if (!bestCandidate) {
     let fallbackCandidate = null;
     if (isTestnetConfigured && allowTestnetOrders && allowFallback && testnetFilterActive) {
+      fallbackAttempted = true;
       for (const c of candidatesList) {
         if (!c.symbol || c.symbol === 'USDC' || c.symbol.includes('USDT') || c.symbol.includes('USDC')) continue;
         if (c.price <= 0) continue;
@@ -803,6 +809,14 @@ async function runDryRunScanFromMarkets(markets) {
           break;
         }
       }
+      if (!fallbackCandidate) {
+        fallbackBlockedReason = "No /api/markets asset exists in Binance Spot Testnet USDC symbol set.";
+      }
+    } else {
+      if (!isTestnetConfigured) fallbackBlockedReason = "Testnet not configured";
+      else if (!allowTestnetOrders) fallbackBlockedReason = "Testnet orders not allowed";
+      else if (!allowFallback) fallbackBlockedReason = "Fallback not allowed by env";
+      else if (!testnetFilterActive) fallbackBlockedReason = "Testnet filter not active";
     }
 
     if (fallbackCandidate) {
@@ -810,6 +824,7 @@ async function runDryRunScanFromMarkets(markets) {
       fallbackCandidate.quoteAsset = BOT_QUOTE_ASSET;
       fallbackCandidate.testnetSymbolAvailable = true;
       fallbackCandidate.strategyFallback = true;
+      fallbackSelected = true;
       events.push(event('TESTNET_COMPATIBLE_FALLBACK_SELECTED', 'info', `No high-score compatible setup found. Selected ${fallbackCandidate.binanceSymbol} as testnet-compatible fallback for adapter validation.`, {
         symbol: fallbackCandidate.symbol,
         binanceSymbol: fallbackCandidate.binanceSymbol
@@ -819,9 +834,14 @@ async function runDryRunScanFromMarkets(markets) {
       const topScore = candidatesList[0] ? candidatesList[0].score : 0;
       const topSym = candidatesList[0] ? candidatesList[0].symbol : null;
       const scanMeta = {
+        testnetFallbackEnabled: allowFallback,
         testnetUsdcSymbolsCount: testnetSymbols ? testnetSymbols.size : 0,
         skippedCount,
         topSkippedSymbols,
+        fallbackAttempted,
+        fallbackSelected,
+        fallbackBlockedReason,
+        compatibleMarketSymbolsChecked: candidatesList.length
       };
       
       if (candidatesList.length > 0 && topScore >= 6) {
@@ -839,9 +859,20 @@ async function runDryRunScanFromMarkets(markets) {
       }
       
       events.push(event('RISK_CHECK_FAILED', 'warn', 'Risk check failed: candidate score below threshold or no testnet-compatible candidate exists.'));
-      return { ok: true, status: 'safety', candidate: null, events };
+      return { ok: true, status: 'safety', candidate: null, events, scanMeta };
     }
   }
+
+  const scanMeta = {
+    testnetFallbackEnabled: allowFallback,
+    testnetUsdcSymbolsCount: testnetSymbols ? testnetSymbols.size : 0,
+    skippedCount,
+    topSkippedSymbols,
+    fallbackAttempted,
+    fallbackSelected,
+    fallbackBlockedReason,
+    compatibleMarketSymbolsChecked: candidatesList.length
+  };
 
   const candidate = bestCandidate;
 
@@ -878,7 +909,7 @@ async function runDryRunScanFromMarkets(markets) {
   events.push(event('MANUAL_EXECUTION_PLAN_READY', 'info', `Manual Binance trade plan ready for ${candidate.symbol}. No order was submitted by this app.`, {
     manualExecutionPlan,
   }));
-  return { ok: true, status: 'paper_position_open', candidate, paperPosition, manualExecutionPlan, events };
+  return { ok: true, status: 'paper_position_open', candidate, paperPosition, manualExecutionPlan, events, scanMeta };
 }
 
 function routeName(req) {
@@ -1152,6 +1183,10 @@ export default async function handler(req) {
     } else {
       result = await runDryRunScanFromMarkets(markets);
       result.events = [...marketEvents, ...result.events];
+    }
+    
+    if (result.scanMeta) {
+      botControlState.scanMeta = result.scanMeta;
     }
 
     const nextEvents = [wakeEvent, ...result.events];
