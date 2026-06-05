@@ -154,13 +154,16 @@ async function getTestnetTradableSymbols(quoteAsset = BOT_QUOTE_ASSET) {
   try {
     const data = await binancePublic('/v3/exchangeInfo');
     const symbols = new Set();
-    if (data && Array.isArray(data.symbols)) {
-      for (const row of data.symbols) {
-        if (row.status === 'TRADING' && String(row.quoteAsset).toUpperCase() === quoteAsset) {
-          symbols.add(String(row.symbol).toUpperCase());
+      if (data && Array.isArray(data.symbols)) {
+        for (const row of data.symbols) {
+          const statusOk = String(row.status || '').toUpperCase() === 'TRADING' || row.status === undefined;
+          const quoteOk = String(row.quoteAsset || '').toUpperCase() === quoteAsset;
+          const spotOk = row.isSpotTradingAllowed !== false;
+          if (statusOk && quoteOk && spotOk) {
+            symbols.add(String(row.symbol).toUpperCase());
+          }
         }
       }
-    }
     if (!testnetTradableSymbolsCache[quoteAsset]) {
       testnetTradableSymbolsCache[quoteAsset] = { at: 0, symbols: null };
     }
@@ -169,6 +172,57 @@ async function getTestnetTradableSymbols(quoteAsset = BOT_QUOTE_ASSET) {
     return symbols;
   } catch (err) {
     return null;
+  }
+}
+
+async function getTestnetExchangeInfoDebug() {
+  try {
+    const data = await binancePublic('/v3/exchangeInfo');
+    const isArray = Array.isArray(data && data.symbols);
+    let count = 0;
+    let quoteCounts = { USDT: 0, USDC: 0, BTC: 0, BNB: 0 };
+    let tradingQuoteCounts = { USDT: 0, USDC: 0, BTC: 0, BNB: 0 };
+    let firstSymbols = [];
+
+    if (isArray) {
+      count = data.symbols.length;
+      firstSymbols = data.symbols.slice(0, 5).map(row => ({
+        symbol: row.symbol,
+        status: row.status,
+        baseAsset: row.baseAsset,
+        quoteAsset: row.quoteAsset,
+        permissions: row.permissions,
+        isSpotTradingAllowed: row.isSpotTradingAllowed,
+        allowedSelfTradePreventionModes: row.allowedSelfTradePreventionModes
+      }));
+
+      for (const row of data.symbols) {
+        const q = String(row.quoteAsset || '').toUpperCase();
+        if (quoteCounts[q] !== undefined) quoteCounts[q]++;
+        
+        const statusOk = String(row.status || '').toUpperCase() === "TRADING" || row.status === undefined;
+        const spotOk = row.isSpotTradingAllowed !== false;
+        if (statusOk && spotOk) {
+          if (tradingQuoteCounts[q] !== undefined) tradingQuoteCounts[q]++;
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      httpStatus: 200,
+      symbolsIsArray: isArray,
+      symbolsCount: count,
+      firstSymbols,
+      quoteCounts,
+      tradingQuoteCounts
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err && err.message,
+      httpStatus: err && err.httpStatus
+    };
   }
 }
   
@@ -775,10 +829,12 @@ async function runDryRunScanFromMarkets(markets) {
   
   let testnetSymbols = new Set();
   let testnetFilterActive = false;
+  let exchangeInfoDebug = null;
   if (isTestnetConfigured && allowTestnetOrders) {
     const s = await getTestnetTradableSymbols(BOT_QUOTE_ASSET);
     if (s) testnetSymbols = s;
     testnetFilterActive = true;
+    exchangeInfoDebug = await getTestnetExchangeInfoDebug();
   }
 
   const candidatesList = scoreMarketsList(markets);
@@ -840,7 +896,8 @@ async function runDryRunScanFromMarkets(markets) {
             quoteFallbackAttempted = true;
             const usdtSymbols = await getTestnetTradableSymbols(BOT_TESTNET_SMOKE_QUOTE_ASSET);
             if (!usdtSymbols || usdtSymbols.size === 0) {
-              quoteFallbackBlockedReason = "No USDT symbols available on Binance Spot Testnet";
+              if (!exchangeInfoDebug) exchangeInfoDebug = await getTestnetExchangeInfoDebug();
+              quoteFallbackBlockedReason = `No USDT symbols available on Binance Spot Testnet. exchangeInfo symbolsCount=${exchangeInfoDebug.symbolsCount}, firstSymbols=${JSON.stringify(exchangeInfoDebug.firstSymbols)}`;
             } else {
               const allowList = ['BTC', 'ETH', 'BNB', 'SOL', 'ADA', 'XRP', 'DOGE'];
               let selectedBase = allowList.find(base => usdtSymbols.has(`${base}${BOT_TESTNET_SMOKE_QUOTE_ASSET}`));
@@ -919,6 +976,7 @@ async function runDryRunScanFromMarkets(markets) {
         quoteFallbackSelected,
         quoteFallbackBlockedReason,
         smokeQuoteAsset: BOT_TESTNET_SMOKE_QUOTE_ASSET,
+        exchangeInfoDebug,
         compatibleMarketSymbolsChecked: candidatesList.length
       };
       
@@ -954,6 +1012,7 @@ async function runDryRunScanFromMarkets(markets) {
     quoteFallbackSelected,
     quoteFallbackBlockedReason,
     smokeQuoteAsset: BOT_TESTNET_SMOKE_QUOTE_ASSET,
+    exchangeInfoDebug,
     compatibleMarketSymbolsChecked: candidatesList.length
   };
 
@@ -1153,6 +1212,12 @@ export default async function handler(req) {
   if (route === 'state') {
     if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
     return json(req, publicState({ authMode: auth.authMode }));
+  }
+
+  if (route === 'testnet-exchange-info-debug') {
+    if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    const debugInfo = await getTestnetExchangeInfoDebug();
+    return json(req, debugInfo);
   }
 
   if (route !== 'wake' && route !== 'stop' && route !== 'testnet-order' && route !== 'clear-paper-position') {
