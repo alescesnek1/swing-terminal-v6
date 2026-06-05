@@ -241,9 +241,84 @@ async function executeOnBinance(intent) {
   }
 }
 
-console.log(`[START] Local Binance Worker started (Testnet Mode)`);
-console.log(`[INFO] Control URL: ${controlUrl}`);
-console.log(`[INFO] Polling every ${pollIntervalMs}ms`);
+async function runPreflight() {
+  console.log(`[PREFLIGHT] Starting Binance Spot Testnet Preflight...`);
+  
+  try {
+    const timestamp = Date.now().toString();
+    const queryParams = new URLSearchParams();
+    queryParams.append('timestamp', timestamp);
+    queryParams.append('recvWindow', '5000');
+    
+    const queryString = queryParams.toString();
+    const signature = hmacSha256(queryString, apiSecret);
+    const finalUrl = `${BINANCE_TESTNET_BASE}/v3/account?${queryString}&signature=${signature}`;
 
-setInterval(pollIntent, pollIntervalMs);
-pollIntent();
+    const res = await fetch(finalUrl, {
+      method: 'GET',
+      headers: {
+        'X-MBX-APIKEY': apiKey,
+        'Accept': 'application/json'
+      }
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      if (data.msg && data.msg.includes('Invalid API-key, IP, or permissions for action')) {
+        console.error(`\n[PREFLIGHT ERROR] Your key is not valid for Binance Spot Testnet, has wrong permissions, or IP whitelist blocks this machine.\n`);
+      } else {
+        console.error(`\n[PREFLIGHT ERROR] Binance Testnet rejected request: ${data.msg || res.status}\n`);
+      }
+      return 1;
+    }
+
+    const balances = {};
+    if (Array.isArray(data.balances)) {
+      for (const b of data.balances) {
+        if (['BTC', 'USDT', 'BNB'].includes(b.asset)) {
+          balances[b.asset] = b.free;
+        }
+      }
+    }
+
+    console.log(`\n[PREFLIGHT SUCCESS]`);
+    console.log(`ok: true`);
+    console.log(`canReachBinance: true`);
+    if (data.accountType) console.log(`accountType: ${data.accountType}`);
+    if (data.permissions) console.log(`permissions: ${data.permissions.join(', ')}`);
+    console.log(`balances:`, JSON.stringify(balances));
+    
+    return 0;
+  } catch (err) {
+    console.error(`\n[PREFLIGHT ERROR] Network or execution failure: ${err.message}\n`);
+    return 1;
+  }
+}
+
+async function main() {
+  const isPreflight = process.argv.includes('--preflight') || process.env.WORKER_PREFLIGHT === 'true';
+
+  if (isPreflight) {
+    return await runPreflight();
+  } else {
+    console.log(`[START] Local Binance Worker started (Testnet Mode)`);
+    console.log(`[INFO] Control URL: ${controlUrl}`);
+    console.log(`[INFO] Polling every ${pollIntervalMs}ms`);
+
+    setInterval(pollIntent, pollIntervalMs);
+    pollIntent();
+    // Don't return, keep running
+  }
+}
+
+main()
+  .then((code) => {
+    if (code !== undefined) {
+      process.exitCode = code;
+    }
+  })
+  .catch((err) => {
+    console.error('[FATAL]', err);
+    process.exitCode = 1;
+  });

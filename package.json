@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "bot:worker": "node scripts/local-binance-worker.mjs"
+    "bot:worker": "node scripts/local-binance-worker.mjs",
+    "bot:worker:preflight": "node scripts/local-binance-worker.mjs --preflight"
   }
 }
