@@ -3732,6 +3732,11 @@ function _pbRenderExecutionPreview(state) {
       + '</div>';
   }
 
+  const errorMessage = state && state.blockedReason ? state.blockedReason : (state && state.binanceMessage ? state.binanceMessage : null);
+  if (errorMessage) {
+    html += '<div class="pb-execution-preview-card__error" style="color: #ff4a4a; margin-top: 10px; font-weight: bold; font-size: 13px; text-align: center; border-top: 1px solid rgba(255, 74, 74, 0.2); padding-top: 10px;">' + _esc(errorMessage) + '</div>';
+  }
+
   html += '<div class="pb-execution-preview-card__reason">' + _esc(preview.reason || 'Execution preview only. No Binance order submitted.') + '</div>';
   card.innerHTML = html;
 }
@@ -3745,10 +3750,29 @@ async function _paperbotTestnetOrderRequest() {
     body: '{}',
   });
   const payload = await res.json().catch(() => ({}));
-  if (!res.ok || payload.ok === false) {
-    throw new Error(payload.message || payload.error || ('Testnet order failed: HTTP ' + res.status));
+  
+  if (payload && typeof payload === 'object' && ('status' in payload || 'events' in payload || 'ok' in payload)) {
+    renderPaperBot(_paperbotStateFromControlResponse(payload));
   }
-  renderPaperBot(_paperbotStateFromControlResponse(payload));
+
+  if (!res.ok || payload.ok === false) {
+    let msg = payload.blockedReason;
+    if (!msg) msg = payload.binanceMessage;
+    if (!msg && Array.isArray(payload.events)) {
+      const failEvent = payload.events.find(e => e.type === 'TESTNET_ORDER_FAILED');
+      if (failEvent) msg = failEvent.message;
+    }
+    if (!msg) msg = 'Testnet order failed';
+    
+    if (Array.isArray(payload.events)) {
+      const failEvent = payload.events.find(e => e.type === 'TESTNET_ORDER_FAILED');
+      if (failEvent) {
+         try { LiveFeed.push(failEvent.message, 'error', { source: 'PaperBot Testnet' }); } catch {}
+      }
+    }
+    
+    throw new Error(msg);
+  }
   if (payload.testnetOrderSubmitted === true) {
     try { window.Toast?.success('TESTNET ORDER SENT', 'Binance Spot Testnet order submitted. Production trading remains locked.'); } catch {}
     try { LiveFeed.push('TESTNET_ORDER_SUBMITTED - Binance Spot Testnet order submitted. Real order: NO.', 'info', { source: 'PaperBot Testnet' }); } catch {}
@@ -4453,6 +4477,8 @@ function _paperbotStateFromControlResponse(payload) {
     testnetOrders: Array.isArray(payload && payload.testnetOrders) ? payload.testnetOrders : [],
     testnetExecutionEnabled: !!(payload && payload.testnetExecutionEnabled),
     testnetOrderSubmitted: !!(payload && payload.testnetOrderSubmitted),
+    blockedReason: payload && payload.blockedReason ? payload.blockedReason : null,
+    binanceMessage: payload && payload.binanceMessage ? payload.binanceMessage : null,
     executionEnabled: false,
     realOrderSubmitted: false,
     events,

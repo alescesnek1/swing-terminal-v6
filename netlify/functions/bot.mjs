@@ -108,6 +108,31 @@ function getTestnetExecutionEnabled() {
     && creds.hasApiSecret;
 }
 
+class SafeBinanceError extends Error {
+  constructor(message, meta = {}) {
+    super(message);
+    this.safeMessage = message;
+    this.binanceCode = meta.binanceCode;
+    this.binanceMessage = meta.binanceMessage;
+    this.httpStatus = meta.httpStatus;
+  }
+}
+
+function safeTestnetOrderError(err, fallbackMessage = 'Testnet order failed safely.') {
+  return {
+    ok: false,
+    error: 'TESTNET_ORDER_FAILED',
+    blockedReason: err && err.safeMessage ? err.safeMessage : fallbackMessage,
+    binanceCode: err && err.binanceCode ? err.binanceCode : undefined,
+    binanceMessage: err && err.binanceMessage ? err.binanceMessage : undefined,
+    httpStatus: err && err.httpStatus ? err.httpStatus : undefined,
+    testnetOrderSubmitted: false,
+    realOrderSubmitted: false,
+    executionEnabled: false,
+    testnetExecutionEnabled: false
+  };
+}
+
 // ── Binance Spot TESTNET adapter ──────────────────────────────────────────────
 // TESTNET ONLY. These helpers must never reach the Binance production API.
 // Production base URL and live orders are hard-blocked by BINANCE_ENV === 'testnet'.
@@ -150,7 +175,16 @@ async function binancePublic(path, params = {}) {
   const url = qs ? `${base}${path}?${qs}` : `${base}${path}`;
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`Binance testnet public HTTP ${res.status}: ${(data && data.msg) || 'request failed'}`);
+  if (!res.ok) {
+    if (data && data.code && data.msg) {
+      throw new SafeBinanceError(`Binance Testnet rejected request: ${data.msg}`, {
+        binanceCode: data.code,
+        binanceMessage: data.msg,
+        httpStatus: res.status
+      });
+    }
+    throw new SafeBinanceError(`Binance testnet public HTTP ${res.status} failed safely.`, { httpStatus: res.status });
+  }
   return data;
 }
 
@@ -168,16 +202,34 @@ async function binanceSigned(method, path, params = {}) {
     headers: { 'X-MBX-APIKEY': apiKey, Accept: 'application/json' },
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`Binance testnet signed HTTP ${res.status}: ${(data && data.msg) || 'request failed'}`);
+  if (!res.ok) {
+    if (data && data.code && data.msg) {
+      throw new SafeBinanceError(`Binance Testnet rejected request: ${data.msg}`, {
+        binanceCode: data.code,
+        binanceMessage: data.msg,
+        httpStatus: res.status
+      });
+    }
+    throw new SafeBinanceError(`Binance testnet signed HTTP ${res.status} failed safely.`, { httpStatus: res.status });
+  }
   return data;
 }
 
 async function getExchangeInfo(symbol) {
-  const data = await binancePublic('/v3/exchangeInfo', { symbol });
+  let data;
+  try {
+    data = await binancePublic('/v3/exchangeInfo', { symbol });
+  } catch (err) {
+    throw new SafeBinanceError(`Symbol ${symbol} is not available on Binance Spot Testnet.`, {
+      binanceCode: err && err.binanceCode,
+      binanceMessage: err && err.binanceMessage,
+      httpStatus: err && err.httpStatus
+    });
+  }
   const info = Array.isArray(data && data.symbols)
     ? data.symbols.find((row) => String(row.symbol).toUpperCase() === String(symbol).toUpperCase())
     : null;
-  if (!info) throw new Error(`Exchange info not available for ${symbol} on testnet.`);
+  if (!info) throw new SafeBinanceError(`Symbol ${symbol} is not available on Binance Spot Testnet.`);
   return info;
 }
 
@@ -724,20 +776,29 @@ async function handleTestnetOrder(req, auth) {
   try {
     result = await submitTestnetOrder(paperPosition);
   } catch (err) {
-    const failEvent = event('TESTNET_ORDER_FAILED', 'warn', `Testnet order failed: ${err.message}`);
+    const safeMessage = err.safeMessage || 'Testnet order failed safely.';
+    const failEvent = event('TESTNET_ORDER_FAILED', 'error', safeMessage, {
+      symbol: paperPosition ? paperPosition.symbol + 'USDT' : undefined,
+      testnet: true,
+      realOrderSubmitted: false,
+      binanceCode: err.binanceCode,
+      binanceMessage: err.binanceMessage,
+      httpStatus: err.httpStatus
+    });
     botControlState = {
       ...botControlState,
       events: [failEvent, ...botControlState.events].slice(0, 30),
       updatedAt: failEvent.ts,
     };
+    
+    const safeErrorObj = safeTestnetOrderError(err);
+    
     return json(req, publicState({
-      testnetOrderSubmitted: false,
-      realOrderSubmitted: false,
-      executionEnabled: false,
+      ...safeErrorObj,
       testnetExecutionEnabled: true,
       events: [failEvent],
       authMode: auth.authMode,
-    }), 502);
+    }), 200);
   }
 
   if (!result.ok) {
