@@ -140,33 +140,37 @@ function getExecutionQuoteAsset({ smokeFallback = false } = {}) {
   return smokeFallback ? BOT_TESTNET_SMOKE_QUOTE_ASSET : BOT_QUOTE_ASSET;
 }
 
-let testnetTradableSymbolsCache = null;
-let testnetTradableSymbolsCacheAt = 0;
-let testnetTradableSymbolsQuote = null;
+let testnetTradableSymbolsCache = {
+  USDC: { at: 0, symbols: null },
+  USDT: { at: 0, symbols: null }
+};
 
 async function getTestnetTradableSymbols(quoteAsset = BOT_QUOTE_ASSET) {
   const now = Date.now();
-    if (testnetTradableSymbolsCache && testnetTradableSymbolsQuote === quoteAsset && (now - testnetTradableSymbolsCacheAt < 5 * 60 * 1000)) {
-      return testnetTradableSymbolsCache;
-    }
-    try {
-      const data = await binancePublic('/v3/exchangeInfo');
-      const symbols = new Set();
-      if (data && Array.isArray(data.symbols)) {
-        for (const row of data.symbols) {
-          if (row.status === 'TRADING' && String(row.quoteAsset).toUpperCase() === quoteAsset) {
-            symbols.add(String(row.symbol).toUpperCase());
-          }
+  const cacheEntry = testnetTradableSymbolsCache[quoteAsset];
+  if (cacheEntry && cacheEntry.symbols && (now - cacheEntry.at < 5 * 60 * 1000)) {
+    return cacheEntry.symbols;
+  }
+  try {
+    const data = await binancePublic('/v3/exchangeInfo');
+    const symbols = new Set();
+    if (data && Array.isArray(data.symbols)) {
+      for (const row of data.symbols) {
+        if (row.status === 'TRADING' && String(row.quoteAsset).toUpperCase() === quoteAsset) {
+          symbols.add(String(row.symbol).toUpperCase());
         }
       }
-      testnetTradableSymbolsCache = symbols;
-      testnetTradableSymbolsCacheAt = now;
-      testnetTradableSymbolsQuote = quoteAsset;
-      return symbols;
-    } catch (err) {
-      return null;
     }
+    if (!testnetTradableSymbolsCache[quoteAsset]) {
+      testnetTradableSymbolsCache[quoteAsset] = { at: 0, symbols: null };
+    }
+    testnetTradableSymbolsCache[quoteAsset].symbols = symbols;
+    testnetTradableSymbolsCache[quoteAsset].at = now;
+    return symbols;
+  } catch (err) {
+    return null;
   }
+}
   
   function toBinanceQuoteSymbol(symbol, quoteAsset = BOT_QUOTE_ASSET) {
     return `${String(symbol || '').toUpperCase()}${quoteAsset}`;
@@ -811,6 +815,9 @@ async function runDryRunScanFromMarkets(markets) {
   let fallbackAttempted = false;
   let fallbackSelected = false;
   let fallbackBlockedReason = null;
+  let quoteFallbackAttempted = false;
+  let quoteFallbackSelected = false;
+  let quoteFallbackBlockedReason = null;
 
   if (!bestCandidate) {
     let fallbackCandidate = null;
@@ -828,34 +835,48 @@ async function runDryRunScanFromMarkets(markets) {
       if (!fallbackCandidate) {
         fallbackBlockedReason = "No /api/markets asset exists in Binance Spot Testnet USDC symbol set.";
         
-        if (testnetSymbols.size === 0 && allowQuoteFallback) {
-          const usdtSymbols = await getTestnetTradableSymbols(BOT_TESTNET_SMOKE_QUOTE_ASSET);
-          if (usdtSymbols && usdtSymbols.size > 0) {
-            const allowList = ['BTC', 'ETH', 'BNB', 'SOL', 'ADA', 'XRP', 'DOGE'];
-            let selectedBase = allowList.find(base => usdtSymbols.has(`${base}${BOT_TESTNET_SMOKE_QUOTE_ASSET}`));
-            if (!selectedBase) selectedBase = Array.from(usdtSymbols)[0].replace(BOT_TESTNET_SMOKE_QUOTE_ASSET, '');
-            if (selectedBase) {
-              try {
-                const priceData = await binancePublic('/v3/ticker/price', { symbol: `${selectedBase}${BOT_TESTNET_SMOKE_QUOTE_ASSET}` });
-                const price = parseFloat(priceData.price);
-                if (price > 0) {
-                  fallbackCandidate = {
-                    symbol: selectedBase,
-                    price,
-                    score: 0,
-                    binanceSymbol: `${selectedBase}${BOT_TESTNET_SMOKE_QUOTE_ASSET}`,
-                    quoteAsset: BOT_TESTNET_SMOKE_QUOTE_ASSET,
-                    strategyFallback: true,
-                    smokeFallback: true,
-                    fallbackReason: "testnet_quote_fallback_adapter_validation",
-                    testnetSymbolAvailable: true
-                  };
-                  events.push(event('TESTNET_SMOKE_QUOTE_FALLBACK_SELECTED', 'info', `Binance Spot Testnet has no USDC symbols available. Selected ${fallbackCandidate.binanceSymbol} using testnet-only USDT quote fallback to validate the order adapter. Production strategy remains USDC-only.`, {
-                    fallbackCandidate
-                  }));
+        if (testnetSymbols.size === 0) {
+          if (allowQuoteFallback) {
+            quoteFallbackAttempted = true;
+            const usdtSymbols = await getTestnetTradableSymbols(BOT_TESTNET_SMOKE_QUOTE_ASSET);
+            if (!usdtSymbols || usdtSymbols.size === 0) {
+              quoteFallbackBlockedReason = "No USDT symbols available on Binance Spot Testnet";
+            } else {
+              const allowList = ['BTC', 'ETH', 'BNB', 'SOL', 'ADA', 'XRP', 'DOGE'];
+              let selectedBase = allowList.find(base => usdtSymbols.has(`${base}${BOT_TESTNET_SMOKE_QUOTE_ASSET}`));
+              if (!selectedBase) selectedBase = Array.from(usdtSymbols)[0].replace(BOT_TESTNET_SMOKE_QUOTE_ASSET, '');
+              if (selectedBase) {
+                try {
+                  const priceData = await binancePublic('/v3/ticker/price', { symbol: `${selectedBase}${BOT_TESTNET_SMOKE_QUOTE_ASSET}` });
+                  const price = parseFloat(priceData.price);
+                  if (price > 0) {
+                    quoteFallbackSelected = true;
+                    fallbackCandidate = {
+                      symbol: selectedBase,
+                      price,
+                      score: 0,
+                      binanceSymbol: `${selectedBase}${BOT_TESTNET_SMOKE_QUOTE_ASSET}`,
+                      quoteAsset: BOT_TESTNET_SMOKE_QUOTE_ASSET,
+                      strategyFallback: true,
+                      smokeFallback: true,
+                      fallbackReason: "testnet_quote_fallback_adapter_validation",
+                      testnetSymbolAvailable: true
+                    };
+                    events.push(event('TESTNET_SMOKE_QUOTE_FALLBACK_SELECTED', 'info', `Binance Spot Testnet returned 0 USDC pairs. Selected ${fallbackCandidate.binanceSymbol} using testnet-only USDT smoke fallback to validate order signing/execution. Production strategy remains USDC-only.`, {
+                      fallbackCandidate
+                    }));
+                  } else {
+                    quoteFallbackBlockedReason = "Ticker price returned zero for selected smoke symbol";
+                  }
+                } catch (e) {
+                  quoteFallbackBlockedReason = "Ticker price unavailable for selected smoke symbol";
                 }
-              } catch (e) {}
+              } else {
+                quoteFallbackBlockedReason = "No base symbol could be extracted from USDT testnet pairs";
+              }
             }
+          } else {
+            quoteFallbackBlockedReason = "BOT_TESTNET_ALLOW_QUOTE_FALLBACK is not true";
           }
         }
       }
@@ -893,6 +914,11 @@ async function runDryRunScanFromMarkets(markets) {
         fallbackAttempted,
         fallbackSelected,
         fallbackBlockedReason,
+        quoteFallbackEnabled: allowQuoteFallback,
+        quoteFallbackAttempted,
+        quoteFallbackSelected,
+        quoteFallbackBlockedReason,
+        smokeQuoteAsset: BOT_TESTNET_SMOKE_QUOTE_ASSET,
         compatibleMarketSymbolsChecked: candidatesList.length
       };
       
@@ -923,6 +949,11 @@ async function runDryRunScanFromMarkets(markets) {
     fallbackAttempted,
     fallbackSelected,
     fallbackBlockedReason,
+    quoteFallbackEnabled: allowQuoteFallback,
+    quoteFallbackAttempted,
+    quoteFallbackSelected,
+    quoteFallbackBlockedReason,
+    smokeQuoteAsset: BOT_TESTNET_SMOKE_QUOTE_ASSET,
     compatibleMarketSymbolsChecked: candidatesList.length
   };
 

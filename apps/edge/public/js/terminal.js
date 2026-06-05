@@ -3798,7 +3798,12 @@ function _pbRenderDiagnostics(state) {
       + '<span style="color: #667788">Markets Checked:</span> <span style="color: #fff">' + meta.compatibleMarketSymbolsChecked + '</span><br>'
       + '<span style="color: #667788">Skipped Non-USDC:</span> <span style="color: #fff">' + meta.skippedCount + '</span><br>'
       + '<span style="color: #667788">Top Skipped:</span> <span style="color: #fff">' + _esc((meta.topSkippedSymbols || []).join(', ')) + '</span><br>'
-      + '<span style="color: #667788">Fallback Blocked Reason:</span> <span style="color: #fff">' + _esc(meta.fallbackBlockedReason || 'None') + '</span>';
+      + '<span style="color: #667788">Fallback Blocked Reason:</span> <span style="color: #fff">' + _esc(meta.fallbackBlockedReason || 'None') + '</span><br>'
+      + '<span style="color: #667788">Quote Fallback Enabled:</span> <span style="color: #fff">' + meta.quoteFallbackEnabled + '</span><br>'
+      + '<span style="color: #667788">Quote Fallback Attempted:</span> <span style="color: #fff">' + meta.quoteFallbackAttempted + '</span><br>'
+      + '<span style="color: #667788">Quote Fallback Selected:</span> <span style="color: #fff">' + meta.quoteFallbackSelected + '</span><br>'
+      + '<span style="color: #667788">Quote Fallback Blocked:</span> <span style="color: #fff">' + _esc(meta.quoteFallbackBlockedReason || 'None') + '</span><br>'
+      + '<span style="color: #667788">Smoke Quote Asset:</span> <span style="color: #fff">' + _esc(meta.smokeQuoteAsset || '') + '</span>';
 
   if (meta.testnetUsdcSymbolsCount === 0) {
       diagHtml += '<br><br><span style="color: #ffaa00">USDC pairs on testnet: 0.<br>Enable BOT_TESTNET_ALLOW_QUOTE_FALLBACK=true to run a testnet-only USDT smoke order adapter validation.</span>';
