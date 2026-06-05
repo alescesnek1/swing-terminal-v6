@@ -845,10 +845,49 @@ function blockTestnetOrder(req, auth, reason, extra = {}) {
   }));
 }
 
+async function validatePaperPositionForTestnet(paperPosition) {
+  if (!paperPosition || paperPosition.status !== 'open') {
+    return { ok: false, reason: 'No open paper position.' };
+  }
+  const symbol = toBinanceQuoteSymbol(paperPosition.symbol);
+  
+  const isTestnetEnv = process.env.BINANCE_ENV === 'testnet';
+  const creds = getBinanceCredentials();
+  if (isTestnetEnv && creds.hasApiKey && creds.hasApiSecret) {
+    const testnetSymbols = await getTestnetTradableSymbols();
+    if (testnetSymbols && !testnetSymbols.has(symbol)) {
+      return { ok: false, reason: `Symbol ${symbol} is not available on Binance Spot Testnet. Clear the paper position and run Wake Bot again.`, symbol };
+    }
+  }
+  
+  return { ok: true, symbol };
+}
+
 async function handleTestnetOrder(req, auth) {
   const paperPosition = botControlState.paperPosition && botControlState.paperPosition.status === 'open'
     ? botControlState.paperPosition
     : null;
+
+  const valid = await validatePaperPositionForTestnet(paperPosition);
+  if (!valid.ok) {
+    const blockEvent = event('TESTNET_SYMBOL_INVALID_FOR_OPEN_POSITION', 'warn', `Open paper position ${paperPosition ? paperPosition.symbol : 'UNKNOWN'} cannot be sent to Binance Spot Testnet because ${valid.symbol || 'it'} is not available.`);
+    botControlState = {
+      ...botControlState,
+      events: [blockEvent, ...botControlState.events].slice(0, 30),
+      updatedAt: blockEvent.ts,
+    };
+    return json(req, publicState({
+      ok: false,
+      error: 'TESTNET_ORDER_BLOCKED',
+      blockedReason: valid.reason,
+      testnetOrderSubmitted: false,
+      realOrderSubmitted: false,
+      executionEnabled: false,
+      testnetExecutionEnabled: false,
+      events: [blockEvent],
+      authMode: auth.authMode,
+    }), 200);
+  }
 
   const gate = getTestnetSafetyGate(paperPosition);
   if (!gate.ok) {
@@ -935,7 +974,7 @@ export default async function handler(req) {
     return json(req, publicState({ authMode: auth.authMode }));
   }
 
-  if (route !== 'wake' && route !== 'stop' && route !== 'testnet-order') {
+  if (route !== 'wake' && route !== 'stop' && route !== 'testnet-order' && route !== 'clear-paper-position') {
     return json(req, { ok: false, error: 'Not Found' }, 404);
   }
   if (req.method !== 'POST') {
@@ -961,6 +1000,29 @@ export default async function handler(req) {
 
   if (route === 'testnet-order') {
     return await handleTestnetOrder(req, auth);
+  }
+
+  if (route === 'clear-paper-position') {
+    const clearEvent = event('PAPER_POSITION_CLEARED', 'info', 'Open paper position cleared by user.');
+    botControlState = {
+      ...botControlState,
+      paperPosition: null,
+      manualExecutionPlan: null,
+      executionPreview: null,
+      unrealizedPnl: 0,
+      events: [clearEvent, ...botControlState.events].slice(0, 30),
+      updatedAt: clearEvent.ts,
+    };
+    return json(req, publicState({
+      ok: true,
+      status: 'safety',
+      paperPosition: null,
+      message: 'Open paper position cleared. Run Wake Bot again to scan for a testnet-compatible USDC setup.',
+      events: [clearEvent],
+      realOrderSubmitted: false,
+      testnetOrderSubmitted: false,
+      authMode: auth.authMode,
+    }));
   }
 
   if (route === 'wake') {
@@ -1000,21 +1062,34 @@ export default async function handler(req) {
 
     let result;
     if (botControlState.paperPosition && botControlState.paperPosition.status === 'open') {
-      const monitor = monitorPaperPosition(markets);
-      const alreadyOpenEvent = botControlState.paperPosition
-        ? event('PAPER_POSITION_ALREADY_OPEN', 'info', `Existing paper position remains open for ${botControlState.paperPosition.symbol}.`, {
-            paperPosition: botControlState.paperPosition,
-          })
-        : null;
-      result = {
-        ok: true,
-        status: monitor.closedTrade ? 'paper_position_closed' : (botControlState.paperPosition ? 'paper_position_open' : 'stopped'),
-        candidate: botControlState.candidate,
-        paperPosition: botControlState.paperPosition,
-        closedTrade: monitor.closedTrade,
-        manualExecutionPlan: botControlState.manualExecutionPlan,
-        events: alreadyOpenEvent ? [...marketEvents, alreadyOpenEvent, ...monitor.events] : [...marketEvents, ...monitor.events],
-      };
+      const valid = await validatePaperPositionForTestnet(botControlState.paperPosition);
+      if (!valid.ok) {
+        const invalidEvent = event('PAPER_POSITION_INVALIDATED', 'warn', `Previous paper position was not available on Binance Spot Testnet ${BOT_QUOTE_ASSET} pairs and was cleared before scanning.`);
+        botControlState.paperPosition = null;
+        botControlState.manualExecutionPlan = null;
+        botControlState.executionPreview = null;
+        botControlState.unrealizedPnl = 0;
+        
+        marketEvents.push(invalidEvent);
+        result = await runDryRunScanFromMarkets(markets);
+        result.events = [...marketEvents, ...result.events];
+      } else {
+        const monitor = monitorPaperPosition(markets);
+        const alreadyOpenEvent = botControlState.paperPosition
+          ? event('PAPER_POSITION_ALREADY_OPEN', 'info', `Existing paper position remains open for ${botControlState.paperPosition.symbol}.`, {
+              paperPosition: botControlState.paperPosition,
+            })
+          : null;
+        result = {
+          ok: true,
+          status: monitor.closedTrade ? 'paper_position_closed' : (botControlState.paperPosition ? 'paper_position_open' : 'stopped'),
+          candidate: botControlState.candidate,
+          paperPosition: botControlState.paperPosition,
+          closedTrade: monitor.closedTrade,
+          manualExecutionPlan: botControlState.manualExecutionPlan,
+          events: alreadyOpenEvent ? [...marketEvents, alreadyOpenEvent, ...monitor.events] : [...marketEvents, ...monitor.events],
+        };
+      }
     } else {
       result = await runDryRunScanFromMarkets(markets);
       result.events = [...marketEvents, ...result.events];

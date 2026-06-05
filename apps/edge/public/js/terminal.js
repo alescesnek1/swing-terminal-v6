@@ -3738,6 +3738,11 @@ function _pbRenderExecutionPreview(state) {
   const errorMessage = state && state.blockedReason ? state.blockedReason : (state && state.binanceMessage ? state.binanceMessage : null);
   if (errorMessage) {
     html += '<div class="pb-execution-preview-card__error" style="color: #ff4a4a; margin-top: 10px; font-weight: bold; font-size: 13px; text-align: center; border-top: 1px solid rgba(255, 74, 74, 0.2); padding-top: 10px;">' + _esc(errorMessage) + '</div>';
+    const hasInvalidSymbolEvent = Array.isArray(state && state.events) && state.events.some(e => e.type === 'TESTNET_SYMBOL_INVALID_FOR_OPEN_POSITION');
+    const hasClearReason = errorMessage.includes('Clear the paper position');
+    if (hasInvalidSymbolEvent || hasClearReason) {
+      html += '<div style="text-align: center; margin-top: 10px;"><button type="button" class="pb-execution-preview-card__clear-btn" style="background: #331111; color: #ff4a4a; border: 1px solid #ff4a4a; padding: 5px 10px; cursor: pointer; border-radius: 4px; font-weight: bold;" onclick="clearPaperBotPosition()">Clear Paper Position</button></div>';
+    }
   }
 
   html += '<div class="pb-execution-preview-card__reason">' + _esc(preview.reason || 'Execution preview only. No Binance order submitted.') + '</div>';
@@ -3791,6 +3796,23 @@ function sendPaperBotTestnetOrder() {
     console.warn('[PaperBot] Testnet order failed:', err.message);
     window.Toast?.error('Testnet order failed', err.message, { endpoint: '/api/bot/testnet-order' });
   });
+}
+
+async function clearPaperBotPosition() {
+  try {
+    const authHeaders = await _getAuthHeaders();
+    const res = await fetch('/api/bot/clear-paper-position', {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', ...authHeaders },
+      body: '{}',
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (payload && typeof payload === 'object' && ('status' in payload || 'events' in payload || 'ok' in payload)) {
+      renderPaperBot(_paperbotStateFromControlResponse(payload));
+    }
+  } catch (err) {
+    console.warn('[PaperBot] clear position failed:', err.message);
+  }
 }
 
 function copyPaperBotManualPlan() {
