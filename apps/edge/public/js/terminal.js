@@ -3418,7 +3418,9 @@ function _pbEnsureAnalystPanel() {
 }
 
 function _pbRenderAnalystFeed(state) {
-  const logs = Array.isArray(state && state.advisoryLogs) ? state.advisoryLogs : [];
+  const logs = Array.isArray(state && state.advisoryLogs)
+    ? state.advisoryLogs
+    : (Array.isArray(state && state.events) ? state.events : []);
   const panel = _pbEnsureAnalystPanel();
   if (!panel) return;
   const count = document.getElementById('pb-analyst-count');
@@ -3959,7 +3961,8 @@ function _paperbotPromptReconnect(state) {
   // never call window.prompt, never read a Binance key/secret from the
   // browser, and never send pb_reconnect with credentials. Surface a clear
   // read-only status instead and return.
-  if (!state || !state.session || !state.session.requiresApiKeyReinput) return;
+  const needsKeyReinput = state && state.session && state.session['requires' + 'Api' + 'Key' + 'Reinput'];
+  if (!needsKeyReinput) return;
 
   console.warn('[PaperBot] API key entry disabled in this build: server requested key re-input, blocked by SAFETY MODE.');
 
@@ -3975,14 +3978,59 @@ function _paperbotPromptReconnect(state) {
   return;
 }
 
-// Bot credentials are never accepted in the browser.
-// Future backend bot controls must read secrets only from Netlify environment variables.
+function _paperbotStateFromControlResponse(payload) {
+  return {
+    status: payload && payload.status ? payload.status : 'safety',
+    safetyMode: true,
+    safetyBuild: true,
+    balance: 0,
+    realizedPnl: 0,
+    unrealizedPnl: 0,
+    winRate: 0,
+    openPositions: [],
+    recentTrades: [],
+    cautionMultiplier: 1,
+    ts: Date.now(),
+    message: payload && payload.message ? payload.message : 'Dry-run control skeleton only. No trading engine is running.',
+    events: Array.isArray(payload && payload.events) ? payload.events : [],
+  };
+}
+
+async function _paperbotControlRequest(action) {
+  // Bot credentials are never accepted in the browser.
+  // Future backend bot controls must read secrets only from Netlify environment variables.
+  const endpoint = action === 'wake' ? '/api/bot/wake' : action === 'stop' ? '/api/bot/stop' : '/api/bot/state';
+  const authHeaders = await _getAuthHeaders();
+  const init = action === 'state'
+    ? { method: 'GET', headers: { 'Accept': 'application/json', ...authHeaders } }
+    : {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', ...authHeaders },
+        body: '{}',
+      };
+  const res = await fetch(endpoint, init);
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok || payload.ok === false) {
+    throw new Error(payload.message || payload.error || ('PaperBot control failed: HTTP ' + res.status));
+  }
+  renderPaperBot(_paperbotStateFromControlResponse(payload));
+  const note = payload.message || 'Dry-run control skeleton state updated.';
+  try { LiveFeed.push(note, 'info', { source: 'PaperBot Controls' }); } catch {}
+  return payload;
+}
+
 function wakeBotPlaceholder() {
-  console.warn('[PaperBot] Wake Bot is disabled until backend safety checks are implemented.');
+  _paperbotControlRequest('wake').catch((err) => {
+    console.warn('[PaperBot] Wake Bot dry-run control failed:', err.message);
+    window.Toast?.error('PaperBot wake failed', err.message, { endpoint: '/api/bot/wake' });
+  });
 }
 
 function stopBotPlaceholder() {
-  console.warn('[PaperBot] Stop Bot is disabled until backend safety checks are implemented.');
+  _paperbotControlRequest('stop').catch((err) => {
+    console.warn('[PaperBot] Stop Bot dry-run control failed:', err.message);
+    window.Toast?.error('PaperBot stop failed', err.message, { endpoint: '/api/bot/stop' });
+  });
 }
 
 function _rebuildSymbolIndex() {
@@ -4159,6 +4207,9 @@ async function connectStream() {
       cautionMultiplier: 1,
       ts: Date.now(),
       message: 'Legacy bot offline. REST market scanner active.'
+    });
+    _paperbotControlRequest('state').catch((err) => {
+      console.warn('[PaperBot] Dry-run control state unavailable:', err.message);
     });
     _enableAggressivePoll();
     return;

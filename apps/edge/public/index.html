@@ -248,10 +248,11 @@
         <div style="font-weight:700;letter-spacing:.08em">PAPERBOT SAFETY MODE</div>
         <div style="color:var(--txt2)">Legacy bot offline. REST market scanner active.</div>
         <div style="color:var(--txt2)">API keys and secrets must be configured only in Netlify Environment Variables. They are never entered in the browser.</div>
+        <div style="color:var(--txt2)">Dry-run control skeleton only. No trading engine is running.</div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
-          <button class="hbtn" type="button" disabled onclick="wakeBotPlaceholder()">Wake Bot</button>
-          <button class="hbtn" type="button" disabled onclick="stopBotPlaceholder()">Stop Bot</button>
-          <span style="color:var(--txt2)">Bot controls are disabled until backend safety checks are implemented.</span>
+          <button class="hbtn" type="button" onclick="wakeBotPlaceholder()">Wake Bot</button>
+          <button class="hbtn" type="button" onclick="stopBotPlaceholder()">Stop Bot</button>
+          <span style="color:var(--txt2)">Wake/Stop only updates backend dry-run safety state.</span>
         </div>
       </div>
       <div class="bot-hero">
