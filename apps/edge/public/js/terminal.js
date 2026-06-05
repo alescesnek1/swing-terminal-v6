@@ -3320,9 +3320,8 @@ async function doRefresh() {
 // ─────────────────────────────────────────────────────────────
 // V6 — BOT INTELLIGENCE PANEL
 //
-// Consumes `pb` frames pushed by the Fly.io ingest worker over the
-// existing /api/stream-markets WebSocket (and the equivalent payload
-// from GET /api/paperbot/state when the WS is dead). Mutates ONLY
+// Consumes `pb` state frames when a permitted backend transport exists.
+// In the current safety build the legacy transport is disabled. Mutates ONLY
 // the metric value nodes plus the diff of new ledger rows — no
 // innerHTML wipe on the parent panel, no flicker between ticks.
 //
@@ -3734,11 +3733,13 @@ function renderPaperBot(state) {
   const statusEl = document.getElementById('pb-status');
   if (statusEl) {
     let txt, klass;
-    if (state.status === 'emergency') { txt = 'EMERGENCY'; klass = 'pb-status-stopped'; }
-    else if (state.status === 'awaiting_keys') { txt = 'AWAITING KEYS'; klass = 'pb-status-stopped'; }
+    const paperBotSafetyMode = window.__paperBotSafetyMode === true || state.status === 'safety' || state.safetyMode === true;
+    if (paperBotSafetyMode) { txt = 'SAFETY MODE'; klass = 'pb-status-stopped'; }
+    else if (state.status === 'emergency') { txt = 'EMERGENCY'; klass = 'pb-status-stopped'; }
+    else if (state.status === 'awaiting_keys') { txt = 'SAFETY MODE'; klass = 'pb-status-stopped'; }
     else if (state.status === 'awaiting_session') { txt = 'AWAITING SESSION'; klass = 'pb-status-stopped'; }
     else if (state.status === 'paused') { txt = 'PAUSED'; klass = 'pb-status-stopped'; }
-    else if (state.status === 'stopped') { txt = 'STOPPED'; klass = 'pb-status-stopped'; }
+    else if (state.status === 'stopped') { txt = state.safetyBuild === true ? 'SAFETY MODE' : 'STOPPED'; klass = 'pb-status-stopped'; }
     else if (openCount > 0) { txt = 'IN TRADE (' + openCount + ')'; klass = 'pb-status-intrade'; }
     else { txt = 'SEARCHING'; klass = 'pb-status-searching'; }
     let statusText = document.getElementById('pb-status-text') || statusEl.querySelector('.pb-status-text');
@@ -3765,7 +3766,7 @@ function renderPaperBot(state) {
     : (Number.isFinite(Number(state.startedAt))
       ? (Number(state.ts) || Date.now()) - Number(state.startedAt)
       : 0);
-  _pbSetText('pb-uptime', _pbFmtUptime(uptimeMs));
+  _pbSetText('pb-uptime', state.message || _pbFmtUptime(uptimeMs));
   _pbSetText('pb-open-count', openCount + ' open ' + (openCount === 1 ? 'position' : 'positions'));
 
   const realized = Number(state.realizedPnl) || 0;
@@ -3974,6 +3975,16 @@ function _paperbotPromptReconnect(state) {
   return;
 }
 
+// Bot credentials are never accepted in the browser.
+// Future backend bot controls must read secrets only from Netlify environment variables.
+function wakeBotPlaceholder() {
+  console.warn('[PaperBot] Wake Bot is disabled until backend safety checks are implemented.');
+}
+
+function stopBotPlaceholder() {
+  console.warn('[PaperBot] Stop Bot is disabled until backend safety checks are implemented.');
+}
+
 function _rebuildSymbolIndex() {
   _SYMBOL_INDEX.clear();
   for (let i = 0; i < DATA.length; i++) {
@@ -4132,10 +4143,13 @@ function _applyTick(frame) {
 async function connectStream() {
   if (!LEGACY_FLY_STREAM_ENABLED) {
     // Dead infra: no token URL is built and no WebSocket is opened — keep
-    // market data fresh through the REST poll, and show the bot as stopped.
+    // market data fresh through the REST poll, and show the bot in safety mode.
     console.warn('[Stream] Legacy Fly.io WebSocket disabled. Using REST /api/markets only.');
+    window.__paperBotSafetyMode = true;
     renderPaperBot({
-      status: 'stopped',
+      status: 'safety',
+      safetyMode: true,
+      safetyBuild: true,
       balance: 0,
       realizedPnl: 0,
       unrealizedPnl: 0,
@@ -4144,7 +4158,7 @@ async function connectStream() {
       recentTrades: [],
       cautionMultiplier: 1,
       ts: Date.now(),
-      message: 'Legacy Fly.io stream disabled'
+      message: 'Legacy bot offline. REST market scanner active.'
     });
     _enableAggressivePoll();
     return;
