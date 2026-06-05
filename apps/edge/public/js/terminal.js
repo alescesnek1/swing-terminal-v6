@@ -3711,7 +3711,14 @@ function _pbRenderExecutionPreview(state) {
     + '</div>';
 
   const isFallback = (state && state.candidate && state.candidate.strategyFallback === true) || (Array.isArray(state && state.events) && state.events.some(e => e.type === 'TESTNET_COMPATIBLE_FALLBACK_SELECTED'));
-  if (isFallback) {
+  const isSmokeFallback = (state && state.candidate && state.candidate.smokeFallback === true) || (state && state.paperPosition && state.paperPosition.smokeFallback === true) || (Array.isArray(state && state.events) && state.events.some(e => e.type === 'TESTNET_SMOKE_QUOTE_FALLBACK_SELECTED'));
+  
+  if (isSmokeFallback) {
+    html += '<div style="background: rgba(255, 100, 100, 0.1); color: #ff6666; border: 1px solid rgba(255, 100, 100, 0.4); padding: 10px; border-radius: 4px; margin-top: 10px; margin-bottom: 15px; font-size: 13px; text-align: center;">'
+      + '<b style="display: block; margin-bottom: 4px;">TESTNET SMOKE FALLBACK</b>'
+      + 'Binance Spot Testnet returned 0 USDC pairs. This uses USDT only to validate testnet order signing/execution. Production strategy remains USDC-only.'
+      + '</div>';
+  } else if (isFallback) {
     html += '<div style="background: rgba(255, 170, 0, 0.1); color: #ffaa00; border: 1px solid rgba(255, 170, 0, 0.4); padding: 10px; border-radius: 4px; margin-top: 10px; margin-bottom: 15px; font-size: 13px; text-align: center;">'
       + '<b style="display: block; margin-bottom: 4px;">TESTNET FALLBACK</b>'
       + 'Fallback selected only to validate Binance Spot Testnet order adapter. Not a high-conviction strategy signal.'
@@ -3782,7 +3789,7 @@ function _pbRenderDiagnostics(state) {
   }
   
   card.hidden = false;
-  card.innerHTML = '<div style="font-size: 11px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.05); padding: 10px; border-radius: 4px; text-align: left; font-family: monospace;">'
+  let diagHtml = '<div style="font-size: 11px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.05); padding: 10px; border-radius: 4px; text-align: left; font-family: monospace;">'
       + '<b style="color: #8899aa; display: block; margin-bottom: 6px;">TESTNET FALLBACK DIAGNOSTICS</b>'
       + '<span style="color: #667788">Fallback Enabled:</span> <span style="color: #fff">' + meta.testnetFallbackEnabled + '</span><br>'
       + '<span style="color: #667788">Fallback Attempted:</span> <span style="color: #fff">' + meta.fallbackAttempted + '</span><br>'
@@ -3791,8 +3798,14 @@ function _pbRenderDiagnostics(state) {
       + '<span style="color: #667788">Markets Checked:</span> <span style="color: #fff">' + meta.compatibleMarketSymbolsChecked + '</span><br>'
       + '<span style="color: #667788">Skipped Non-USDC:</span> <span style="color: #fff">' + meta.skippedCount + '</span><br>'
       + '<span style="color: #667788">Top Skipped:</span> <span style="color: #fff">' + _esc((meta.topSkippedSymbols || []).join(', ')) + '</span><br>'
-      + '<span style="color: #667788">Fallback Blocked Reason:</span> <span style="color: #fff">' + _esc(meta.fallbackBlockedReason || 'None') + '</span>'
-      + '</div>';
+      + '<span style="color: #667788">Fallback Blocked Reason:</span> <span style="color: #fff">' + _esc(meta.fallbackBlockedReason || 'None') + '</span>';
+
+  if (meta.testnetUsdcSymbolsCount === 0) {
+      diagHtml += '<br><br><span style="color: #ffaa00">USDC pairs on testnet: 0.<br>Enable BOT_TESTNET_ALLOW_QUOTE_FALLBACK=true to run a testnet-only USDT smoke order adapter validation.</span>';
+  }
+
+  diagHtml += '</div>';
+  card.innerHTML = diagHtml;
 }
 
 async function _paperbotTestnetOrderRequest() {
