@@ -3352,11 +3352,19 @@ function _pbFmtPx(v) {
   return n.toFixed(6);
 }
 function _pbFmtTime(ts) {
-  const d = new Date(Number(ts) || Date.now());
+  const d = new Date(_pbTimeMs(ts) || Date.now());
   const hh = String(d.getHours()).padStart(2, '0');
   const mm = String(d.getMinutes()).padStart(2, '0');
   const ss = String(d.getSeconds()).padStart(2, '0');
   return `${hh}:${mm}:${ss}`;
+}
+
+function _pbTimeMs(ts) {
+  if (ts == null) return 0;
+  const numeric = Number(ts);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const parsed = Date.parse(String(ts));
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function _pbSetText(id, text, klass) {
@@ -3430,6 +3438,51 @@ function _pbEventDataSummary(data) {
     ].filter(Boolean);
     return parts.join(' / ');
   }
+  if (data.paperPosition && data.paperPosition.symbol) {
+    const p = data.paperPosition;
+    return [
+      p.symbol,
+      p.side,
+      'entry ' + p.entry,
+      'current ' + p.currentPrice,
+      'SL ' + p.stopLoss,
+      'TP ' + p.takeProfit,
+      p.unrealizedPnl != null ? 'uPnL ' + p.unrealizedPnl : '',
+    ].filter(Boolean).join(' / ');
+  }
+  if (data.closedTrade && data.closedTrade.symbol) {
+    const t = data.closedTrade;
+    return [
+      t.symbol,
+      t.closeReason,
+      'entry ' + t.entry,
+      'exit ' + t.exit,
+      'PnL ' + t.pnlUsd,
+      t.pnlPct != null ? t.pnlPct + '%' : '',
+    ].filter(Boolean).join(' / ');
+  }
+  if (data.manualExecutionPlan && data.manualExecutionPlan.symbol) {
+    const plan = data.manualExecutionPlan;
+    return [
+      plan.symbol,
+      plan.side,
+      '$' + plan.positionUsd,
+      'entry ref ' + plan.entryReference,
+      'SL ' + plan.stopLoss,
+      'TP ' + plan.takeProfit,
+    ].filter(Boolean).join(' / ');
+  }
+  if (data.executionPreview && data.executionPreview.symbol) {
+    const preview = data.executionPreview;
+    return [
+      preview.symbol,
+      preview.side,
+      '$' + preview.positionUsd,
+      'entry ref ' + preview.entryReference,
+      'mode ' + preview.mode,
+      'real order NO',
+    ].filter(Boolean).join(' / ');
+  }
   if (data.candidate && data.candidate.symbol) {
     const c = data.candidate;
     const parts = [
@@ -3446,6 +3499,196 @@ function _pbEventDataSummary(data) {
   return '';
 }
 
+function _pbPaperTradeFromEvents(events) {
+  if (!Array.isArray(events)) return null;
+  const evt = events.find((item) => item && item.type === 'PAPER_TRADE_SIMULATED' && item.data);
+  return evt && evt.data ? evt.data : null;
+}
+
+function _pbHasEvent(events, type) {
+  return Array.isArray(events) && events.some((evt) => evt && evt.type === type);
+}
+
+function _pbFormatSignalValue(value, fallback = '--') {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return String(value);
+}
+
+let _pbLastSignalSnapshot = null;
+
+function _pbEnsureSignalCard() {
+  const view = document.getElementById('view-bot') || document.getElementById('v-bot');
+  if (!view) return null;
+  let card = document.getElementById('pb-last-signal-card');
+  if (card) return card;
+  card = document.createElement('div');
+  card.id = 'pb-last-signal-card';
+  card.className = 'pb-last-signal-card';
+  const ledger = view.querySelector('.bot-ledger-wrap');
+  if (ledger) view.insertBefore(card, ledger);
+  else view.appendChild(card);
+  return card;
+}
+
+function _pbRenderLastSignal(state) {
+  const events = Array.isArray(state && state.events) ? state.events : [];
+  let paperTrade = (state && state.paperTrade) || _pbPaperTradeFromEvents(events);
+  let candidate = (state && state.candidate) || (events.find((evt) => evt && evt.data && evt.data.candidate) || {}).data?.candidate || null;
+  let paperPosition = state && state.paperPosition && state.paperPosition.status === 'open' ? state.paperPosition : null;
+  if (paperTrade || candidate || paperPosition) _pbLastSignalSnapshot = { paperTrade, candidate, paperPosition };
+  else if (_pbLastSignalSnapshot) {
+    paperTrade = _pbLastSignalSnapshot.paperTrade;
+    candidate = _pbLastSignalSnapshot.candidate;
+    paperPosition = _pbLastSignalSnapshot.paperPosition;
+  }
+  const hasSignal = !!(paperTrade || candidate || paperPosition);
+  const card = _pbEnsureSignalCard();
+  if (!card) return;
+  if (!hasSignal) {
+    card.hidden = true;
+    card.innerHTML = '';
+    return;
+  }
+  const symbol = _pbFormatSignalValue((paperPosition && paperPosition.symbol) || (paperTrade && paperTrade.symbol) || (candidate && candidate.symbol));
+  const side = _pbFormatSignalValue(paperPosition && paperPosition.side);
+  const score = _pbFormatSignalValue(candidate && candidate.score);
+  const entry = _pbFormatSignalValue((paperPosition && paperPosition.entry) || (paperTrade && paperTrade.entry));
+  const currentPrice = _pbFormatSignalValue(paperPosition && paperPosition.currentPrice);
+  const stopLoss = _pbFormatSignalValue((paperPosition && paperPosition.stopLoss) || (paperTrade && paperTrade.stopLoss));
+  const takeProfit = _pbFormatSignalValue((paperPosition && paperPosition.takeProfit) || (paperTrade && paperTrade.takeProfit));
+  const positionUsd = paperPosition && paperPosition.positionUsd != null ? '$' + paperPosition.positionUsd : (paperTrade && paperTrade.positionUsd != null ? '$' + paperTrade.positionUsd : '--');
+  const unrealized = paperPosition && paperPosition.unrealizedPnl != null ? _pbFmtUsd(paperPosition.unrealizedPnl) : '--';
+  card.hidden = false;
+  card.innerHTML =
+    '<div class="pb-last-signal-card__head">'
+    + '<span class="pb-last-signal-card__title">LAST PAPER SIGNAL</span>'
+    + '<span class="pb-last-signal-card__mode">DRY RUN</span>'
+    + '</div>'
+    + '<div class="pb-last-signal-card__symbol">' + _esc(symbol) + '</div>'
+    + '<div class="pb-last-signal-card__grid">'
+    + '<div><span>Side</span><b>' + _esc(side) + '</b></div>'
+    + '<div><span>Score</span><b>' + _esc(score) + '</b></div>'
+    + '<div><span>Entry</span><b>' + _esc(entry) + '</b></div>'
+    + '<div><span>Current</span><b>' + _esc(currentPrice) + '</b></div>'
+    + '<div><span>Stop Loss</span><b>' + _esc(stopLoss) + '</b></div>'
+    + '<div><span>Take Profit</span><b>' + _esc(takeProfit) + '</b></div>'
+    + '<div><span>Position Size</span><b>' + _esc(positionUsd) + '</b></div>'
+    + '<div><span>Unrealized PnL</span><b>' + _esc(unrealized) + '</b></div>'
+    + '<div><span>Dry Run</span><b>TRUE</b></div>'
+    + '<div><span>Real Order</span><b>NO</b></div>'
+    + '</div>';
+}
+
+function _pbEnsureManualPlanCard() {
+  const view = document.getElementById('view-bot') || document.getElementById('v-bot');
+  if (!view) return null;
+  let card = document.getElementById('pb-manual-plan-card');
+  if (card) return card;
+  card = document.createElement('div');
+  card.id = 'pb-manual-plan-card';
+  card.className = 'pb-manual-plan-card';
+  const ledger = view.querySelector('.bot-ledger-wrap');
+  if (ledger) view.insertBefore(card, ledger);
+  else view.appendChild(card);
+  return card;
+}
+
+function _pbManualPlanText(plan) {
+  if (!plan) return '';
+  return [
+    'Manual Binance trade plan',
+    'Symbol: ' + plan.symbol,
+    'Side: ' + plan.side,
+    'Position USD: ' + plan.positionUsd,
+    'Entry Reference: ' + plan.entryReference,
+    'Stop Loss: ' + plan.stopLoss,
+    'Take Profit: ' + plan.takeProfit,
+    plan.warning || 'Manual execution only. No order was submitted by this app.',
+  ].join('\n');
+}
+
+function _pbRenderManualPlan(state) {
+  const plan = state && state.manualExecutionPlan;
+  const card = _pbEnsureManualPlanCard();
+  if (!card) return;
+  if (!plan || !plan.enabled) {
+    card.hidden = true;
+    card.innerHTML = '';
+    return;
+  }
+  card.hidden = false;
+  card.innerHTML =
+    '<div class="pb-manual-plan-card__head">'
+    + '<span class="pb-manual-plan-card__title">MANUAL BINANCE TRADE PLAN</span>'
+    + '<button class="pb-manual-plan-card__copy" type="button" onclick="copyPaperBotManualPlan()">Copy Manual Plan</button>'
+    + '</div>'
+    + '<div class="pb-manual-plan-card__grid">'
+    + '<div><span>Symbol</span><b>' + _esc(plan.symbol) + '</b></div>'
+    + '<div><span>Side</span><b>' + _esc(plan.side) + '</b></div>'
+    + '<div><span>Position USD</span><b>' + _esc(plan.positionUsd) + '</b></div>'
+    + '<div><span>Entry Reference</span><b>' + _esc(plan.entryReference) + '</b></div>'
+    + '<div><span>Stop Loss</span><b>' + _esc(plan.stopLoss) + '</b></div>'
+    + '<div><span>Take Profit</span><b>' + _esc(plan.takeProfit) + '</b></div>'
+    + '</div>'
+    + '<div class="pb-manual-plan-card__warning">' + _esc(plan.warning || 'Manual execution only. No order was submitted by this app.') + '</div>';
+  window.__paperBotManualPlanText = _pbManualPlanText(plan);
+}
+
+function _pbEnsureExecutionPreviewCard() {
+  const view = document.getElementById('view-bot') || document.getElementById('v-bot');
+  if (!view) return null;
+  let card = document.getElementById('pb-execution-preview-card');
+  if (card) return card;
+  card = document.createElement('div');
+  card.id = 'pb-execution-preview-card';
+  card.className = 'pb-execution-preview-card';
+  const ledger = view.querySelector('.bot-ledger-wrap');
+  if (ledger) view.insertBefore(card, ledger);
+  else view.appendChild(card);
+  return card;
+}
+
+function _pbRenderExecutionPreview(state) {
+  const preview = state && state.executionPreview;
+  const card = _pbEnsureExecutionPreviewCard();
+  if (!card) return;
+  if (!preview || !preview.enabled) {
+    card.hidden = true;
+    card.innerHTML = '';
+    return;
+  }
+  card.hidden = false;
+  card.innerHTML =
+    '<div class="pb-execution-preview-card__head">'
+    + '<span class="pb-execution-preview-card__title">EXECUTION PREVIEW</span>'
+    + '<span class="pb-execution-preview-card__status">LIVE EXECUTION LOCKED</span>'
+    + '</div>'
+    + '<div class="pb-execution-preview-card__message">Testnet adapter is the next required gate. No production order can be submitted from this build.</div>'
+    + '<div class="pb-execution-preview-card__grid">'
+    + '<div><span>Symbol</span><b>' + _esc(preview.symbol) + '</b></div>'
+    + '<div><span>Side</span><b>' + _esc(preview.side) + '</b></div>'
+    + '<div><span>Position USD</span><b>' + _esc(preview.positionUsd) + '</b></div>'
+    + '<div><span>Entry Reference</span><b>' + _esc(preview.entryReference) + '</b></div>'
+    + '<div><span>Stop Loss</span><b>' + _esc(preview.stopLoss) + '</b></div>'
+    + '<div><span>Take Profit</span><b>' + _esc(preview.takeProfit) + '</b></div>'
+    + '<div><span>Mode</span><b>' + _esc(preview.mode) + '</b></div>'
+    + '<div><span>Real Order</span><b>NO</b></div>'
+    + '</div>'
+    + '<div class="pb-execution-preview-card__reason">' + _esc(preview.reason || 'Execution preview only. No Binance order submitted.') + '</div>';
+}
+
+function copyPaperBotManualPlan() {
+  const text = window.__paperBotManualPlanText || '';
+  if (!text) return;
+  const done = () => { try { window.Toast?.success('Manual plan copied', 'No order was submitted.'); } catch {} };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch((err) => console.warn('[PaperBot] Manual plan copy failed:', err.message));
+  } else {
+    console.warn('[PaperBot] Clipboard API unavailable for manual plan copy.');
+  }
+}
+
 function _pbRenderAnalystFeed(state) {
   const logs = Array.isArray(state && state.advisoryLogs)
     ? state.advisoryLogs
@@ -3460,7 +3703,7 @@ function _pbRenderAnalystFeed(state) {
     list.innerHTML = '<div class="pb-analyst-empty">Waiting for deterministic bot events.</div>';
     return;
   }
-  list.innerHTML = logs.slice(0, 8).map((evt) => {
+  list.innerHTML = logs.slice(0, 10).map((evt) => {
     const type = String(evt.type || 'system').toLowerCase();
     const severity = String(evt.severity || 'info').toLowerCase();
     const ts = _pbFmtTime(evt.ts);
@@ -3482,6 +3725,49 @@ function _pbRenderAnalystFeed(state) {
       + '</span>'
       + '</div>';
   }).join('');
+}
+
+function _pbMapPaperPosition(pos, unrealizedPnl) {
+  if (!pos || pos.status !== 'open') return null;
+  const entryTs = _pbTimeMs(pos.openedAt) || Date.now();
+  const pnlPct = pos.entry > 0 ? ((Number(pos.currentPrice) / Number(pos.entry)) - 1) * 100 : 0;
+  return {
+    symbol: pos.symbol,
+    side: pos.side || 'LONG',
+    entryPrice: pos.entry,
+    currentPrice: pos.currentPrice,
+    currentPnl: Number(unrealizedPnl) || 0,
+    currentPnlPct: pnlPct,
+    openedAt: entryTs,
+    notional: pos.positionUsd,
+    isOpen: true,
+    priceCurve: [
+      { p: pos.entry, t: entryTs },
+      { p: pos.currentPrice, t: Date.now() },
+    ],
+  };
+}
+
+function _pbMapClosedTrade(trade) {
+  if (!trade) return null;
+  const openedAt = _pbTimeMs(trade.openedAt);
+  const closedAt = _pbTimeMs(trade.closedAt) || Date.now();
+  return {
+    symbol: trade.symbol,
+    side: trade.side || 'LONG',
+    entryPrice: trade.entry,
+    exitPrice: trade.exit,
+    pnl: Number(trade.pnlUsd) || 0,
+    pnlPct: Number(trade.pnlPct) || 0,
+    openedAt,
+    closedAt,
+    holdMs: Math.max(0, closedAt - openedAt),
+    reason: trade.closeReason || 'PAPER_CLOSE',
+    priceCurve: [
+      { p: trade.entry, t: openedAt || closedAt },
+      { p: trade.exit, t: closedAt },
+    ],
+  };
 }
 
 // ── TRADE RECEIPT: PnL sparkline renderer (pure Canvas 2D API) ──
@@ -3703,7 +3989,7 @@ function _pbBuildRow(trade) {
   const holdMs = (trade.holdMs != null)
     ? trade.holdMs
     : (isLive ? Date.now() - (Number(trade.openedAt) || Date.now()) : (Number(trade.closedAt) || 0) - (Number(trade.openedAt) || 0));
-  dur.textContent = _pbFmtDuration(holdMs);
+  dur.textContent = _pbFmtDuration(holdMs) + (!isLive && trade.reason ? ' / ' + String(trade.reason).replace(/_/g, ' ') : '');
 
   row.appendChild(time);
   row.appendChild(sym);
@@ -3771,7 +4057,12 @@ function renderPaperBot(state) {
   if (statusEl) {
     let txt, klass;
     const paperBotSafetyMode = window.__paperBotSafetyMode === true || state.status === 'safety' || state.safetyMode === true;
-    if (paperBotSafetyMode) { txt = 'SAFETY MODE'; klass = 'pb-status-stopped'; }
+    if (state.status === 'paper_position_open') { txt = 'PAPER POSITION OPEN'; klass = 'pb-status-searching'; }
+    else if (state.status === 'paper_position_closed') { txt = 'PAPER TRADE CLOSED'; klass = 'pb-status-stopped'; }
+    else if (state.status === 'dry_run_signal') { txt = 'DRY-RUN SIGNAL'; klass = 'pb-status-searching'; }
+    else if (state.status === 'signal_found') { txt = 'SIGNAL FOUND'; klass = 'pb-status-searching'; }
+    else if (state.status === 'no_setup') { txt = 'NO SETUP'; klass = 'pb-status-stopped'; }
+    else if (paperBotSafetyMode) { txt = 'SAFETY MODE'; klass = 'pb-status-stopped'; }
     else if (state.status === 'emergency') { txt = 'EMERGENCY'; klass = 'pb-status-stopped'; }
     else if (state.status === 'awaiting_keys') { txt = 'SAFETY MODE'; klass = 'pb-status-stopped'; }
     else if (state.status === 'awaiting_session') { txt = 'AWAITING SESSION'; klass = 'pb-status-stopped'; }
@@ -3826,6 +4117,9 @@ function renderPaperBot(state) {
   [cautionCard, cautionEl, cautionHintEl].forEach((el) => { if (el) el.title = cautionTitle; });
 
   _pbSetText('pb-balance', _pbFmtBalance(state.balance) + ' balance');
+  _pbRenderLastSignal(state);
+  _pbRenderManualPlan(state);
+  _pbRenderExecutionPreview(state);
   _pbRenderAnalystFeed(state);
   _paperbotPromptReconnect(state);
 
@@ -3866,11 +4160,16 @@ function renderPaperBot(state) {
 
   if (trades.length === 0 && openPositions.length === 0) {
     _pbRowKeys.clear();
+    const emptyText = state.paperPosition || _pbHasEvent(state.events, 'PAPER_POSITION_OPENED') || _pbHasEvent(state.events, 'PAPER_TRADE_SIMULATED')
+      ? 'No closed paper trades yet. Open simulated paper signal is shown above.'
+      : 'No closed paper trades yet. Simulated signals appear in Quant Analyst feed above.';
     if (!ledger.querySelector('.bot-ledger__empty')) {
       const empty = document.createElement('div');
       empty.className = 'bot-ledger__empty';
-      empty.textContent = 'No closed paper trades yet. Simulated signals appear in Quant Analyst feed above.';
+      empty.textContent = emptyText;
       ledger.appendChild(empty);
+    } else {
+      ledger.querySelector('.bot-ledger__empty').textContent = emptyText;
     }
     return;
   }
@@ -4014,20 +4313,57 @@ function _paperbotPromptReconnect(state) {
 }
 
 function _paperbotStateFromControlResponse(payload) {
+  const events = Array.isArray(payload && payload.events) ? payload.events : [];
+  let status = payload && payload.status ? payload.status : 'safety';
+  let message = payload && payload.message ? payload.message : 'Dry-run control skeleton only. No trading engine is running.';
+  if (_pbHasEvent(events, 'BOT_STOP_REQUESTED')) {
+    status = 'safety';
+    message = payload && payload.message ? payload.message : 'Bot dry-run control state stopped. No positions existed.';
+  } else if (payload && payload.paperPosition && payload.paperPosition.status === 'open') {
+    status = 'paper_position_open';
+    message = 'Monitoring simulated LONG ' + payload.paperPosition.symbol + '. No real order submitted.';
+  } else if (_pbHasEvent(events, 'PAPER_POSITION_CLOSED')) {
+    status = 'paper_position_closed';
+    message = 'Paper position closed by dry-run monitor. No real order submitted.';
+  } else if (_pbHasEvent(events, 'PAPER_TRADE_SIMULATED')) {
+    status = 'dry_run_signal';
+    message = 'Paper trade simulated. No real order submitted.';
+  } else if (_pbHasEvent(events, 'SIGNAL_FOUND')) {
+    status = 'signal_found';
+    message = 'Candidate found, but no paper trade was simulated.';
+  } else if (_pbHasEvent(events, 'MARKET_SCAN_SKIPPED')) {
+    status = 'no_setup';
+    message = 'No candidate passed the dry-run filters.';
+  }
+  const paperPosition = payload && payload.paperPosition ? payload.paperPosition : null;
+  const closedTrades = Array.isArray(payload && payload.closedTrades) ? payload.closedTrades : [];
+  const openRow = _pbMapPaperPosition(paperPosition, payload && payload.unrealizedPnl);
+  const closedRows = closedTrades.map(_pbMapClosedTrade).filter(Boolean);
   return {
-    status: payload && payload.status ? payload.status : 'safety',
-    safetyMode: true,
+    status,
+    safetyMode: false,
     safetyBuild: true,
     balance: 0,
-    realizedPnl: 0,
-    unrealizedPnl: 0,
+    realizedPnl: Number(payload && payload.realizedPnl) || 0,
+    unrealizedPnl: Number(payload && payload.unrealizedPnl) || 0,
     winRate: 0,
-    openPositions: [],
-    recentTrades: [],
+    openPositions: openRow ? [openRow] : [],
+    recentTrades: closedRows,
+    totalClosed: closedRows.length,
     cautionMultiplier: 1,
     ts: Date.now(),
-    message: payload && payload.message ? payload.message : 'Dry-run control skeleton only. No trading engine is running.',
-    events: Array.isArray(payload && payload.events) ? payload.events : [],
+    message,
+    candidate: payload && payload.candidate ? payload.candidate : null,
+    paperTrade: (payload && payload.paperTrade) || _pbPaperTradeFromEvents(events),
+    paperPosition,
+    closedTrades,
+    manualExecutionPlan: payload && payload.manualExecutionPlan ? payload.manualExecutionPlan : null,
+    executionPreview: payload && payload.executionPreview ? payload.executionPreview : null,
+    safetyConfig: payload && payload.safetyConfig ? payload.safetyConfig : null,
+    binanceConfig: payload && payload.binanceConfig ? payload.binanceConfig : null,
+    executionEnabled: false,
+    realOrderSubmitted: false,
+    events,
   };
 }
 
@@ -4049,6 +4385,10 @@ async function _paperbotControlRequest(action) {
     throw new Error(payload.message || payload.error || ('PaperBot control failed: HTTP ' + res.status));
   }
   renderPaperBot(_paperbotStateFromControlResponse(payload));
+  if (action === 'wake') {
+    const wakeBtn = document.querySelector('.paperbot-control-btn--wake');
+    if (wakeBtn) wakeBtn.textContent = payload.paperPosition ? 'Update Paper Position' : 'Run Scan Again';
+  }
   const note = payload.message || 'Dry-run control skeleton state updated.';
   try { LiveFeed.push(note, 'info', { source: 'PaperBot Controls' }); } catch {}
   return payload;

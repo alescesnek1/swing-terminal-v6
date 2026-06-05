@@ -3,6 +3,11 @@ const DEFAULT_STATE = {
   mode: 'dry_run',
   botAwake: false,
   candidate: null,
+  paperPosition: null,
+  closedTrades: [],
+  manualExecutionPlan: null,
+  realizedPnl: 0,
+  unrealizedPnl: 0,
   message: 'PaperBot control skeleton is in safety mode. No trading engine is running.',
   events: [],
   updatedAt: null,
@@ -34,12 +39,81 @@ function event(type, severity, message, data = undefined) {
   return out;
 }
 
+function roundMoney(value) {
+  return Number((Number(value) || 0).toFixed(8));
+}
+
+function takeProfitPctForScore(score) {
+  if (score >= 10) return 20;
+  if (score >= 8) return 15;
+  return 10;
+}
+
+function envFlag(name) {
+  return process.env[name] === 'true';
+}
+
+function envNumber(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 function getTradingMode() {
   return 'dry_run';
 }
 
 function getLiveTradingEnabled() {
   return process.env.BOT_LIVE_TRADING_ENABLED === 'true';
+}
+
+function getBotSafetyConfig() {
+  const binanceEnv = process.env.BINANCE_ENV === 'production' ? 'production' : 'testnet';
+  return {
+    mode: 'dry_run',
+    liveTradingEnabled: false,
+    allowRealOrders: false,
+    binanceEnv,
+    maxPositionUsd: envNumber('BOT_MAX_POSITION_USD', 10),
+    maxOpenPositions: envNumber('BOT_MAX_OPEN_POSITIONS', 1),
+    stopLossPct: envNumber('BOT_STOP_LOSS_PCT', 3),
+    takeProfitPct: envNumber('BOT_TAKE_PROFIT_PCT', 15),
+  };
+}
+
+function getBinanceConfigStatus() {
+  const hasApiKey = Boolean(process.env.BINANCE_API_KEY);
+  const hasApiSecret = Boolean(process.env.BINANCE_API_SECRET);
+  const safetyConfig = getBotSafetyConfig();
+  return {
+    binanceConfigured: hasApiKey && hasApiSecret,
+    binanceEnv: safetyConfig.binanceEnv,
+    hasApiKey,
+    hasApiSecret,
+  };
+}
+
+function isLiveTradingAllowed() {
+  const config = getBotSafetyConfig();
+  const binanceConfig = getBinanceConfigStatus();
+  return process.env.BOT_TRADING_MODE === 'live'
+    && envFlag('BOT_LIVE_TRADING_ENABLED')
+    && envFlag('BOT_ALLOW_REAL_ORDERS')
+    && config.binanceEnv === 'production'
+    && binanceConfig.hasApiKey
+    && binanceConfig.hasApiSecret
+    && config.maxPositionUsd <= 10
+    && config.maxOpenPositions === 1;
+}
+
+function blockLiveExecution(reason) {
+  return {
+    enabled: true,
+    type: 'execution_preview',
+    mode: 'BLOCKED',
+    executionEnabled: false,
+    realOrderSubmitted: false,
+    reason,
+  };
 }
 
 function getAllowedOrigins() {
@@ -111,18 +185,29 @@ async function verifyAuth() {
 
 function publicState(extra = {}) {
   const mode = getTradingMode() || 'dry_run';
-  const liveTradingEnabled = getLiveTradingEnabled();
+  const executionPreview = buildExecutionPreview(botControlState.paperPosition);
   return {
     ok: true,
     status: botControlState.status,
     mode: mode === 'dry_run' ? 'dry_run' : 'dry_run',
     botAwake: botControlState.botAwake,
-    liveTradingEnabled,
+    liveTradingEnabled: false,
     tradingEnabled: false,
     statePersistence: 'volatile_serverless_memory',
     productionReady: false,
+    executionEnabled: false,
+    realOrderSubmitted: false,
+    liveGateWouldPass: isLiveTradingAllowed(),
+    safetyConfig: getBotSafetyConfig(),
+    binanceConfig: getBinanceConfigStatus(),
+    executionPreview,
     message: botControlState.message || 'PaperBot control skeleton is in safety mode. No trading engine is running.',
     candidate: botControlState.candidate,
+    paperPosition: botControlState.paperPosition,
+    closedTrades: botControlState.closedTrades,
+    manualExecutionPlan: botControlState.manualExecutionPlan,
+    realizedPnl: botControlState.realizedPnl,
+    unrealizedPnl: botControlState.unrealizedPnl,
     events: botControlState.events,
     ...extra,
   };
@@ -232,22 +317,135 @@ function riskCheck(candidate) {
   return failed ? { ok: false, reason: failed.reason } : { ok: true };
 }
 
-async function runDryRunScan(req) {
-  const events = [
-    event('MARKET_SCAN_STARTED', 'info', 'Dry-run market scan started.'),
-  ];
+function makeManualExecutionPlan(position) {
+  if (!position) return null;
+  return {
+    enabled: true,
+    exchange: 'Binance',
+    symbol: `${position.symbol}USDT`,
+    side: 'BUY',
+    positionUsd: position.positionUsd,
+    entryReference: position.entry,
+    stopLoss: position.stopLoss,
+    takeProfit: position.takeProfit,
+    warning: 'Manual execution only. No order was submitted by this app.',
+  };
+}
 
-  let markets = [];
-  try {
-    markets = await fetchMarkets(req);
-  } catch (err) {
-    events.push(event('MARKET_SCAN_FAILED', 'warn', `Market scan failed: ${err.message}`));
-    return { ok: false, status: 'safety', candidate: null, events };
+function buildExecutionPreview(paperPosition) {
+  if (!paperPosition || paperPosition.status !== 'open') return null;
+  const config = getBotSafetyConfig();
+  const basePreview = {
+    enabled: true,
+    type: 'execution_preview',
+    symbol: `${paperPosition.symbol}USDT`,
+    side: 'BUY',
+    positionUsd: paperPosition.positionUsd,
+    entryReference: paperPosition.entry,
+    stopLoss: paperPosition.stopLoss,
+    takeProfit: paperPosition.takeProfit,
+    realOrderSubmitted: false,
+  };
+  if (config.binanceEnv !== 'testnet') {
+    return {
+      ...basePreview,
+      ...blockLiveExecution('Live execution is hard-blocked in this build. No Binance order submitted.'),
+    };
+  }
+  return {
+    ...basePreview,
+    mode: 'testnet_ready',
+    reason: 'Execution preview only. No Binance order submitted.',
+  };
+}
+
+function makePaperPosition(candidate) {
+  const entry = roundMoney(candidate.price);
+  const positionUsd = 10;
+  const stopLossPct = 3;
+  const takeProfitPct = takeProfitPctForScore(candidate.score);
+  return {
+    id: `PAPER-${candidate.symbol}-${Date.now()}`,
+    symbol: candidate.symbol,
+    side: 'LONG',
+    entry,
+    currentPrice: entry,
+    stopLoss: roundMoney(entry * (1 - stopLossPct / 100)),
+    takeProfit: roundMoney(entry * (1 + takeProfitPct / 100)),
+    positionUsd,
+    quantity: roundMoney(positionUsd / entry),
+    stopLossPct,
+    takeProfitPct,
+    openedAt: new Date().toISOString(),
+    status: 'open',
+    dryRun: true,
+    realOrderSubmitted: false,
+  };
+}
+
+function findMarketForSymbol(markets, symbol) {
+  const needle = String(symbol || '').toUpperCase();
+  return (markets || []).find((row) => String(row && row.symbol || '').toUpperCase() === needle) || null;
+}
+
+function pnlForPosition(position, price) {
+  const currentPrice = roundMoney(price);
+  const pnlUsd = roundMoney((currentPrice - position.entry) * position.quantity);
+  const pnlPct = roundMoney(((currentPrice / position.entry) - 1) * 100);
+  return { currentPrice, pnlUsd, pnlPct };
+}
+
+function monitorPaperPosition(markets) {
+  const position = botControlState.paperPosition;
+  const events = [];
+  if (!position || position.status !== 'open') return { events };
+
+  const row = findMarketForSymbol(markets, position.symbol);
+  const price = row ? marketNumber(row, ['current_price', 'price', 'last']) : position.currentPrice;
+  const pnl = pnlForPosition(position, price);
+  const nextPosition = { ...position, currentPrice: pnl.currentPrice };
+  let closeReason = null;
+  if (pnl.currentPrice <= position.stopLoss) closeReason = 'STOP_LOSS';
+  else if (pnl.currentPrice >= position.takeProfit) closeReason = 'TAKE_PROFIT';
+
+  if (closeReason) {
+    const closedTrade = {
+      id: position.id,
+      symbol: position.symbol,
+      side: position.side,
+      entry: position.entry,
+      exit: pnl.currentPrice,
+      positionUsd: position.positionUsd,
+      quantity: position.quantity,
+      pnlUsd: pnl.pnlUsd,
+      pnlPct: pnl.pnlPct,
+      closeReason,
+      openedAt: position.openedAt,
+      closedAt: new Date().toISOString(),
+      dryRun: true,
+      realOrderSubmitted: false,
+    };
+    botControlState.paperPosition = null;
+    botControlState.closedTrades = [closedTrade, ...botControlState.closedTrades].slice(0, 20);
+    botControlState.realizedPnl = roundMoney((botControlState.realizedPnl || 0) + closedTrade.pnlUsd);
+    botControlState.unrealizedPnl = 0;
+    botControlState.manualExecutionPlan = null;
+    events.push(event('PAPER_POSITION_CLOSED', 'info', `Paper position closed for ${position.symbol}: ${closeReason}.`, { closedTrade }));
+    return { events, closedTrade };
   }
 
-  events.push(event('MARKET_SCAN_COMPLETED', 'info', `Dry-run market scan completed across ${markets.length} markets.`, {
-    marketCount: markets.length,
+  botControlState.paperPosition = nextPosition;
+  botControlState.unrealizedPnl = pnl.pnlUsd;
+  events.push(event('PAPER_POSITION_MONITORED', 'info', `Open paper position monitored for ${position.symbol}.`, {
+    paperPosition: nextPosition,
+    unrealizedPnl: pnl.pnlUsd,
+    unrealizedPnlPct: pnl.pnlPct,
   }));
+  return { events, paperPosition: nextPosition };
+}
+
+function runDryRunScanFromMarkets(markets) {
+  const events = [];
 
   const candidate = scoreMarkets(markets);
   if (!candidate || candidate.score < 6) {
@@ -270,23 +468,15 @@ async function runDryRunScan(req) {
   }
 
   events.push(event('RISK_CHECK_PASSED', 'info', 'Dry-run risk check passed. Trading remains disabled.'));
-  const entry = Number(candidate.price.toFixed(8));
-  const stopLoss = Number((candidate.price * 0.97).toFixed(8));
-  const takeProfit = Number((candidate.price * 1.15).toFixed(8));
-  events.push(event(
-    'PAPER_TRADE_SIMULATED',
-    'info',
-    `Dry-run paper trade simulated for ${candidate.symbol}. Entry ${entry}, SL ${stopLoss}, TP ${takeProfit}. No real order submitted.`,
-    {
-      symbol: candidate.symbol,
-      entry,
-      stopLoss,
-      takeProfit,
-      positionUsd: 10,
-      dryRun: true,
-    },
-  ));
-  return { ok: true, status: 'ready_dry_run', candidate, events };
+  const paperPosition = makePaperPosition(candidate);
+  const manualExecutionPlan = makeManualExecutionPlan(paperPosition);
+  events.push(event('PAPER_POSITION_OPENED', 'info', `Dry-run paper position opened for ${candidate.symbol}. No real order submitted.`, {
+    paperPosition,
+  }));
+  events.push(event('MANUAL_EXECUTION_PLAN_READY', 'info', `Manual Binance trade plan ready for ${candidate.symbol}. No order was submitted by this app.`, {
+    manualExecutionPlan,
+  }));
+  return { ok: true, status: 'paper_position_open', candidate, paperPosition, manualExecutionPlan, events };
 }
 
 function routeName(req) {
@@ -349,16 +539,68 @@ export default async function handler(req) {
       events: [wakeEvent, ...previousEvents].slice(0, 20),
       updatedAt: wakeEvent.ts,
     };
-    const scan = await runDryRunScan(req);
-    const nextEvents = [wakeEvent, ...scan.events];
-    const nextStatus = scan.status || 'ready_dry_run';
-    const message = scan.ok
-      ? 'Dry-run PaperBot scan completed. No trading engine started. No real orders can be submitted.'
-      : 'Dry-run PaperBot scan failed safely. No trading engine started. No real orders can be submitted.';
+    const marketEvents = [event('MARKET_SCAN_STARTED', 'info', 'Dry-run market scan started.')];
+    let markets = [];
+    try {
+      markets = await fetchMarkets(req);
+      marketEvents.push(event('MARKET_SCAN_COMPLETED', 'info', `Dry-run market scan completed across ${markets.length} markets.`, {
+        marketCount: markets.length,
+      }));
+    } catch (err) {
+      marketEvents.push(event('MARKET_SCAN_FAILED', 'warn', `Market scan failed: ${err.message}`));
+      const nextEvents = [wakeEvent, ...marketEvents];
+      botControlState = {
+        ...botControlState,
+        status: 'safety',
+        message: 'Dry-run PaperBot scan failed safely. No real orders can be submitted.',
+        events: nextEvents.concat(previousEvents).slice(0, 30),
+        updatedAt: new Date().toISOString(),
+      };
+      return json(req, publicState({
+        status: 'safety',
+        message: botControlState.message,
+        events: nextEvents,
+        authMode: auth.authMode,
+      }));
+    }
+
+    let result;
+    if (botControlState.paperPosition && botControlState.paperPosition.status === 'open') {
+      const monitor = monitorPaperPosition(markets);
+      const alreadyOpenEvent = botControlState.paperPosition
+        ? event('PAPER_POSITION_ALREADY_OPEN', 'info', `Existing paper position remains open for ${botControlState.paperPosition.symbol}.`, {
+            paperPosition: botControlState.paperPosition,
+          })
+        : null;
+      result = {
+        ok: true,
+        status: monitor.closedTrade ? 'paper_position_closed' : (botControlState.paperPosition ? 'paper_position_open' : 'stopped'),
+        candidate: botControlState.candidate,
+        paperPosition: botControlState.paperPosition,
+        closedTrade: monitor.closedTrade,
+        manualExecutionPlan: botControlState.manualExecutionPlan,
+        events: alreadyOpenEvent ? [...marketEvents, alreadyOpenEvent, ...monitor.events] : [...marketEvents, ...monitor.events],
+      };
+    } else {
+      result = runDryRunScanFromMarkets(markets);
+      result.events = [...marketEvents, ...result.events];
+    }
+
+    const nextEvents = [wakeEvent, ...result.events];
+    const nextStatus = result.status || 'ready_dry_run';
+    const message = result.paperPosition
+      ? `Paper position open. Monitoring simulated LONG ${result.paperPosition.symbol}. No real order submitted.`
+      : result.closedTrade
+        ? 'Paper position closed by dry-run monitor. No real order submitted.'
+        : result.ok
+          ? 'Dry-run PaperBot cycle completed. No real orders can be submitted.'
+          : 'Dry-run PaperBot scan failed safely. No real orders can be submitted.';
     botControlState = {
       ...botControlState,
       status: nextStatus,
-      candidate: scan.candidate || null,
+      candidate: result.candidate || botControlState.candidate || null,
+      paperPosition: result.paperPosition || botControlState.paperPosition || null,
+      manualExecutionPlan: result.manualExecutionPlan || botControlState.manualExecutionPlan || null,
       message,
       events: nextEvents.concat(previousEvents).slice(0, 30),
       updatedAt: new Date().toISOString(),
@@ -366,7 +608,12 @@ export default async function handler(req) {
     return json(req, publicState({
       status: nextStatus,
       message,
-      candidate: scan.candidate || null,
+      candidate: botControlState.candidate,
+      paperPosition: botControlState.paperPosition,
+      closedTrades: botControlState.closedTrades,
+      manualExecutionPlan: botControlState.manualExecutionPlan,
+      realizedPnl: botControlState.realizedPnl,
+      unrealizedPnl: botControlState.unrealizedPnl,
       events: nextEvents,
       authMode: auth.authMode,
     }));
@@ -377,12 +624,14 @@ export default async function handler(req) {
     ...botControlState,
     status: 'stopped',
     botAwake: false,
-    message: 'Bot dry-run control state stopped. No positions existed.',
+    message: botControlState.paperPosition
+      ? 'Dry-run bot stopped. Open paper position remains simulated and will be monitored on next Wake.'
+      : 'Bot dry-run control state stopped. No positions existed.',
     events: [stopEvent, ...botControlState.events].slice(0, 30),
     updatedAt: stopEvent.ts,
   };
   return json(req, publicState({
-    message: 'Bot dry-run control state stopped. No positions existed.',
+    message: botControlState.message,
     events: [stopEvent],
     authMode: auth.authMode,
   }));
