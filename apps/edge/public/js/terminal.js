@@ -3710,6 +3710,14 @@ function _pbRenderExecutionPreview(state) {
     + '<div><span>Real Order</span><b>NO</b></div>'
     + '</div>';
 
+  const isFallback = (state && state.candidate && state.candidate.strategyFallback === true) || (Array.isArray(state && state.events) && state.events.some(e => e.type === 'TESTNET_COMPATIBLE_FALLBACK_SELECTED'));
+  if (isFallback) {
+    html += '<div style="background: rgba(255, 170, 0, 0.1); color: #ffaa00; border: 1px solid rgba(255, 170, 0, 0.4); padding: 10px; border-radius: 4px; margin-top: 10px; margin-bottom: 15px; font-size: 13px; text-align: center;">'
+      + '<b style="display: block; margin-bottom: 4px;">TESTNET FALLBACK</b>'
+      + 'Fallback selected only to validate Binance Spot Testnet order adapter. Not a high-conviction strategy signal.'
+      + '</div>';
+  }
+  
   if (testnetOrder) {
     html +=
       '<div class="pb-execution-preview-card__testnet-result">'
@@ -4475,6 +4483,9 @@ function _paperbotStateFromControlResponse(payload) {
       message = 'No compatible Binance Spot Testnet USDC setup found.';
     } else {
       message = 'No candidate passed the dry-run filters.';
+    }
+    if (skipEvent && typeof skipEvent.testnetUsdcSymbolsCount === 'number') {
+      message += ` (Checked ${skipEvent.testnetUsdcSymbolsCount} testnet symbols. Skipped ${skipEvent.skippedCount || 0} non-USDC targets. Top skipped: ${(skipEvent.topSkippedSymbols || []).join(', ')})`;
     }
   }
   const paperPosition = payload && payload.paperPosition ? payload.paperPosition : null;

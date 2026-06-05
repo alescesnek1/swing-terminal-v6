@@ -749,6 +749,8 @@ async function runDryRunScanFromMarkets(markets) {
   const isTestnetEnv = process.env.BINANCE_ENV === 'testnet';
   const creds = getBinanceCredentials();
   const isTestnetConfigured = isTestnetEnv && creds.hasApiKey && creds.hasApiSecret;
+  const allowTestnetOrders = process.env.BOT_ALLOW_TESTNET_ORDERS === 'true';
+  const allowFallback = process.env.BOT_TESTNET_ALLOW_COMPATIBLE_FALLBACK === 'true';
   
   let testnetSymbols = null;
   let testnetFilterActive = false;
@@ -760,6 +762,9 @@ async function runDryRunScanFromMarkets(markets) {
 
   const candidatesList = scoreMarketsList(markets);
   let bestCandidate = null;
+  
+  let skippedCount = 0;
+  const topSkippedSymbols = [];
 
   for (const c of candidatesList) {
     if (c.score < 6) continue;
@@ -767,6 +772,8 @@ async function runDryRunScanFromMarkets(markets) {
     if (testnetFilterActive) {
       const binanceSym = toBinanceQuoteSymbol(c.symbol);
       if (!testnetSymbols.has(binanceSym)) {
+        skippedCount++;
+        if (topSkippedSymbols.length < 5) topSkippedSymbols.push(binanceSym);
         events.push(event('TESTNET_SYMBOL_SKIPPED', 'warn', `Skipped ${c.symbol} because ${binanceSym} is not available on Binance Spot Testnet.`, {
           symbol: c.symbol,
           binanceSymbol: binanceSym,
@@ -785,30 +792,64 @@ async function runDryRunScanFromMarkets(markets) {
   }
 
   if (!bestCandidate) {
-    const topScore = candidatesList[0] ? candidatesList[0].score : 0;
-    const topSym = candidatesList[0] ? candidatesList[0].symbol : null;
-    
-    if (candidatesList.length > 0 && topScore >= 6) {
-      events.push(event('MARKET_SCAN_SKIPPED', 'warn', `No flush/reclaim candidate passed both strategy filters and Binance Spot Testnet ${BOT_QUOTE_ASSET} symbol availability.`, {
-        bestScore: topScore,
-        symbol: topSym,
-      }));
-    } else {
-      events.push(event('MARKET_SCAN_SKIPPED', 'info', 'No flush/reclaim candidate passed the minimum score.', {
-        bestScore: topScore,
-        symbol: topSym,
-      }));
+    let fallbackCandidate = null;
+    if (isTestnetConfigured && allowTestnetOrders && allowFallback && testnetFilterActive) {
+      for (const c of candidatesList) {
+        if (!c.symbol || c.symbol === 'USDC' || c.symbol.includes('USDT') || c.symbol.includes('USDC')) continue;
+        if (c.price <= 0) continue;
+        const binanceSym = toBinanceQuoteSymbol(c.symbol);
+        if (testnetSymbols.has(binanceSym)) {
+          fallbackCandidate = c;
+          break;
+        }
+      }
     }
-    
-    events.push(event('RISK_CHECK_FAILED', 'warn', 'Risk check failed: candidate score below threshold or no testnet-compatible candidate exists.'));
-    return { ok: true, status: 'safety', candidate: null, events };
+
+    if (fallbackCandidate) {
+      fallbackCandidate.binanceSymbol = toBinanceQuoteSymbol(fallbackCandidate.symbol);
+      fallbackCandidate.quoteAsset = BOT_QUOTE_ASSET;
+      fallbackCandidate.testnetSymbolAvailable = true;
+      fallbackCandidate.strategyFallback = true;
+      events.push(event('TESTNET_COMPATIBLE_FALLBACK_SELECTED', 'info', `No high-score compatible setup found. Selected ${fallbackCandidate.binanceSymbol} as testnet-compatible fallback for adapter validation.`, {
+        symbol: fallbackCandidate.symbol,
+        binanceSymbol: fallbackCandidate.binanceSymbol
+      }));
+      bestCandidate = fallbackCandidate;
+    } else {
+      const topScore = candidatesList[0] ? candidatesList[0].score : 0;
+      const topSym = candidatesList[0] ? candidatesList[0].symbol : null;
+      const scanMeta = {
+        testnetUsdcSymbolsCount: testnetSymbols ? testnetSymbols.size : 0,
+        skippedCount,
+        topSkippedSymbols,
+      };
+      
+      if (candidatesList.length > 0 && topScore >= 6) {
+        events.push(event('MARKET_SCAN_SKIPPED', 'warn', `No flush/reclaim candidate passed both strategy filters and Binance Spot Testnet ${BOT_QUOTE_ASSET} symbol availability.`, {
+          bestScore: topScore,
+          symbol: topSym,
+          ...scanMeta
+        }));
+      } else {
+        events.push(event('MARKET_SCAN_SKIPPED', 'info', testnetFilterActive ? 'No Binance Spot Testnet USDC-compatible market from current /api/markets universe.' : 'No flush/reclaim candidate passed the minimum score.', {
+          bestScore: topScore,
+          symbol: topSym,
+          ...scanMeta
+        }));
+      }
+      
+      events.push(event('RISK_CHECK_FAILED', 'warn', 'Risk check failed: candidate score below threshold or no testnet-compatible candidate exists.'));
+      return { ok: true, status: 'safety', candidate: null, events };
+    }
   }
 
   const candidate = bestCandidate;
 
-  events.push(event('SIGNAL_FOUND', 'info', `Flush/reclaim signal found for ${candidate.symbol} with score ${candidate.score}.`, {
-    candidate,
-  }));
+  if (!candidate.strategyFallback) {
+    events.push(event('SIGNAL_FOUND', 'info', `Flush/reclaim signal found for ${candidate.symbol} with score ${candidate.score}.`, {
+      candidate,
+    }));
+  }
 
   const risk = riskCheck(candidate);
   if (!risk.ok) {
@@ -822,6 +863,12 @@ async function runDryRunScanFromMarkets(markets) {
     paperPosition.binanceSymbol = candidate.binanceSymbol;
     paperPosition.quoteAsset = candidate.quoteAsset;
     paperPosition.testnetSymbolAvailable = candidate.testnetSymbolAvailable;
+    if (candidate.strategyFallback) {
+      paperPosition.strategyFallback = true;
+      paperPosition.fallbackReason = 'testnet_adapter_validation';
+      // TP u fallbacku nastav konzervativně třeba 10 %
+      paperPosition.takeProfit = Number((paperPosition.entry * 1.10).toFixed(4));
+    }
   }
 
   const manualExecutionPlan = makeManualExecutionPlan(paperPosition);
