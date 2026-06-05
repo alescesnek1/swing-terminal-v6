@@ -133,6 +133,38 @@ function safeTestnetOrderError(err, fallbackMessage = 'Testnet order failed safe
   };
 }
 
+const BOT_QUOTE_ASSET = 'USDC';
+
+let testnetTradableSymbolsCache = null;
+let testnetTradableSymbolsCacheAt = 0;
+
+async function getTestnetTradableSymbols() {
+  const now = Date.now();
+  if (testnetTradableSymbolsCache && (now - testnetTradableSymbolsCacheAt < 5 * 60 * 1000)) {
+    return testnetTradableSymbolsCache;
+  }
+  try {
+    const data = await binancePublic('/v3/exchangeInfo');
+    const symbols = new Set();
+    if (data && Array.isArray(data.symbols)) {
+      for (const row of data.symbols) {
+        if (row.status === 'TRADING' && String(row.quoteAsset).toUpperCase() === BOT_QUOTE_ASSET) {
+          symbols.add(String(row.symbol).toUpperCase());
+        }
+      }
+    }
+    testnetTradableSymbolsCache = symbols;
+    testnetTradableSymbolsCacheAt = now;
+    return symbols;
+  } catch (err) {
+    return null;
+  }
+}
+
+function toBinanceQuoteSymbol(symbol) {
+  return `${String(symbol || '').toUpperCase()}${BOT_QUOTE_ASSET}`;
+}
+
 // ── Binance Spot TESTNET adapter ──────────────────────────────────────────────
 // TESTNET ONLY. These helpers must never reach the Binance production API.
 // Production base URL and live orders are hard-blocked by BINANCE_ENV === 'testnet'.
@@ -270,7 +302,7 @@ function validateMinNotional(price, quantity, filters) {
 }
 
 function buildTestnetMarketOrderParams(paperPosition, exchangeInfo) {
-  const symbol = `${paperPosition.symbol}USDT`;
+  const symbol = `${paperPosition.symbol}${BOT_QUOTE_ASSET}`;
   const filters = exchangeInfo && Array.isArray(exchangeInfo.filters) ? exchangeInfo.filters : [];
   const lotSize = findFilter(filters, 'LOT_SIZE');
   const stepSize = lotSize ? lotSize.stepSize : null;
@@ -305,7 +337,7 @@ function sanitizeTestnetOrderResponse(raw, orderPlan) {
 }
 
 async function submitTestnetOrder(paperPosition) {
-  const symbol = `${paperPosition.symbol}USDT`;
+  const symbol = `${paperPosition.symbol}${BOT_QUOTE_ASSET}`;
   const exchangeInfo = await getExchangeInfo(symbol);
   const orderPlan = buildTestnetMarketOrderParams(paperPosition, exchangeInfo);
   if (!(orderPlan.quantity > 0)) {
@@ -547,7 +579,7 @@ async function fetchMarkets(req) {
   return data;
 }
 
-function scoreMarkets(markets) {
+function scoreMarketsList(markets) {
   const volumes = markets
     .map((row) => marketNumber(row, ['total_volume', 'volume', 'quoteVolume']))
     .filter((value) => Number.isFinite(value) && value > 0)
@@ -558,7 +590,11 @@ function scoreMarkets(markets) {
     .map((row) => normalizeCandidate(row, volumeP70, volumeP90))
     .filter(Boolean)
     .sort((a, b) => (b.score - a.score) || (b.totalVolume - a.totalVolume) || (a.rank - b.rank));
-  return candidates[0] || null;
+  return candidates;
+}
+
+function scoreMarkets(markets) {
+  return scoreMarketsList(markets)[0] || null;
 }
 
 function riskCheck(candidate) {
@@ -582,8 +618,9 @@ function makeManualExecutionPlan(position) {
   return {
     enabled: true,
     exchange: 'Binance',
-    symbol: `${position.symbol}USDT`,
+    symbol: `${position.symbol}${BOT_QUOTE_ASSET}`,
     side: 'BUY',
+    quoteAsset: BOT_QUOTE_ASSET,
     positionUsd: position.positionUsd,
     entryReference: position.entry,
     stopLoss: position.stopLoss,
@@ -598,8 +635,9 @@ function buildExecutionPreview(paperPosition) {
   const basePreview = {
     enabled: true,
     type: 'execution_preview',
-    symbol: `${paperPosition.symbol}USDT`,
+    symbol: `${paperPosition.symbol}${BOT_QUOTE_ASSET}`,
     side: 'BUY',
+    quoteAsset: BOT_QUOTE_ASSET,
     positionUsd: paperPosition.positionUsd,
     entryReference: paperPosition.entry,
     stopLoss: paperPosition.stopLoss,
@@ -704,18 +742,63 @@ function monitorPaperPosition(markets) {
   return { events, paperPosition: nextPosition };
 }
 
-function runDryRunScanFromMarkets(markets) {
+async function runDryRunScanFromMarkets(markets) {
   const events = [];
 
-  const candidate = scoreMarkets(markets);
-  if (!candidate || candidate.score < 6) {
-    events.push(event('MARKET_SCAN_SKIPPED', 'info', 'No flush/reclaim candidate passed the minimum score.', {
-      bestScore: candidate ? candidate.score : 0,
-      symbol: candidate ? candidate.symbol : null,
-    }));
-    events.push(event('RISK_CHECK_FAILED', 'warn', 'Risk check failed: candidate score below threshold or no candidate exists.'));
-    return { ok: true, status: 'safety', candidate, events };
+  const isTestnetEnv = process.env.BINANCE_ENV === 'testnet';
+  const creds = getBinanceCredentials();
+  const isTestnetConfigured = isTestnetEnv && creds.hasApiKey && creds.hasApiSecret;
+  
+  let testnetSymbols = null;
+  let testnetFilterActive = false;
+  if (isTestnetConfigured) {
+    testnetSymbols = await getTestnetTradableSymbols();
+    if (testnetSymbols) {
+      testnetFilterActive = true;
+    } else {
+      events.push(event('TESTNET_SYMBOL_FILTER_UNAVAILABLE', 'warn', 'Binance Spot Testnet exchangeInfo unavailable. Scanning without testnet filter.'));
+    }
   }
+
+  const candidatesList = scoreMarketsList(markets);
+  let bestCandidate = null;
+
+  for (const c of candidatesList) {
+    if (c.score < 6) continue;
+    
+    if (testnetFilterActive) {
+      const binanceSym = toBinanceQuoteSymbol(c.symbol);
+      if (!testnetSymbols.has(binanceSym)) {
+        events.push(event('TESTNET_SYMBOL_SKIPPED', 'info', `Skipped ${c.symbol} because ${binanceSym} is not available on Binance Spot Testnet.`));
+        continue;
+      }
+    }
+    
+    bestCandidate = c;
+    break;
+  }
+
+  if (!bestCandidate) {
+    const topScore = candidatesList[0] ? candidatesList[0].score : 0;
+    const topSym = candidatesList[0] ? candidatesList[0].symbol : null;
+    
+    if (candidatesList.length > 0 && topScore >= 6) {
+      events.push(event('MARKET_SCAN_SKIPPED', 'info', `No flush/reclaim candidate passed both strategy filters and Binance Spot Testnet ${BOT_QUOTE_ASSET} symbol availability.`, {
+        bestScore: topScore,
+        symbol: topSym,
+      }));
+    } else {
+      events.push(event('MARKET_SCAN_SKIPPED', 'info', 'No flush/reclaim candidate passed the minimum score.', {
+        bestScore: topScore,
+        symbol: topSym,
+      }));
+    }
+    
+    events.push(event('RISK_CHECK_FAILED', 'warn', 'Risk check failed: candidate score below threshold or no testnet-compatible candidate exists.'));
+    return { ok: true, status: 'safety', candidate: null, events };
+  }
+
+  const candidate = bestCandidate;
 
   events.push(event('SIGNAL_FOUND', 'info', `Flush/reclaim signal found for ${candidate.symbol} with score ${candidate.score}.`, {
     candidate,
@@ -778,7 +861,7 @@ async function handleTestnetOrder(req, auth) {
   } catch (err) {
     const safeMessage = err.safeMessage || 'Testnet order failed safely.';
     const failEvent = event('TESTNET_ORDER_FAILED', 'error', safeMessage, {
-      symbol: paperPosition ? paperPosition.symbol + 'USDT' : undefined,
+      symbol: paperPosition ? paperPosition.symbol + BOT_QUOTE_ASSET : undefined,
       testnet: true,
       realOrderSubmitted: false,
       binanceCode: err.binanceCode,
@@ -933,7 +1016,7 @@ export default async function handler(req) {
         events: alreadyOpenEvent ? [...marketEvents, alreadyOpenEvent, ...monitor.events] : [...marketEvents, ...monitor.events],
       };
     } else {
-      result = runDryRunScanFromMarkets(markets);
+      result = await runDryRunScanFromMarkets(markets);
       result.events = [...marketEvents, ...result.events];
     }
 

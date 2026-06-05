@@ -3613,7 +3613,8 @@ function _pbManualPlanText(plan) {
     'Manual Binance trade plan',
     'Symbol: ' + plan.symbol,
     'Side: ' + plan.side,
-    'Position USD: ' + plan.positionUsd,
+    'Quote Asset: ' + (plan.quoteAsset || 'USDC'),
+    'Position value: $' + plan.positionUsd + ' eq.',
     'Entry Reference: ' + plan.entryReference,
     'Stop Loss: ' + plan.stopLoss,
     'Take Profit: ' + plan.takeProfit,
@@ -3639,7 +3640,8 @@ function _pbRenderManualPlan(state) {
     + '<div class="pb-manual-plan-card__grid">'
     + '<div><span>Symbol</span><b>' + _esc(plan.symbol) + '</b></div>'
     + '<div><span>Side</span><b>' + _esc(plan.side) + '</b></div>'
-    + '<div><span>Position USD</span><b>' + _esc(plan.positionUsd) + '</b></div>'
+    + '<div><span>Quote Asset</span><b>' + _esc(plan.quoteAsset || 'USDC') + '</b></div>'
+    + '<div><span>Position value</span><b>$' + _esc(plan.positionUsd) + ' eq.</b></div>'
     + '<div><span>Entry Reference</span><b>' + _esc(plan.entryReference) + '</b></div>'
     + '<div><span>Stop Loss</span><b>' + _esc(plan.stopLoss) + '</b></div>'
     + '<div><span>Take Profit</span><b>' + _esc(plan.takeProfit) + '</b></div>'
@@ -3699,7 +3701,8 @@ function _pbRenderExecutionPreview(state) {
     + '<div class="pb-execution-preview-card__grid">'
     + '<div><span>Symbol</span><b>' + _esc(preview.symbol) + '</b></div>'
     + '<div><span>Side</span><b>' + _esc(preview.side) + '</b></div>'
-    + '<div><span>Position USD</span><b>' + _esc(preview.positionUsd) + '</b></div>'
+    + '<div><span>Quote Asset</span><b>' + _esc(preview.quoteAsset || 'USDC') + '</b></div>'
+    + '<div><span>Position value</span><b>$' + _esc(preview.positionUsd) + ' eq.</b></div>'
     + '<div><span>Entry Reference</span><b>' + _esc(preview.entryReference) + '</b></div>'
     + '<div><span>Stop Loss</span><b>' + _esc(preview.stopLoss) + '</b></div>'
     + '<div><span>Take Profit</span><b>' + _esc(preview.takeProfit) + '</b></div>'
