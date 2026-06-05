@@ -3684,12 +3684,18 @@ function _pbRenderExecutionPreview(state) {
     && !!preview
     && realOrderSubmitted === false;
 
-  const statusLabel = testnetOrder ? 'TESTNET ORDER SENT' : (preview.testnetSymbolAvailable ? 'TESTNET READY' : 'LIVE EXECUTION LOCKED');
-  const message = testnetOrder
-    ? 'Binance Spot Testnet order submitted. Production trading remains locked.'
-    : (isTestnet
-      ? 'TESTNET ONLY - no production order submitted. This adapter can only place Binance Spot Testnet orders.'
-      : 'Testnet adapter is the next required gate. No production order can be submitted from this build.');
+  const intent = state && state.executionIntent;
+  const recentResult = state && state.executionResults && state.executionResults.length > 0 ? state.executionResults[0] : null;
+
+  let statusLabel = 'LIVE EXECUTION LOCKED';
+  if (recentResult) statusLabel = 'LOCAL WORKER ' + (recentResult.status === 'failed' ? 'FAILED' : 'SUBMITTED TESTNET ORDER');
+  else if (intent) statusLabel = 'WAITING FOR LOCAL WORKER';
+  else if (preview.testnetSymbolAvailable || preview.smokeFallback) statusLabel = 'TESTNET READY';
+
+  let message = 'Testnet adapter is the next required gate. No production order can be submitted from this build.';
+  if (recentResult) message = recentResult.status === 'failed' ? 'Local worker failed: ' + (recentResult.error || 'Unknown') : 'Binance Spot Testnet order submitted by local worker.';
+  else if (intent) message = 'Intent created. Start local worker to submit Binance Spot Testnet order.';
+  else if (isTestnet) message = 'TESTNET ONLY - no production order submitted. This adapter can only place Binance Spot Testnet orders.';
 
   card.hidden = false;
   let html =
@@ -3725,28 +3731,37 @@ function _pbRenderExecutionPreview(state) {
       + '</div>';
   }
   
-  if (testnetOrder) {
+  if (recentResult && recentResult.status === 'submitted') {
     html +=
       '<div class="pb-execution-preview-card__testnet-result">'
-      + '<div class="pb-execution-preview-card__testnet-title">BINANCE SPOT TESTNET ORDER</div>'
+      + '<div class="pb-execution-preview-card__testnet-title">LOCAL WORKER TESTNET RESULT</div>'
       + '<div class="pb-execution-preview-card__grid">'
-      + '<div><span>Symbol</span><b>' + _esc(testnetOrder.symbol) + '</b></div>'
-      + '<div><span>Side</span><b>' + _esc(testnetOrder.side) + '</b></div>'
-      + '<div><span>Type</span><b>' + _esc(testnetOrder.type) + '</b></div>'
-      + '<div><span>Quantity</span><b>' + _esc(testnetOrder.quantity) + '</b></div>'
-      + '<div><span>Status</span><b>' + _esc(testnetOrder.status) + '</b></div>'
-      + '<div><span>Order ID</span><b>' + _esc(testnetOrder.orderId != null ? testnetOrder.orderId : '--') + '</b></div>'
-      + '<div><span>Testnet</span><b>YES</b></div>'
+      + '<div><span>Symbol</span><b>' + _esc(recentResult.symbol) + '</b></div>'
+      + '<div><span>Status</span><b>' + _esc(recentResult.orderStatus) + '</b></div>'
+      + '<div><span>Executed Qty</span><b>' + _esc(recentResult.executedQty) + '</b></div>'
+      + '<div><span>Quote Qty</span><b>' + _esc(recentResult.cummulativeQuoteQty) + '</b></div>'
+      + '<div><span>Order ID</span><b>' + _esc(recentResult.orderId != null ? recentResult.orderId : '--') + '</b></div>'
       + '<div><span>Real Order</span><b>NO</b></div>'
+      + '</div>'
+      + '</div>';
+  } else if (intent) {
+    html +=
+      '<div class="pb-execution-preview-card__testnet-result">'
+      + '<div class="pb-execution-preview-card__testnet-title">PENDING INTENT</div>'
+      + '<div class="pb-execution-preview-card__grid">'
+      + '<div><span>Intent ID</span><b>' + _esc(intent.id) + '</b></div>'
+      + '<div><span>Status</span><b>' + _esc(intent.status) + '</b></div>'
+      + '<div><span>Mode</span><b>' + _esc(intent.mode) + '</b></div>'
+      + '<div><span>Expires</span><b>' + new Date(intent.expiresAt).toLocaleTimeString() + '</b></div>'
       + '</div>'
       + '</div>';
   }
 
-  if (showTestnetButton) {
+  if (showTestnetButton && (!intent || intent.status === 'expired' || intent.status === 'failed')) {
     html +=
       '<div class="pb-execution-preview-card__actions">'
-      + '<button class="pb-execution-preview-card__testnet-btn" type="button" onclick="sendPaperBotTestnetOrder()">Send Testnet Order</button>'
-      + '<span class="pb-execution-preview-card__actions-note">TESTNET ONLY - no production order submitted</span>'
+      + '<button class="pb-execution-preview-card__testnet-btn" type="button" onclick="createPaperBotExecutionIntent()">Create Testnet Intent</button>'
+      + '<span class="pb-execution-preview-card__actions-note">Requires running local worker to execute</span>'
       + '</div>';
   }
 
@@ -3817,10 +3832,9 @@ function _pbRenderDiagnostics(state) {
   card.innerHTML = diagHtml;
 }
 
-async function _paperbotTestnetOrderRequest() {
-  // TESTNET ONLY. No secrets, apiKey or apiSecret are ever sent from the browser.
+async function _createPaperbotExecutionIntentRequest() {
   const authHeaders = await _getAuthHeaders();
-  const res = await fetch('/api/bot/testnet-order', {
+  const res = await fetch('/api/bot/create-execution-intent', {
     method: 'POST',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', ...authHeaders },
     body: '{}',
@@ -3832,37 +3846,18 @@ async function _paperbotTestnetOrderRequest() {
   }
 
   if (!res.ok || payload.ok === false) {
-    let msg = payload.blockedReason;
-    if (!msg) msg = payload.binanceMessage;
-    if (!msg && Array.isArray(payload.events)) {
-      const failEvent = payload.events.find(e => e.type === 'TESTNET_ORDER_FAILED');
-      if (failEvent) msg = failEvent.message;
-    }
-    if (!msg) msg = 'Testnet order failed';
-    
-    if (Array.isArray(payload.events)) {
-      const failEvent = payload.events.find(e => e.type === 'TESTNET_ORDER_FAILED');
-      if (failEvent) {
-         try { LiveFeed.push(failEvent.message, 'error', { source: 'PaperBot Testnet' }); } catch {}
-      }
-    }
-    
+    let msg = payload.error || 'Failed to create execution intent';
     throw new Error(msg);
   }
-  if (payload.testnetOrderSubmitted === true) {
-    try { window.Toast?.success('TESTNET ORDER SENT', 'Binance Spot Testnet order submitted. Production trading remains locked.'); } catch {}
-    try { LiveFeed.push('TESTNET_ORDER_SUBMITTED - Binance Spot Testnet order submitted. Real order: NO.', 'info', { source: 'PaperBot Testnet' }); } catch {}
-  } else {
-    const reason = payload.blockedReason || 'Testnet safety gate blocked the order.';
-    try { window.Toast?.error('Testnet order blocked', reason, { endpoint: '/api/bot/testnet-order' }); } catch {}
-  }
+  
+  try { window.Toast?.success('INTENT CREATED', 'Waiting for local worker to submit Binance Spot Testnet order.'); } catch {}
   return payload;
 }
 
-function sendPaperBotTestnetOrder() {
-  _paperbotTestnetOrderRequest().catch((err) => {
-    console.warn('[PaperBot] Testnet order failed:', err.message);
-    window.Toast?.error('Testnet order failed', err.message, { endpoint: '/api/bot/testnet-order' });
+function createPaperBotExecutionIntent() {
+  _createPaperbotExecutionIntentRequest().catch((err) => {
+    console.warn('[PaperBot] Intent creation failed:', err.message);
+    window.Toast?.error('Intent failed', err.message);
   });
 }
 

@@ -13,6 +13,9 @@ const DEFAULT_STATE = {
   realizedPnl: 0,
   unrealizedPnl: 0,
   message: 'PaperBot control skeleton is in safety mode. No trading engine is running.',
+  executionIntent: null,
+  executionResults: [],
+  usedIdempotencyKeys: [],
   events: [],
   updatedAt: null,
 };
@@ -86,26 +89,21 @@ function getBotSafetyConfig() {
 }
 
 function getBinanceConfigStatus() {
-  const hasApiKey = Boolean(process.env.BINANCE_API_KEY);
-  const hasApiSecret = Boolean(process.env.BINANCE_API_SECRET);
   const safetyConfig = getBotSafetyConfig();
   return {
-    binanceConfigured: hasApiKey && hasApiSecret,
+    binanceConfigured: true, // Frontend assumes true to allow intent creation
     binanceEnv: safetyConfig.binanceEnv,
-    hasApiKey,
-    hasApiSecret,
+    hasApiKey: false, // Netlify does not hold keys
+    hasApiSecret: false,
   };
 }
 
 function getTestnetExecutionEnabled() {
-  const creds = getBinanceCredentials();
   return process.env.BINANCE_ENV === 'testnet'
     && process.env.BOT_ALLOW_TESTNET_ORDERS === 'true'
     && process.env.BOT_TRADING_MODE !== 'live'
     && process.env.BOT_LIVE_TRADING_ENABLED !== 'true'
-    && process.env.BOT_ALLOW_REAL_ORDERS !== 'true'
-    && creds.hasApiKey
-    && creds.hasApiSecret;
+    && process.env.BOT_ALLOW_REAL_ORDERS !== 'true';
 }
 
 class SafeBinanceError extends Error {
@@ -236,29 +234,8 @@ async function getTestnetExchangeInfoDebug() {
 const BINANCE_TESTNET_BASE_URL = 'https://testnet.binance.vision/api';
 
 function getBinanceBaseUrl() {
-  // Production base URL is intentionally unsupported in this phase.
   if (process.env.BINANCE_ENV === 'testnet') return BINANCE_TESTNET_BASE_URL;
   return null;
-}
-
-function getBinanceCredentials() {
-  const apiKey = process.env.BINANCE_API_KEY || '';
-  const apiSecret = process.env.BINANCE_API_SECRET || '';
-  return { apiKey, apiSecret, hasApiKey: Boolean(apiKey), hasApiSecret: Boolean(apiSecret) };
-}
-
-function hmacSha256(queryString, secret) {
-  return crypto.createHmac('sha256', secret).update(queryString).digest('hex');
-}
-
-function buildSignedQuery(params, secret) {
-  const search = new URLSearchParams();
-  for (const key of Object.keys(params)) {
-    if (params[key] !== undefined && params[key] !== null) search.append(key, String(params[key]));
-  }
-  const queryString = search.toString();
-  const signature = hmacSha256(queryString, secret);
-  return `${queryString}&signature=${signature}`;
 }
 
 async function binancePublic(path, params = {}) {
@@ -281,33 +258,6 @@ async function binancePublic(path, params = {}) {
       });
     }
     throw new SafeBinanceError(`Binance testnet public HTTP ${res.status} failed safely.`, { httpStatus: res.status });
-  }
-  return data;
-}
-
-async function binanceSigned(method, path, params = {}) {
-  // Hard gate: signed requests are only ever allowed against the testnet.
-  if (process.env.BINANCE_ENV !== 'testnet') throw new Error('TESTNET_ONLY: signed requests blocked outside testnet.');
-  const base = getBinanceBaseUrl();
-  if (!base) throw new Error('TESTNET_ONLY: Binance base URL is unavailable outside testnet.');
-  const { apiKey, apiSecret, hasApiKey, hasApiSecret } = getBinanceCredentials();
-  if (!hasApiKey || !hasApiSecret) throw new Error('Binance testnet credentials are not configured.');
-  const signedParams = { recvWindow: 5000, ...params, timestamp: Date.now() };
-  const query = buildSignedQuery(signedParams, apiSecret);
-  const res = await fetch(`${base}${path}?${query}`, {
-    method,
-    headers: { 'X-MBX-APIKEY': apiKey, Accept: 'application/json' },
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    if (data && data.code && data.msg) {
-      throw new SafeBinanceError(`Binance Testnet rejected request: ${data.msg}`, {
-        binanceCode: data.code,
-        binanceMessage: data.msg,
-        httpStatus: res.status
-      });
-    }
-    throw new SafeBinanceError(`Binance testnet signed HTTP ${res.status} failed safely.`, { httpStatus: res.status });
   }
   return data;
 }
@@ -382,48 +332,8 @@ function buildTestnetMarketOrderParams(paperPosition, exchangeInfo) {
   return { symbol, side: 'BUY', type: 'MARKET', quantity, stepSize, price, notionalCheck };
 }
 
-function sanitizeTestnetOrderResponse(raw, orderPlan) {
-  // Whitelist response fields only. Never echo API key/secret or unexpected payload.
-  const safe = raw && typeof raw === 'object' ? raw : {};
-  const quantityStr = orderPlan.stepSize
-    ? formatQuantity(orderPlan.quantity, orderPlan.stepSize)
-    : String(orderPlan.quantity);
-  return {
-    symbol: safe.symbol || orderPlan.symbol,
-    side: safe.side || orderPlan.side,
-    type: safe.type || orderPlan.type,
-    quantity: safe.executedQty || safe.origQty || quantityStr,
-    status: safe.status || 'UNKNOWN',
-    orderId: safe.orderId != null ? safe.orderId : null,
-    transactTime: safe.transactTime != null ? safe.transactTime : null,
-    testnet: true,
-    realOrderSubmitted: false,
-  };
-}
-
-async function submitTestnetOrder(paperPosition) {
-  const quoteAsset = paperPosition.smokeFallback ? BOT_TESTNET_SMOKE_QUOTE_ASSET : BOT_QUOTE_ASSET;
-  const symbol = `${paperPosition.symbol}${quoteAsset}`;
-  const exchangeInfo = await getExchangeInfo(symbol);
-  const orderPlan = buildTestnetMarketOrderParams(paperPosition, exchangeInfo);
-  if (!(orderPlan.quantity > 0)) {
-    return { ok: false, reason: 'Computed testnet order quantity is not positive.' };
-  }
-  if (orderPlan.notionalCheck && orderPlan.notionalCheck.ok === false) {
-    return { ok: false, reason: orderPlan.notionalCheck.reason };
-  }
-  const raw = await binanceSigned('POST', '/v3/order', {
-    symbol: orderPlan.symbol,
-    side: orderPlan.side,
-    type: orderPlan.type,
-    quantity: orderPlan.quantity,
-  });
-  return { ok: true, testnetOrder: sanitizeTestnetOrderResponse(raw, orderPlan) };
-}
-
 function getTestnetSafetyGate(paperPosition) {
   const env = process.env;
-  const creds = getBinanceCredentials();
   const positionUsd = paperPosition ? Number(paperPosition.positionUsd) : 0;
   const maxPositionUsd = envNumber('BOT_MAX_POSITION_USD', 10);
   const maxOpenPositions = envNumber('BOT_MAX_OPEN_POSITIONS', 1);
@@ -434,8 +344,6 @@ function getTestnetSafetyGate(paperPosition) {
     { ok: env.BOT_TRADING_MODE !== 'live', reason: 'BOT_TRADING_MODE must not be live' },
     { ok: env.BOT_LIVE_TRADING_ENABLED !== 'true', reason: 'BOT_LIVE_TRADING_ENABLED must not be true' },
     { ok: env.BOT_ALLOW_REAL_ORDERS !== 'true', reason: 'BOT_ALLOW_REAL_ORDERS must not be true' },
-    { ok: creds.hasApiKey, reason: 'BINANCE_API_KEY must be configured' },
-    { ok: creds.hasApiSecret, reason: 'BINANCE_API_SECRET must be configured' },
     { ok: !!paperPosition, reason: 'an open paper position must exist' },
     { ok: !!paperPosition && paperPosition.status === 'open', reason: 'paper position must be open' },
     { ok: !!paperPosition && paperPosition.realOrderSubmitted === false, reason: 'paper position must not have a real order' },
@@ -455,8 +363,6 @@ function isLiveTradingAllowed() {
     && envFlag('BOT_LIVE_TRADING_ENABLED')
     && envFlag('BOT_ALLOW_REAL_ORDERS')
     && config.binanceEnv === 'production'
-    && binanceConfig.hasApiKey
-    && binanceConfig.hasApiSecret
     && config.maxPositionUsd <= 10
     && config.maxOpenPositions === 1;
 }
@@ -568,6 +474,8 @@ function publicState(extra = {}) {
     manualExecutionPlan: botControlState.manualExecutionPlan,
     realizedPnl: botControlState.realizedPnl,
     unrealizedPnl: botControlState.unrealizedPnl,
+    executionIntent: botControlState.executionIntent || null,
+    executionResults: botControlState.executionResults || [],
     events: botControlState.events,
     scanMeta: botControlState.scanMeta || null,
     ...extra,
@@ -822,8 +730,7 @@ async function runDryRunScanFromMarkets(markets) {
 
   const isTestnetEnv = process.env.BINANCE_ENV === 'testnet';
   const allowQuoteFallback = process.env.BOT_TESTNET_ALLOW_QUOTE_FALLBACK === 'true';
-  const creds = getBinanceCredentials();
-  const isTestnetConfigured = isTestnetEnv && creds.hasApiKey && creds.hasApiSecret;
+  const isTestnetConfigured = isTestnetEnv; // Keys no longer needed for public endpoints or UI
   const allowTestnetOrders = process.env.BOT_ALLOW_TESTNET_ORDERS === 'true';
   const allowFallback = process.env.BOT_TESTNET_ALLOW_COMPATIBLE_FALLBACK === 'true';
   
@@ -1088,8 +995,7 @@ async function validatePaperPositionForTestnet(paperPosition) {
   const symbol = toBinanceQuoteSymbol(paperPosition.symbol, quoteAsset);
   
   const isTestnetEnv = process.env.BINANCE_ENV === 'testnet';
-  const creds = getBinanceCredentials();
-  if (isTestnetEnv && creds.hasApiKey && creds.hasApiSecret) {
+  if (isTestnetEnv) {
     const testnetSymbols = await getTestnetTradableSymbols(quoteAsset);
     if (testnetSymbols && !testnetSymbols.has(symbol)) {
       return { ok: false, reason: `Symbol ${symbol} is not available on Binance Spot Testnet. Clear the paper position and run Wake Bot again.`, symbol };
@@ -1100,96 +1006,19 @@ async function validatePaperPositionForTestnet(paperPosition) {
 }
 
 async function handleTestnetOrder(req, auth) {
-  const paperPosition = botControlState.paperPosition && botControlState.paperPosition.status === 'open'
-    ? botControlState.paperPosition
-    : null;
-
-  const valid = await validatePaperPositionForTestnet(paperPosition);
-  if (!valid.ok) {
-    const blockEvent = event('TESTNET_SYMBOL_INVALID_FOR_OPEN_POSITION', 'warn', `Open paper position ${paperPosition ? paperPosition.symbol : 'UNKNOWN'} cannot be sent to Binance Spot Testnet because ${valid.symbol || 'it'} is not available.`);
-    botControlState = {
-      ...botControlState,
-      events: [blockEvent, ...botControlState.events].slice(0, 30),
-      updatedAt: blockEvent.ts,
-    };
-    return json(req, publicState({
-      ok: false,
-      error: 'TESTNET_ORDER_BLOCKED',
-      blockedReason: valid.reason,
-      testnetOrderSubmitted: false,
-      realOrderSubmitted: false,
-      executionEnabled: false,
-      testnetExecutionEnabled: false,
-      events: [blockEvent],
-      authMode: auth.authMode,
-    }), 200);
-  }
-
-  const gate = getTestnetSafetyGate(paperPosition);
-  if (!gate.ok) {
-    return blockTestnetOrder(req, auth, gate.reason, { testnetExecutionEnabled: getTestnetExecutionEnabled() });
-  }
-
-  let result;
-  try {
-    result = await submitTestnetOrder(paperPosition);
-  } catch (err) {
-    const safeMessage = err.safeMessage || 'Testnet order failed safely.';
-    const failEvent = event('TESTNET_ORDER_FAILED', 'error', safeMessage, {
-      symbol: paperPosition ? paperPosition.symbol + BOT_QUOTE_ASSET : undefined,
-      testnet: true,
-      realOrderSubmitted: false,
-      binanceCode: err.binanceCode,
-      binanceMessage: err.binanceMessage,
-      httpStatus: err.httpStatus
-    });
-    botControlState = {
-      ...botControlState,
-      events: [failEvent, ...botControlState.events].slice(0, 30),
-      updatedAt: failEvent.ts,
-    };
-    
-    const safeErrorObj = safeTestnetOrderError(err);
-    
-    return json(req, publicState({
-      ...safeErrorObj,
-      testnetExecutionEnabled: true,
-      events: [failEvent],
-      authMode: auth.authMode,
-    }), 200);
-  }
-
-  if (!result.ok) {
-    return blockTestnetOrder(req, auth, result.reason, { testnetExecutionEnabled: true });
-  }
-
-  const testnetOrder = result.testnetOrder;
-  const submittedEvent = event(
-    'TESTNET_ORDER_SUBMITTED',
-    'info',
-    `Binance Spot Testnet order submitted for ${testnetOrder.symbol}. Production trading remains locked.`,
-    { testnetOrder },
-  );
-  // realOrderSubmitted is never mutated here — it stays false.
+  const blockEvent = event('TESTNET_ORDER_BLOCKED', 'warn', `Direct Netlify Binance execution is disabled. Use Create Testnet Intent and local worker.`);
   botControlState = {
     ...botControlState,
-    testnetOrder,
-    testnetOrders: [testnetOrder, ...(botControlState.testnetOrders || [])].slice(0, 20),
-    events: [submittedEvent, ...botControlState.events].slice(0, 30),
-    updatedAt: submittedEvent.ts,
+    events: [blockEvent, ...botControlState.events].slice(0, 30),
+    updatedAt: blockEvent.ts,
   };
   return json(req, publicState({
-    testnetOrderSubmitted: true,
+    testnetOrderSubmitted: false,
     realOrderSubmitted: false,
     executionEnabled: false,
-    testnetExecutionEnabled: true,
-    testnetOrder,
-    events: [submittedEvent],
+    blockedReason: 'Direct Netlify Binance execution is disabled. Use Create Testnet Intent and local worker.',
+    events: [blockEvent],
     authMode: auth.authMode,
-    testnet: true,
-    smokeFallback: paperPosition.smokeFallback === true,
-    productionQuoteAsset: BOT_QUOTE_ASSET,
-    testnetQuoteAsset: paperPosition.smokeFallback ? BOT_TESTNET_SMOKE_QUOTE_ASSET : BOT_QUOTE_ASSET
   }));
 }
 
@@ -1220,7 +1049,36 @@ export default async function handler(req) {
     return json(req, debugInfo);
   }
 
-  if (route !== 'wake' && route !== 'stop' && route !== 'testnet-order' && route !== 'clear-paper-position') {
+  if (route === 'execution-intent') {
+    if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    const workerToken = req.headers.get('x-bot-worker-token');
+    const expectedToken = process.env.BOT_WORKER_TOKEN;
+    if (!expectedToken || workerToken !== expectedToken) {
+      return json(req, { ok: false, error: 'Forbidden', reason: 'Invalid or missing X-BOT-WORKER-TOKEN' }, 403);
+    }
+    let intent = botControlState.executionIntent;
+    if (intent && intent.status === 'pending') {
+      if (new Date(intent.expiresAt).getTime() < Date.now()) {
+        intent.status = 'expired';
+        botControlState.executionIntent = intent;
+        intent = null;
+      } else {
+        intent.status = 'claimed';
+        botControlState.executionIntent = intent;
+      }
+    } else if (intent && intent.status === 'claimed') {
+      if (new Date(intent.expiresAt).getTime() < Date.now()) {
+        intent.status = 'expired';
+        botControlState.executionIntent = intent;
+      }
+      intent = null;
+    } else {
+      intent = null;
+    }
+    return json(req, { ok: true, intent });
+  }
+
+  if (route !== 'wake' && route !== 'stop' && route !== 'testnet-order' && route !== 'clear-paper-position' && route !== 'create-execution-intent' && route !== 'execution-result') {
     return json(req, { ok: false, error: 'Not Found' }, 404);
   }
   if (req.method !== 'POST') {
@@ -1243,7 +1101,129 @@ export default async function handler(req) {
       message: 'API keys and secrets must be configured only in Netlify Environment Variables. They are never entered in the browser.',
     }, 400);
   }
+  if (route === 'create-execution-intent') {
+    const isTestnetEnv = process.env.BINANCE_ENV === 'testnet';
+    const allowTestnetOrders = process.env.BOT_ALLOW_TESTNET_ORDERS === 'true';
+    const liveTradingEnabled = process.env.BOT_LIVE_TRADING_ENABLED === 'true';
+    const allowRealOrders = process.env.BOT_ALLOW_REAL_ORDERS === 'true';
+    const maxPositionUsd = envNumber('BOT_MAX_POSITION_USD', 10);
+    
+    if (liveTradingEnabled || allowRealOrders) {
+      return json(req, { ok: false, error: 'Live trading flags are active. Cannot create testnet intent.' }, 403);
+    }
+    if (!isTestnetEnv || !allowTestnetOrders) {
+      return json(req, { ok: false, error: 'Testnet execution is not allowed.' }, 403);
+    }
+    
+    const paperPosition = botControlState.paperPosition;
+    if (!paperPosition) {
+      return json(req, { ok: false, error: 'No open paper position.' }, 400);
+    }
+    if (paperPosition.realOrderSubmitted) {
+      return json(req, { ok: false, error: 'Real order already submitted.' }, 400);
+    }
+    if (!paperPosition.testnetSymbolAvailable && !paperPosition.smokeFallback) {
+      return json(req, { ok: false, error: 'Position not compatible with testnet.' }, 400);
+    }
+    if (paperPosition.positionUsd > maxPositionUsd) {
+      return json(req, { ok: false, error: `Position size exceeds maximum allowed (${maxPositionUsd} USD).` }, 400);
+    }
 
+    if (botControlState.executionIntent && (botControlState.executionIntent.status === 'pending' || botControlState.executionIntent.status === 'claimed')) {
+      if (new Date(botControlState.executionIntent.expiresAt).getTime() > Date.now()) {
+        return json(req, { ok: false, error: 'An execution intent is already pending or claimed.' }, 409);
+      }
+    }
+
+    const intentId = `intent_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const quoteAsset = paperPosition.smokeFallback ? BOT_TESTNET_SMOKE_QUOTE_ASSET : BOT_QUOTE_ASSET;
+    const binanceSym = toBinanceQuoteSymbol(paperPosition.symbol, quoteAsset);
+    const idempotencyKey = `paperbot_${binanceSym}_${Date.now()}`;
+
+    if (botControlState.usedIdempotencyKeys && botControlState.usedIdempotencyKeys.includes(idempotencyKey)) {
+      return json(req, { ok: false, error: 'Idempotency key already used.' }, 409);
+    }
+
+    const intent = {
+      id: intentId,
+      idempotencyKey,
+      mode: 'testnet',
+      symbol: binanceSym,
+      side: paperPosition.side === 'LONG' ? 'BUY' : 'SELL',
+      type: 'MARKET',
+      positionUsd: paperPosition.positionUsd,
+      entryReference: paperPosition.entry,
+      stopLoss: paperPosition.stopLoss,
+      takeProfit: paperPosition.takeProfit,
+      quoteAsset,
+      productionQuoteAsset: BOT_QUOTE_ASSET,
+      smokeFallback: paperPosition.smokeFallback || false,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 120 * 1000).toISOString(), // 120 seconds expiry
+      status: 'pending',
+      realOrderSubmitted: false
+    };
+
+    botControlState.executionIntent = intent;
+    const createEvent = event('TESTNET_EXECUTION_INTENT_CREATED', 'info', `Testnet execution intent created for ${binanceSym}. Waiting for local worker.`, { intentId });
+    botControlState.events = [createEvent, ...botControlState.events].slice(0, 30);
+    botControlState.updatedAt = createEvent.ts;
+
+    return json(req, publicState({
+      ok: true,
+      executionIntent: intent,
+      events: [createEvent]
+    }));
+  }
+
+  if (route === 'execution-result') {
+    const workerToken = req.headers.get('x-bot-worker-token');
+    const expectedToken = process.env.BOT_WORKER_TOKEN;
+    if (!expectedToken || workerToken !== expectedToken) {
+      return json(req, { ok: false, error: 'Forbidden', reason: 'Invalid or missing X-BOT-WORKER-TOKEN' }, 403);
+    }
+    
+    const intent = botControlState.executionIntent;
+    if (!intent || (intent.status !== 'pending' && intent.status !== 'claimed')) {
+      return json(req, { ok: false, error: 'No active intent found.' }, 400);
+    }
+    if (new Date(intent.expiresAt).getTime() < Date.now()) {
+      intent.status = 'expired';
+      return json(req, { ok: false, error: 'Intent has expired.' }, 400);
+    }
+    if (body.id !== intent.id || body.idempotencyKey !== intent.idempotencyKey) {
+      return json(req, { ok: false, error: 'Intent mismatch.' }, 400);
+    }
+    if (botControlState.usedIdempotencyKeys && botControlState.usedIdempotencyKeys.includes(body.idempotencyKey)) {
+      return json(req, { ok: false, error: 'Idempotency key already processed.' }, 409);
+    }
+    if (body.testnet !== true || body.realProductionOrder !== false) {
+      return json(req, { ok: false, error: 'Invalid safety payload.' }, 400);
+    }
+
+    intent.status = body.status === 'failed' ? 'failed' : 'submitted';
+    if (!botControlState.usedIdempotencyKeys) botControlState.usedIdempotencyKeys = [];
+    botControlState.usedIdempotencyKeys.push(body.idempotencyKey);
+    
+    const execResult = {
+      ...body,
+      receivedAt: new Date().toISOString()
+    };
+    if (!botControlState.executionResults) botControlState.executionResults = [];
+    botControlState.executionResults = [execResult, ...botControlState.executionResults].slice(0, 20);
+
+    const resultEvent = body.status === 'failed' 
+      ? event('TESTNET_ORDER_FAILED_BY_LOCAL_WORKER', 'warn', `Local worker failed to execute order: ${body.error || 'Unknown error'}`)
+      : event('TESTNET_ORDER_SUBMITTED_BY_LOCAL_WORKER', 'info', `Local worker submitted testnet order ${body.orderId} for ${body.symbol}.`);
+      
+    botControlState.events = [resultEvent, ...botControlState.events].slice(0, 30);
+    botControlState.updatedAt = resultEvent.ts;
+
+    return json(req, publicState({
+      ok: true,
+      events: [resultEvent]
+    }));
+  }
   if (route === 'testnet-order') {
     return await handleTestnetOrder(req, auth);
   }
