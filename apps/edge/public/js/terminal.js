@@ -3417,6 +3417,25 @@ function _pbEnsureAnalystPanel() {
   return panel;
 }
 
+function _pbEventDataSummary(data) {
+  if (!data || typeof data !== 'object') return '';
+  if (data.symbol && data.entry != null) {
+    const parts = [
+      data.symbol,
+      'entry ' + data.entry,
+      data.stopLoss != null ? 'SL ' + data.stopLoss : '',
+      data.takeProfit != null ? 'TP ' + data.takeProfit : '',
+    ].filter(Boolean);
+    return ' | ' + parts.join(' / ');
+  }
+  if (data.candidate && data.candidate.symbol) {
+    return ' | ' + data.candidate.symbol + ' score ' + data.candidate.score;
+  }
+  if (data.marketCount != null) return ' | markets ' + data.marketCount;
+  if (data.symbol) return ' | ' + data.symbol;
+  return '';
+}
+
 function _pbRenderAnalystFeed(state) {
   const logs = Array.isArray(state && state.advisoryLogs)
     ? state.advisoryLogs
@@ -3433,9 +3452,11 @@ function _pbRenderAnalystFeed(state) {
   }
   list.innerHTML = logs.slice(0, 8).map((evt) => {
     const type = String(evt.type || 'system').toLowerCase();
+    const severity = String(evt.severity || 'info').toLowerCase();
     const ts = _pbFmtTime(evt.ts);
     const text = evt.analysis || evt.message || 'Bot event';
     const ctx = evt.context && evt.context.reason ? ' · ' + evt.context.reason : '';
+    const dataSummary = _pbEventDataSummary(evt.data);
     const id = String(evt.id || evt.ts || text);
     if (!_pbAdvisoryKeys.has(id)) {
       _pbAdvisoryKeys.add(id);
@@ -3444,7 +3465,7 @@ function _pbRenderAnalystFeed(state) {
     return '<div class="pb-analyst-item pb-analyst-item--' + _esc(type) + '">'
       + '<span class="pb-analyst-item__ts">' + _esc(ts) + '</span>'
       + '<span class="pb-analyst-item__type">' + _esc(type.toUpperCase()) + '</span>'
-      + '<span class="pb-analyst-item__msg">' + _esc(text + ctx) + '</span>'
+      + '<span class="pb-analyst-item__msg">[' + _esc(severity.toUpperCase()) + '] ' + _esc(text + ctx + dataSummary) + '</span>'
       + '</div>';
   }).join('');
 }
