@@ -635,14 +635,15 @@ function buildExecutionPreview(paperPosition) {
   const basePreview = {
     enabled: true,
     type: 'execution_preview',
-    symbol: `${paperPosition.symbol}${BOT_QUOTE_ASSET}`,
+    symbol: paperPosition.binanceSymbol || `${paperPosition.symbol}${BOT_QUOTE_ASSET}`,
     side: 'BUY',
-    quoteAsset: BOT_QUOTE_ASSET,
+    quoteAsset: paperPosition.quoteAsset || BOT_QUOTE_ASSET,
     positionUsd: paperPosition.positionUsd,
     entryReference: paperPosition.entry,
     stopLoss: paperPosition.stopLoss,
     takeProfit: paperPosition.takeProfit,
     realOrderSubmitted: false,
+    testnetSymbolAvailable: paperPosition.testnetSymbolAvailable === true,
   };
   if (config.binanceEnv !== 'testnet') {
     return {
@@ -753,11 +754,8 @@ async function runDryRunScanFromMarkets(markets) {
   let testnetFilterActive = false;
   if (isTestnetConfigured) {
     testnetSymbols = await getTestnetTradableSymbols();
-    if (testnetSymbols) {
-      testnetFilterActive = true;
-    } else {
-      events.push(event('TESTNET_SYMBOL_FILTER_UNAVAILABLE', 'warn', 'Binance Spot Testnet exchangeInfo unavailable. Scanning without testnet filter.'));
-    }
+    if (!testnetSymbols) testnetSymbols = new Set();
+    testnetFilterActive = true;
   }
 
   const candidatesList = scoreMarketsList(markets);
@@ -769,9 +767,17 @@ async function runDryRunScanFromMarkets(markets) {
     if (testnetFilterActive) {
       const binanceSym = toBinanceQuoteSymbol(c.symbol);
       if (!testnetSymbols.has(binanceSym)) {
-        events.push(event('TESTNET_SYMBOL_SKIPPED', 'info', `Skipped ${c.symbol} because ${binanceSym} is not available on Binance Spot Testnet.`));
+        events.push(event('TESTNET_SYMBOL_SKIPPED', 'warn', `Skipped ${c.symbol} because ${binanceSym} is not available on Binance Spot Testnet.`, {
+          symbol: c.symbol,
+          binanceSymbol: binanceSym,
+          quoteAsset: BOT_QUOTE_ASSET,
+          testnetSymbolAvailable: false
+        }));
         continue;
       }
+      c.binanceSymbol = binanceSym;
+      c.quoteAsset = BOT_QUOTE_ASSET;
+      c.testnetSymbolAvailable = true;
     }
     
     bestCandidate = c;
@@ -783,7 +789,7 @@ async function runDryRunScanFromMarkets(markets) {
     const topSym = candidatesList[0] ? candidatesList[0].symbol : null;
     
     if (candidatesList.length > 0 && topScore >= 6) {
-      events.push(event('MARKET_SCAN_SKIPPED', 'info', `No flush/reclaim candidate passed both strategy filters and Binance Spot Testnet ${BOT_QUOTE_ASSET} symbol availability.`, {
+      events.push(event('MARKET_SCAN_SKIPPED', 'warn', `No flush/reclaim candidate passed both strategy filters and Binance Spot Testnet ${BOT_QUOTE_ASSET} symbol availability.`, {
         bestScore: topScore,
         symbol: topSym,
       }));
@@ -812,6 +818,12 @@ async function runDryRunScanFromMarkets(markets) {
 
   events.push(event('RISK_CHECK_PASSED', 'info', 'Dry-run risk check passed. Trading remains disabled.'));
   const paperPosition = makePaperPosition(candidate);
+  if (testnetFilterActive) {
+    paperPosition.binanceSymbol = candidate.binanceSymbol;
+    paperPosition.quoteAsset = candidate.quoteAsset;
+    paperPosition.testnetSymbolAvailable = candidate.testnetSymbolAvailable;
+  }
+
   const manualExecutionPlan = makeManualExecutionPlan(paperPosition);
   events.push(event('PAPER_POSITION_OPENED', 'info', `Dry-run paper position opened for ${candidate.symbol}. No real order submitted.`, {
     paperPosition,

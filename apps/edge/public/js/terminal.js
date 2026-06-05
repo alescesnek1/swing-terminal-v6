@@ -3684,7 +3684,7 @@ function _pbRenderExecutionPreview(state) {
     && !!preview
     && realOrderSubmitted === false;
 
-  const statusLabel = testnetOrder ? 'TESTNET ORDER SENT' : (isTestnet ? 'TESTNET READY' : 'LIVE EXECUTION LOCKED');
+  const statusLabel = testnetOrder ? 'TESTNET ORDER SENT' : (preview.testnetSymbolAvailable ? 'TESTNET READY' : 'LIVE EXECUTION LOCKED');
   const message = testnetOrder
     ? 'Binance Spot Testnet order submitted. Production trading remains locked.'
     : (isTestnet
@@ -4065,7 +4065,7 @@ function _pbDrawReceipt(canvas, trade) {
   ctx.textAlign = 'right';
   const pctTxt = (finalPnl >= 0 ? '+' : '') + (finalPnl * 100).toFixed(2) + '%';
   const yOff = isWin ? -7 : 12; // label above for wins, below for losses
-  const reasonTxt = trade.isOpen ? 'LIVE' : (trade.reason || 'exit').toUpperCase();
+  const reasonTxt = trade.isOpen ? 'PAPER OPEN' : (trade.reason || 'exit').toUpperCase();
   ctx.fillText(pctTxt + '  ' + reasonTxt, pad + w - 2, exitY + yOff);
 
   if (trade.isOpen && canvas.isConnected) {
@@ -4102,7 +4102,7 @@ function _pbBuildRow(trade) {
   if (isLive) {
     exit = document.createElement('span');
     exit.className = 'pb-row__live-badge';
-    exit.textContent = 'LIVE';
+    exit.textContent = 'PAPER OPEN';
   } else {
     exit = document.createElement('span');
     exit.className = 'pb-row__px';
@@ -4470,7 +4470,12 @@ function _paperbotStateFromControlResponse(payload) {
     message = 'Candidate found, but no paper trade was simulated.';
   } else if (_pbHasEvent(events, 'MARKET_SCAN_SKIPPED')) {
     status = 'no_setup';
-    message = 'No candidate passed the dry-run filters.';
+    const skipEvent = events.find(e => e.type === 'MARKET_SCAN_SKIPPED');
+    if (skipEvent && skipEvent.message && skipEvent.message.includes('USDC symbol availability')) {
+      message = 'No compatible Binance Spot Testnet USDC setup found.';
+    } else {
+      message = 'No candidate passed the dry-run filters.';
+    }
   }
   const paperPosition = payload && payload.paperPosition ? payload.paperPosition : null;
   const closedTrades = Array.isArray(payload && payload.closedTrades) ? payload.closedTrades : [];
