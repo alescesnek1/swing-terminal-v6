@@ -3425,13 +3425,23 @@ function _pbEventDataSummary(data) {
       'entry ' + data.entry,
       data.stopLoss != null ? 'SL ' + data.stopLoss : '',
       data.takeProfit != null ? 'TP ' + data.takeProfit : '',
+      data.positionUsd != null ? '$' + data.positionUsd + ' paper size' : '',
+      data.dryRun === true ? 'dry-run' : '',
     ].filter(Boolean);
-    return ' | ' + parts.join(' / ');
+    return parts.join(' / ');
   }
   if (data.candidate && data.candidate.symbol) {
-    return ' | ' + data.candidate.symbol + ' score ' + data.candidate.score;
+    const c = data.candidate;
+    const parts = [
+      c.symbol,
+      'score ' + c.score,
+      c.change24h != null ? '24h ' + Number(c.change24h).toFixed(2) + '%' : '',
+      c.change1h != null ? '1h ' + Number(c.change1h).toFixed(2) + '%' : '',
+      Array.isArray(c.reason) && c.reason.length ? c.reason.join(', ') : '',
+    ].filter(Boolean);
+    return parts.join(' / ');
   }
-  if (data.marketCount != null) return ' | markets ' + data.marketCount;
+  if (data.marketCount != null) return 'markets ' + data.marketCount;
   if (data.symbol) return ' | ' + data.symbol;
   return '';
 }
@@ -3462,10 +3472,14 @@ function _pbRenderAnalystFeed(state) {
       _pbAdvisoryKeys.add(id);
       try { LiveFeed.push(text, 'ai', { source: 'PaperBot Quant Analyst' }); } catch {}
     }
-    return '<div class="pb-analyst-item pb-analyst-item--' + _esc(type) + '">'
+    return '<div class="pb-analyst-item pb-analyst-item--' + _esc(type) + ' pb-analyst-item--severity-' + _esc(severity) + '">'
       + '<span class="pb-analyst-item__ts">' + _esc(ts) + '</span>'
       + '<span class="pb-analyst-item__type">' + _esc(type.toUpperCase()) + '</span>'
-      + '<span class="pb-analyst-item__msg">[' + _esc(severity.toUpperCase()) + '] ' + _esc(text + ctx + dataSummary) + '</span>'
+      + '<span class="pb-analyst-item__severity">' + _esc(severity.toUpperCase()) + '</span>'
+      + '<span class="pb-analyst-item__body">'
+      + '<span class="pb-analyst-item__msg">' + _esc(text + ctx) + '</span>'
+      + (dataSummary ? '<span class="pb-analyst-item__data">' + _esc(dataSummary) + '</span>' : '')
+      + '</span>'
       + '</div>';
   }).join('');
 }
@@ -3855,7 +3869,7 @@ function renderPaperBot(state) {
     if (!ledger.querySelector('.bot-ledger__empty')) {
       const empty = document.createElement('div');
       empty.className = 'bot-ledger__empty';
-      empty.textContent = 'Bot is warming up - no closed trades yet.';
+      empty.textContent = 'No closed paper trades yet. Simulated signals appear in Quant Analyst feed above.';
       ledger.appendChild(empty);
     }
     return;
