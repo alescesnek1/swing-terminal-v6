@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+
 const DEFAULT_STATE = {
   status: 'safety',
   mode: 'dry_run',
@@ -6,6 +8,8 @@ const DEFAULT_STATE = {
   paperPosition: null,
   closedTrades: [],
   manualExecutionPlan: null,
+  testnetOrder: null,
+  testnetOrders: [],
   realizedPnl: 0,
   unrealizedPnl: 0,
   message: 'PaperBot control skeleton is in safety mode. No trading engine is running.',
@@ -72,6 +76,7 @@ function getBotSafetyConfig() {
     mode: 'dry_run',
     liveTradingEnabled: false,
     allowRealOrders: false,
+    allowTestnetOrders: envFlag('BOT_ALLOW_TESTNET_ORDERS'),
     binanceEnv,
     maxPositionUsd: envNumber('BOT_MAX_POSITION_USD', 10),
     maxOpenPositions: envNumber('BOT_MAX_OPEN_POSITIONS', 1),
@@ -90,6 +95,205 @@ function getBinanceConfigStatus() {
     hasApiKey,
     hasApiSecret,
   };
+}
+
+function getTestnetExecutionEnabled() {
+  const creds = getBinanceCredentials();
+  return process.env.BINANCE_ENV === 'testnet'
+    && process.env.BOT_ALLOW_TESTNET_ORDERS === 'true'
+    && process.env.BOT_TRADING_MODE !== 'live'
+    && process.env.BOT_LIVE_TRADING_ENABLED !== 'true'
+    && process.env.BOT_ALLOW_REAL_ORDERS !== 'true'
+    && creds.hasApiKey
+    && creds.hasApiSecret;
+}
+
+// ── Binance Spot TESTNET adapter ──────────────────────────────────────────────
+// TESTNET ONLY. These helpers must never reach the Binance production API.
+// Production base URL and live orders are hard-blocked by BINANCE_ENV === 'testnet'.
+const BINANCE_TESTNET_BASE_URL = 'https://testnet.binance.vision/api';
+
+function getBinanceBaseUrl() {
+  // Production base URL is intentionally unsupported in this phase.
+  if (process.env.BINANCE_ENV === 'testnet') return BINANCE_TESTNET_BASE_URL;
+  return null;
+}
+
+function getBinanceCredentials() {
+  const apiKey = process.env.BINANCE_API_KEY || '';
+  const apiSecret = process.env.BINANCE_API_SECRET || '';
+  return { apiKey, apiSecret, hasApiKey: Boolean(apiKey), hasApiSecret: Boolean(apiSecret) };
+}
+
+function hmacSha256(queryString, secret) {
+  return crypto.createHmac('sha256', secret).update(queryString).digest('hex');
+}
+
+function buildSignedQuery(params, secret) {
+  const search = new URLSearchParams();
+  for (const key of Object.keys(params)) {
+    if (params[key] !== undefined && params[key] !== null) search.append(key, String(params[key]));
+  }
+  const queryString = search.toString();
+  const signature = hmacSha256(queryString, secret);
+  return `${queryString}&signature=${signature}`;
+}
+
+async function binancePublic(path, params = {}) {
+  const base = getBinanceBaseUrl();
+  if (!base) throw new Error('TESTNET_ONLY: Binance base URL is unavailable outside testnet.');
+  const search = new URLSearchParams();
+  for (const key of Object.keys(params)) {
+    if (params[key] !== undefined && params[key] !== null) search.append(key, String(params[key]));
+  }
+  const qs = search.toString();
+  const url = qs ? `${base}${path}?${qs}` : `${base}${path}`;
+  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Binance testnet public HTTP ${res.status}: ${(data && data.msg) || 'request failed'}`);
+  return data;
+}
+
+async function binanceSigned(method, path, params = {}) {
+  // Hard gate: signed requests are only ever allowed against the testnet.
+  if (process.env.BINANCE_ENV !== 'testnet') throw new Error('TESTNET_ONLY: signed requests blocked outside testnet.');
+  const base = getBinanceBaseUrl();
+  if (!base) throw new Error('TESTNET_ONLY: Binance base URL is unavailable outside testnet.');
+  const { apiKey, apiSecret, hasApiKey, hasApiSecret } = getBinanceCredentials();
+  if (!hasApiKey || !hasApiSecret) throw new Error('Binance testnet credentials are not configured.');
+  const signedParams = { recvWindow: 5000, ...params, timestamp: Date.now() };
+  const query = buildSignedQuery(signedParams, apiSecret);
+  const res = await fetch(`${base}${path}?${query}`, {
+    method,
+    headers: { 'X-MBX-APIKEY': apiKey, Accept: 'application/json' },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Binance testnet signed HTTP ${res.status}: ${(data && data.msg) || 'request failed'}`);
+  return data;
+}
+
+async function getExchangeInfo(symbol) {
+  const data = await binancePublic('/v3/exchangeInfo', { symbol });
+  const info = Array.isArray(data && data.symbols)
+    ? data.symbols.find((row) => String(row.symbol).toUpperCase() === String(symbol).toUpperCase())
+    : null;
+  if (!info) throw new Error(`Exchange info not available for ${symbol} on testnet.`);
+  return info;
+}
+
+function stepPrecision(stepSize) {
+  const step = String(stepSize || '');
+  if (!step.includes('.')) return 0;
+  return step.split('.')[1].replace(/0+$/, '').length;
+}
+
+function roundStep(quantity, stepSize) {
+  const step = Number(stepSize);
+  const qty = Number(quantity);
+  if (!Number.isFinite(step) || step <= 0 || !Number.isFinite(qty)) return qty;
+  const precision = stepPrecision(stepSize);
+  const rounded = Math.floor(qty / step) * step;
+  return Number(rounded.toFixed(precision > 0 ? precision : 8));
+}
+
+function formatQuantity(quantity, stepSize) {
+  const precision = stepPrecision(stepSize);
+  return Number(quantity).toFixed(precision > 0 ? precision : 8);
+}
+
+function findFilter(filters, type) {
+  return Array.isArray(filters) ? filters.find((row) => row && row.filterType === type) || null : null;
+}
+
+function validateMinNotional(price, quantity, filters) {
+  const filter = findFilter(filters, 'MIN_NOTIONAL') || findFilter(filters, 'NOTIONAL');
+  if (!filter) return { ok: true };
+  const minNotional = Number(filter.minNotional);
+  if (!Number.isFinite(minNotional) || minNotional <= 0) return { ok: true };
+  const notional = Number(price) * Number(quantity);
+  if (!Number.isFinite(notional) || notional < minNotional) {
+    return { ok: false, reason: `Order notional ${notional} is below MIN_NOTIONAL ${minNotional}.`, minNotional, notional };
+  }
+  return { ok: true, minNotional, notional };
+}
+
+function buildTestnetMarketOrderParams(paperPosition, exchangeInfo) {
+  const symbol = `${paperPosition.symbol}USDT`;
+  const filters = exchangeInfo && Array.isArray(exchangeInfo.filters) ? exchangeInfo.filters : [];
+  const lotSize = findFilter(filters, 'LOT_SIZE');
+  const stepSize = lotSize ? lotSize.stepSize : null;
+  const price = Number(paperPosition.entry) || Number(paperPosition.currentPrice) || 0;
+  const rawQuantity = price > 0 ? Number(paperPosition.positionUsd) / price : Number(paperPosition.quantity);
+  let quantity = stepSize ? roundStep(rawQuantity, stepSize) : Number(rawQuantity);
+  if (lotSize) {
+    const minQty = Number(lotSize.minQty);
+    if (Number.isFinite(minQty) && minQty > 0 && quantity < minQty) quantity = minQty;
+  }
+  const notionalCheck = validateMinNotional(price, quantity, filters);
+  return { symbol, side: 'BUY', type: 'MARKET', quantity, stepSize, price, notionalCheck };
+}
+
+function sanitizeTestnetOrderResponse(raw, orderPlan) {
+  // Whitelist response fields only. Never echo API key/secret or unexpected payload.
+  const safe = raw && typeof raw === 'object' ? raw : {};
+  const quantityStr = orderPlan.stepSize
+    ? formatQuantity(orderPlan.quantity, orderPlan.stepSize)
+    : String(orderPlan.quantity);
+  return {
+    symbol: safe.symbol || orderPlan.symbol,
+    side: safe.side || orderPlan.side,
+    type: safe.type || orderPlan.type,
+    quantity: safe.executedQty || safe.origQty || quantityStr,
+    status: safe.status || 'UNKNOWN',
+    orderId: safe.orderId != null ? safe.orderId : null,
+    transactTime: safe.transactTime != null ? safe.transactTime : null,
+    testnet: true,
+    realOrderSubmitted: false,
+  };
+}
+
+async function submitTestnetOrder(paperPosition) {
+  const symbol = `${paperPosition.symbol}USDT`;
+  const exchangeInfo = await getExchangeInfo(symbol);
+  const orderPlan = buildTestnetMarketOrderParams(paperPosition, exchangeInfo);
+  if (!(orderPlan.quantity > 0)) {
+    return { ok: false, reason: 'Computed testnet order quantity is not positive.' };
+  }
+  if (orderPlan.notionalCheck && orderPlan.notionalCheck.ok === false) {
+    return { ok: false, reason: orderPlan.notionalCheck.reason };
+  }
+  const raw = await binanceSigned('POST', '/v3/order', {
+    symbol: orderPlan.symbol,
+    side: orderPlan.side,
+    type: orderPlan.type,
+    quantity: orderPlan.quantity,
+  });
+  return { ok: true, testnetOrder: sanitizeTestnetOrderResponse(raw, orderPlan) };
+}
+
+function getTestnetSafetyGate(paperPosition) {
+  const env = process.env;
+  const creds = getBinanceCredentials();
+  const positionUsd = paperPosition ? Number(paperPosition.positionUsd) : 0;
+  const maxPositionUsd = envNumber('BOT_MAX_POSITION_USD', 10);
+  const maxOpenPositions = envNumber('BOT_MAX_OPEN_POSITIONS', 1);
+  const openCount = botControlState.paperPosition && botControlState.paperPosition.status === 'open' ? 1 : 0;
+  const checks = [
+    { ok: env.BINANCE_ENV === 'testnet', reason: 'BINANCE_ENV must be testnet' },
+    { ok: env.BOT_ALLOW_TESTNET_ORDERS === 'true', reason: 'BOT_ALLOW_TESTNET_ORDERS must be true' },
+    { ok: env.BOT_TRADING_MODE !== 'live', reason: 'BOT_TRADING_MODE must not be live' },
+    { ok: env.BOT_LIVE_TRADING_ENABLED !== 'true', reason: 'BOT_LIVE_TRADING_ENABLED must not be true' },
+    { ok: env.BOT_ALLOW_REAL_ORDERS !== 'true', reason: 'BOT_ALLOW_REAL_ORDERS must not be true' },
+    { ok: creds.hasApiKey, reason: 'BINANCE_API_KEY must be configured' },
+    { ok: creds.hasApiSecret, reason: 'BINANCE_API_SECRET must be configured' },
+    { ok: !!paperPosition, reason: 'an open paper position must exist' },
+    { ok: !!paperPosition && paperPosition.status === 'open', reason: 'paper position must be open' },
+    { ok: !!paperPosition && paperPosition.realOrderSubmitted === false, reason: 'paper position must not have a real order' },
+    { ok: positionUsd > 0 && positionUsd <= maxPositionUsd, reason: 'positionUsd must be within BOT_MAX_POSITION_USD' },
+    { ok: openCount <= 1 && maxOpenPositions <= 1, reason: 'max open positions must be <= 1' },
+  ];
+  const failed = checks.find((check) => !check.ok);
+  return failed ? { ok: false, reason: failed.reason } : { ok: true };
 }
 
 function isLiveTradingAllowed() {
@@ -196,11 +400,15 @@ function publicState(extra = {}) {
     statePersistence: 'volatile_serverless_memory',
     productionReady: false,
     executionEnabled: false,
+    testnetExecutionEnabled: getTestnetExecutionEnabled(),
+    testnetOrderSubmitted: Boolean(botControlState.testnetOrder),
     realOrderSubmitted: false,
     liveGateWouldPass: isLiveTradingAllowed(),
     safetyConfig: getBotSafetyConfig(),
     binanceConfig: getBinanceConfigStatus(),
     executionPreview,
+    testnetOrder: botControlState.testnetOrder || null,
+    testnetOrders: botControlState.testnetOrders || [],
     message: botControlState.message || 'PaperBot control skeleton is in safety mode. No trading engine is running.',
     candidate: botControlState.candidate,
     paperPosition: botControlState.paperPosition,
@@ -484,6 +692,84 @@ function routeName(req) {
   return url.pathname.replace(/^\/api\/bot\/?/, '') || 'state';
 }
 
+function blockTestnetOrder(req, auth, reason, extra = {}) {
+  const blockEvent = event('TESTNET_ORDER_BLOCKED', 'warn', `Testnet order blocked: ${reason}.`);
+  botControlState = {
+    ...botControlState,
+    events: [blockEvent, ...botControlState.events].slice(0, 30),
+    updatedAt: blockEvent.ts,
+  };
+  return json(req, publicState({
+    testnetOrderSubmitted: false,
+    realOrderSubmitted: false,
+    executionEnabled: false,
+    blockedReason: reason,
+    events: [blockEvent],
+    authMode: auth.authMode,
+    ...extra,
+  }));
+}
+
+async function handleTestnetOrder(req, auth) {
+  const paperPosition = botControlState.paperPosition && botControlState.paperPosition.status === 'open'
+    ? botControlState.paperPosition
+    : null;
+
+  const gate = getTestnetSafetyGate(paperPosition);
+  if (!gate.ok) {
+    return blockTestnetOrder(req, auth, gate.reason, { testnetExecutionEnabled: getTestnetExecutionEnabled() });
+  }
+
+  let result;
+  try {
+    result = await submitTestnetOrder(paperPosition);
+  } catch (err) {
+    const failEvent = event('TESTNET_ORDER_FAILED', 'warn', `Testnet order failed: ${err.message}`);
+    botControlState = {
+      ...botControlState,
+      events: [failEvent, ...botControlState.events].slice(0, 30),
+      updatedAt: failEvent.ts,
+    };
+    return json(req, publicState({
+      testnetOrderSubmitted: false,
+      realOrderSubmitted: false,
+      executionEnabled: false,
+      testnetExecutionEnabled: true,
+      events: [failEvent],
+      authMode: auth.authMode,
+    }), 502);
+  }
+
+  if (!result.ok) {
+    return blockTestnetOrder(req, auth, result.reason, { testnetExecutionEnabled: true });
+  }
+
+  const testnetOrder = result.testnetOrder;
+  const submittedEvent = event(
+    'TESTNET_ORDER_SUBMITTED',
+    'info',
+    `Binance Spot Testnet order submitted for ${testnetOrder.symbol}. Production trading remains locked.`,
+    { testnetOrder },
+  );
+  // realOrderSubmitted is never mutated here — it stays false.
+  botControlState = {
+    ...botControlState,
+    testnetOrder,
+    testnetOrders: [testnetOrder, ...(botControlState.testnetOrders || [])].slice(0, 20),
+    events: [submittedEvent, ...botControlState.events].slice(0, 30),
+    updatedAt: submittedEvent.ts,
+  };
+  return json(req, publicState({
+    testnetOrderSubmitted: true,
+    realOrderSubmitted: false,
+    executionEnabled: false,
+    testnetExecutionEnabled: true,
+    testnetOrder,
+    events: [submittedEvent],
+    authMode: auth.authMode,
+  }));
+}
+
 export default async function handler(req) {
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsHeaders(req) });
@@ -505,7 +791,7 @@ export default async function handler(req) {
     return json(req, publicState({ authMode: auth.authMode }));
   }
 
-  if (route !== 'wake' && route !== 'stop') {
+  if (route !== 'wake' && route !== 'stop' && route !== 'testnet-order') {
     return json(req, { ok: false, error: 'Not Found' }, 404);
   }
   if (req.method !== 'POST') {
@@ -527,6 +813,10 @@ export default async function handler(req) {
       deniedFields,
       message: 'API keys and secrets must be configured only in Netlify Environment Variables. They are never entered in the browser.',
     }, 400);
+  }
+
+  if (route === 'testnet-order') {
+    return await handleTestnetOrder(req, auth);
   }
 
   if (route === 'wake') {

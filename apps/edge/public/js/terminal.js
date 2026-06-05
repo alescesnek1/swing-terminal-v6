@@ -3483,6 +3483,19 @@ function _pbEventDataSummary(data) {
       'real order NO',
     ].filter(Boolean).join(' / ');
   }
+  if (data.testnetOrder && data.testnetOrder.symbol) {
+    const o = data.testnetOrder;
+    return [
+      o.symbol,
+      o.side,
+      o.type,
+      'qty ' + o.quantity,
+      o.status,
+      o.orderId != null ? 'order ' + o.orderId : '',
+      'testnet YES',
+      'real order NO',
+    ].filter(Boolean).join(' / ');
+  }
   if (data.candidate && data.candidate.symbol) {
     const c = data.candidate;
     const parts = [
@@ -3658,13 +3671,31 @@ function _pbRenderExecutionPreview(state) {
     card.innerHTML = '';
     return;
   }
+  const binanceConfig = (state && state.binanceConfig) || {};
+  const paperPosition = state && state.paperPosition && state.paperPosition.status === 'open' ? state.paperPosition : null;
+  const testnetOrder = state && state.testnetOrder ? state.testnetOrder : null;
+  const realOrderSubmitted = !!(state && state.realOrderSubmitted);
+  const isTestnet = binanceConfig.binanceEnv === 'testnet' && binanceConfig.binanceConfigured === true;
+  // TESTNET ONLY: never offer a production / live order button.
+  const showTestnetButton = isTestnet
+    && !!paperPosition
+    && !!preview
+    && realOrderSubmitted === false;
+
+  const statusLabel = testnetOrder ? 'TESTNET ORDER SENT' : (isTestnet ? 'TESTNET READY' : 'LIVE EXECUTION LOCKED');
+  const message = testnetOrder
+    ? 'Binance Spot Testnet order submitted. Production trading remains locked.'
+    : (isTestnet
+      ? 'TESTNET ONLY - no production order submitted. This adapter can only place Binance Spot Testnet orders.'
+      : 'Testnet adapter is the next required gate. No production order can be submitted from this build.');
+
   card.hidden = false;
-  card.innerHTML =
+  let html =
     '<div class="pb-execution-preview-card__head">'
     + '<span class="pb-execution-preview-card__title">EXECUTION PREVIEW</span>'
-    + '<span class="pb-execution-preview-card__status">LIVE EXECUTION LOCKED</span>'
+    + '<span class="pb-execution-preview-card__status">' + _esc(statusLabel) + '</span>'
     + '</div>'
-    + '<div class="pb-execution-preview-card__message">Testnet adapter is the next required gate. No production order can be submitted from this build.</div>'
+    + '<div class="pb-execution-preview-card__message">' + _esc(message) + '</div>'
     + '<div class="pb-execution-preview-card__grid">'
     + '<div><span>Symbol</span><b>' + _esc(preview.symbol) + '</b></div>'
     + '<div><span>Side</span><b>' + _esc(preview.side) + '</b></div>'
@@ -3674,8 +3705,65 @@ function _pbRenderExecutionPreview(state) {
     + '<div><span>Take Profit</span><b>' + _esc(preview.takeProfit) + '</b></div>'
     + '<div><span>Mode</span><b>' + _esc(preview.mode) + '</b></div>'
     + '<div><span>Real Order</span><b>NO</b></div>'
-    + '</div>'
-    + '<div class="pb-execution-preview-card__reason">' + _esc(preview.reason || 'Execution preview only. No Binance order submitted.') + '</div>';
+    + '</div>';
+
+  if (testnetOrder) {
+    html +=
+      '<div class="pb-execution-preview-card__testnet-result">'
+      + '<div class="pb-execution-preview-card__testnet-title">BINANCE SPOT TESTNET ORDER</div>'
+      + '<div class="pb-execution-preview-card__grid">'
+      + '<div><span>Symbol</span><b>' + _esc(testnetOrder.symbol) + '</b></div>'
+      + '<div><span>Side</span><b>' + _esc(testnetOrder.side) + '</b></div>'
+      + '<div><span>Type</span><b>' + _esc(testnetOrder.type) + '</b></div>'
+      + '<div><span>Quantity</span><b>' + _esc(testnetOrder.quantity) + '</b></div>'
+      + '<div><span>Status</span><b>' + _esc(testnetOrder.status) + '</b></div>'
+      + '<div><span>Order ID</span><b>' + _esc(testnetOrder.orderId != null ? testnetOrder.orderId : '--') + '</b></div>'
+      + '<div><span>Testnet</span><b>YES</b></div>'
+      + '<div><span>Real Order</span><b>NO</b></div>'
+      + '</div>'
+      + '</div>';
+  }
+
+  if (showTestnetButton) {
+    html +=
+      '<div class="pb-execution-preview-card__actions">'
+      + '<button class="pb-execution-preview-card__testnet-btn" type="button" onclick="sendPaperBotTestnetOrder()">Send Testnet Order</button>'
+      + '<span class="pb-execution-preview-card__actions-note">TESTNET ONLY - no production order submitted</span>'
+      + '</div>';
+  }
+
+  html += '<div class="pb-execution-preview-card__reason">' + _esc(preview.reason || 'Execution preview only. No Binance order submitted.') + '</div>';
+  card.innerHTML = html;
+}
+
+async function _paperbotTestnetOrderRequest() {
+  // TESTNET ONLY. No secrets, apiKey or apiSecret are ever sent from the browser.
+  const authHeaders = await _getAuthHeaders();
+  const res = await fetch('/api/bot/testnet-order', {
+    method: 'POST',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', ...authHeaders },
+    body: '{}',
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok || payload.ok === false) {
+    throw new Error(payload.message || payload.error || ('Testnet order failed: HTTP ' + res.status));
+  }
+  renderPaperBot(_paperbotStateFromControlResponse(payload));
+  if (payload.testnetOrderSubmitted === true) {
+    try { window.Toast?.success('TESTNET ORDER SENT', 'Binance Spot Testnet order submitted. Production trading remains locked.'); } catch {}
+    try { LiveFeed.push('TESTNET_ORDER_SUBMITTED - Binance Spot Testnet order submitted. Real order: NO.', 'info', { source: 'PaperBot Testnet' }); } catch {}
+  } else {
+    const reason = payload.blockedReason || 'Testnet safety gate blocked the order.';
+    try { window.Toast?.error('Testnet order blocked', reason, { endpoint: '/api/bot/testnet-order' }); } catch {}
+  }
+  return payload;
+}
+
+function sendPaperBotTestnetOrder() {
+  _paperbotTestnetOrderRequest().catch((err) => {
+    console.warn('[PaperBot] Testnet order failed:', err.message);
+    window.Toast?.error('Testnet order failed', err.message, { endpoint: '/api/bot/testnet-order' });
+  });
 }
 
 function copyPaperBotManualPlan() {
@@ -4361,6 +4449,10 @@ function _paperbotStateFromControlResponse(payload) {
     executionPreview: payload && payload.executionPreview ? payload.executionPreview : null,
     safetyConfig: payload && payload.safetyConfig ? payload.safetyConfig : null,
     binanceConfig: payload && payload.binanceConfig ? payload.binanceConfig : null,
+    testnetOrder: payload && payload.testnetOrder ? payload.testnetOrder : null,
+    testnetOrders: Array.isArray(payload && payload.testnetOrders) ? payload.testnetOrders : [],
+    testnetExecutionEnabled: !!(payload && payload.testnetExecutionEnabled),
+    testnetOrderSubmitted: !!(payload && payload.testnetOrderSubmitted),
     executionEnabled: false,
     realOrderSubmitted: false,
     events,
