@@ -2649,6 +2649,9 @@ function sv(v, el) {
   // (clientWidth/Height are zero while display:none).
   if (activeViewName === 'heatmap') requestAnimationFrame(() => { try { renderHeatmap(); } catch(e){} });
   if (activeViewName === 'manual') requestAnimationFrame(() => { try { initManual(); } catch(e){} });
+  if (activeViewName === 'bot') requestAnimationFrame(() => {
+    try { refreshFleet(); _startFleetPoll(); } catch (e) { console.warn('[Fleet] init failed:', e && e.message); }
+  });
   if (activeViewName === 'calendar') requestAnimationFrame(() => {
     try { renderCalendar(); } catch(e){}
     // Kick off live unlocks fetch (cached client-side 25 min); re-render
@@ -3771,18 +3774,36 @@ function _pbRenderExecutionPreview(state) {
       + '</div>';
   }
 
+  const workerOnline = state && state.workerStatus && state.workerStatus.online === true;
+
   if (showTestnetButton && (!intent || intent.status === 'expired' || intent.status === 'failed')) {
-    html +=
-      '<div class="pb-execution-preview-card__actions">'
-      + '<button class="pb-execution-preview-card__testnet-btn" type="button" onclick="createPaperBotExecutionIntent()">Create Testnet Intent</button>'
-      + '<span class="pb-execution-preview-card__actions-note">Requires running local worker to execute</span>'
-      + '</div>';
+    if (workerOnline) {
+      html +=
+        '<div class="pb-execution-preview-card__actions">'
+        + '<button class="pb-execution-preview-card__testnet-btn" type="button" onclick="createPaperBotExecutionIntent()">Start Testnet Bot</button>'
+        + '<span class="pb-execution-preview-card__actions-note">Requires running local worker to execute</span>'
+        + '</div>';
+    } else {
+      html +=
+        '<div class="pb-execution-preview-card__actions">'
+        + '<button class="pb-execution-preview-card__testnet-btn" type="button" disabled style="background: #333; color: #888; border-color: #444;">Local worker is offline</button>'
+        + '<span class="pb-execution-preview-card__actions-note" style="color: #ffaa00;">Start macOS worker first.</span>'
+        + '</div>';
+    }
   } else if (showSmokeIntentButton) {
-    html +=
-      '<div class="pb-execution-preview-card__actions">'
-      + '<button class="pb-execution-preview-card__testnet-btn" type="button" onclick="createPaperBotSmokeIntent()">Create Worker Smoke Intent</button>'
-      + '<span class="pb-execution-preview-card__actions-note">Requires running local worker to execute</span>'
-      + '</div>';
+    if (workerOnline) {
+      html +=
+        '<div class="pb-execution-preview-card__actions">'
+        + '<button class="pb-execution-preview-card__testnet-btn" type="button" onclick="createPaperBotSmokeIntent()">Start Testnet Smoke Bot</button>'
+        + '<span class="pb-execution-preview-card__actions-note">Requires running local worker to execute</span>'
+        + '</div>';
+    } else {
+      html +=
+        '<div class="pb-execution-preview-card__actions">'
+        + '<button class="pb-execution-preview-card__testnet-btn" type="button" disabled style="background: #333; color: #888; border-color: #444;">Local worker is offline</button>'
+        + '<span class="pb-execution-preview-card__actions-note" style="color: #ffaa00;">Start macOS worker first.</span>'
+        + '</div>';
+    }
   }
 
   const errorMessage = state && state.blockedReason ? state.blockedReason : (state && state.binanceMessage ? state.binanceMessage : null);
@@ -3853,11 +3874,13 @@ function _pbRenderDiagnostics(state) {
 }
 
 async function _createPaperbotExecutionIntentRequest() {
+  const sessionId = (typeof Fleet !== 'undefined' && Fleet.selectedId) || null;
+  if (!sessionId) throw new Error('Select a running worker session first (START BOT).');
   const authHeaders = await _getAuthHeaders();
   const res = await fetch('/api/bot/create-execution-intent', {
     method: 'POST',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', ...authHeaders },
-    body: '{}',
+    body: JSON.stringify({ sessionId }),
   });
   const payload = await res.json().catch(() => ({}));
   
@@ -3882,11 +3905,13 @@ function createPaperBotExecutionIntent() {
 }
 
 async function _createPaperbotSmokeIntentRequest() {
+  const sessionId = (typeof Fleet !== 'undefined' && Fleet.selectedId) || null;
+  if (!sessionId) throw new Error('Select a running worker session first (START BOT).');
   const authHeaders = await _getAuthHeaders();
   const res = await fetch('/api/bot/create-smoke-execution-intent', {
     method: 'POST',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', ...authHeaders },
-    body: '{}',
+    body: JSON.stringify({ sessionId }),
   });
   const payload = await res.json().catch(() => ({}));
   
@@ -4329,6 +4354,36 @@ function renderPaperBot(state) {
     if (statusText.textContent !== txt) statusText.textContent = txt;
     statusEl.classList.remove('pb-status-searching','pb-status-intrade','pb-status-stopped');
     statusEl.classList.add(klass);
+    
+    let workerStatusEl = document.getElementById('pb-worker-status');
+    if (!workerStatusEl) {
+      workerStatusEl = document.createElement('div');
+      workerStatusEl.id = 'pb-worker-status';
+      workerStatusEl.style.marginTop = '8px';
+      workerStatusEl.style.fontSize = '11px';
+      workerStatusEl.style.fontWeight = 'bold';
+      workerStatusEl.style.padding = '4px 8px';
+      workerStatusEl.style.borderRadius = '4px';
+      statusEl.parentNode.insertBefore(workerStatusEl, statusEl.nextSibling);
+    }
+    
+    if (state.testnetExecutionEnabled) {
+      workerStatusEl.style.display = 'inline-block';
+      const isOnline = state.workerStatus && state.workerStatus.online;
+      if (isOnline) {
+        workerStatusEl.textContent = 'LOCAL WORKER ONLINE';
+        workerStatusEl.style.backgroundColor = 'rgba(0, 255, 128, 0.15)';
+        workerStatusEl.style.color = '#00ff80';
+        workerStatusEl.style.border = '1px solid rgba(0, 255, 128, 0.3)';
+      } else {
+        workerStatusEl.textContent = 'LOCAL WORKER OFFLINE';
+        workerStatusEl.style.backgroundColor = 'rgba(255, 100, 100, 0.15)';
+        workerStatusEl.style.color = '#ff6666';
+        workerStatusEl.style.border = '1px solid rgba(255, 100, 100, 0.3)';
+      }
+    } else {
+      workerStatusEl.style.display = 'none';
+    }
   }
 
   const tabPip = document.getElementById('pb-tab-pip');
@@ -4623,6 +4678,9 @@ function _paperbotStateFromControlResponse(payload) {
     testnetOrders: Array.isArray(payload && payload.testnetOrders) ? payload.testnetOrders : [],
     testnetExecutionEnabled: !!(payload && payload.testnetExecutionEnabled),
     testnetOrderSubmitted: !!(payload && payload.testnetOrderSubmitted),
+    botSession: payload && payload.botSession ? payload.botSession : null,
+    workerStatus: payload && payload.workerStatus ? payload.workerStatus : null,
+    positionResults: Array.isArray(payload && payload.positionResults) ? payload.positionResults : [],
     blockedReason: payload && payload.blockedReason ? payload.blockedReason : null,
     binanceMessage: payload && payload.binanceMessage ? payload.binanceMessage : null,
     executionEnabled: false,
@@ -4670,6 +4728,280 @@ function stopBotPlaceholder() {
     console.warn('[PaperBot] Stop Bot dry-run control failed:', err.message);
     window.Toast?.error('PaperBot stop failed', err.message, { endpoint: '/api/bot/stop' });
   });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Bot Fleet cockpit — multi-session, per-user. Talks to /api/bot/fleet,
+// /api/bot/start-session, /api/bot/session/:id/:action, /api/bot/config.
+// No Binance secrets ever touch the browser or the swingworker:// URL.
+// ══════════════════════════════════════════════════════════════════════════
+const Fleet = { data: null, selectedId: null, pollTimer: null, configLoaded: false };
+
+const REGIME_COLORS = {
+  RISK_ON: '#00ff80', NEUTRAL: '#8899aa', RISK_OFF: '#ffaa00', CRASH: '#ff4a4a',
+};
+
+async function _fleetFetch(method, path, body) {
+  const authHeaders = await _getAuthHeaders();
+  const init = { method, headers: { 'Accept': 'application/json', ...authHeaders } };
+  if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
+  const res = await fetch(path, init);
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok || payload.ok === false) {
+    throw new Error(payload.error || (Array.isArray(payload.errors) ? payload.errors.join('; ') : '') || ('HTTP ' + res.status));
+  }
+  return payload;
+}
+
+function _startFleetPoll() {
+  if (Fleet.pollTimer) return;
+  Fleet.pollTimer = setInterval(refreshFleet, 4000);
+}
+function _stopFleetPoll() {
+  if (Fleet.pollTimer) clearInterval(Fleet.pollTimer);
+  Fleet.pollTimer = null;
+}
+
+async function refreshFleet() {
+  try {
+    const payload = await _fleetFetch('GET', '/api/bot/fleet');
+    Fleet.data = payload;
+    if (!Fleet.selectedId || !payload.sessions.some((s) => s.sessionId === Fleet.selectedId)) {
+      Fleet.selectedId = payload.sessions[0] ? payload.sessions[0].sessionId : null;
+    }
+    renderFleet();
+  } catch (err) {
+    console.warn('[Fleet] refresh failed:', err.message);
+    _fleetEnsurePanel();
+    const status = document.getElementById('fleet-conn');
+    if (status) { status.textContent = 'Fleet unavailable: ' + err.message; status.style.color = '#ff8fa2'; }
+  }
+}
+
+function selectFleetSession(id) { Fleet.selectedId = id; renderFleet(); }
+
+function startBotSession() {
+  const btn = document.getElementById('fleet-start-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'LAUNCHING…'; }
+  _fleetFetch('POST', '/api/bot/start-session', {}).then((payload) => {
+    if (payload.session) Fleet.selectedId = payload.session.sessionId;
+    try { LiveFeed.push('Launching local worker via swingworker://', 'info', { source: 'Bot Fleet' }); } catch {}
+    if (payload.launchUrl) { try { window.location.href = payload.launchUrl; } catch (e) { console.warn('[Fleet] launch failed:', e.message); } }
+    _startFleetPoll();
+    refreshFleet();
+  }).catch((err) => {
+    window.Toast?.error('Start bot failed', err.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'START BOT'; }
+  });
+}
+
+function _fleetSessionAction(action, label) {
+  const id = Fleet.selectedId;
+  if (!id) { window.Toast?.error('No session selected', 'Select a worker first.'); return; }
+  _fleetFetch('POST', `/api/bot/session/${encodeURIComponent(id)}/${action}`, {}).then(() => {
+    try { window.Toast?.success(label + ' sent', 'Session ' + id.slice(0, 12)); } catch {}
+    refreshFleet();
+  }).catch((err) => window.Toast?.error(label + ' failed', err.message));
+}
+
+function stopBotSession() {
+  const id = Fleet.selectedId;
+  _fleetSessionAction('stop', 'Stop');
+  // Optional local fallback signal to the protocol helper.
+  if (id) { try { window.location.href = 'swingworker://stop?session=' + encodeURIComponent(id) + '&control=' + encodeURIComponent(location.origin); } catch {} }
+}
+function pauseBotEntries() { _fleetSessionAction('pause', 'Pause entries'); }
+function resumeBotEntries() { _fleetSessionAction('resume', 'Resume entries'); }
+function emergencyCloseTestnet() {
+  if (!window.confirm('Emergency close ALL open testnet positions for this session? The worker stays alive.')) return;
+  _fleetSessionAction('emergency-close', 'Emergency close');
+}
+
+async function _loadBotConfigIntoEditor() {
+  try {
+    const payload = await _fleetFetch('GET', '/api/bot/config');
+    Fleet.configLoaded = true;
+    _fleetFillConfig(payload.config);
+  } catch (err) { console.warn('[Fleet] config load failed:', err.message); }
+}
+
+function _fleetFillConfig(cfg) {
+  if (!cfg) return;
+  const map = { minTradeUsd: 'cfg-min', maxTradeUsd: 'cfg-max', maxDailyLossUsd: 'cfg-loss', maxDailyTrades: 'cfg-trades', maxOpenPositions: 'cfg-pos', stopLossPct: 'cfg-sl', takeProfitPct: 'cfg-tp' };
+  for (const key of Object.keys(map)) {
+    const el = document.getElementById(map[key]);
+    if (el && document.activeElement !== el) el.value = cfg[key];
+  }
+  const crash = document.getElementById('cfg-crash');
+  if (crash && document.activeElement !== crash) crash.checked = cfg.pauseOnMarketCrash !== false;
+}
+
+function saveBotConfig() {
+  const body = {
+    minTradeUsd: Number(document.getElementById('cfg-min')?.value),
+    maxTradeUsd: Number(document.getElementById('cfg-max')?.value),
+    maxDailyLossUsd: Number(document.getElementById('cfg-loss')?.value),
+    maxDailyTrades: Number(document.getElementById('cfg-trades')?.value),
+    maxOpenPositions: Number(document.getElementById('cfg-pos')?.value),
+    stopLossPct: Number(document.getElementById('cfg-sl')?.value),
+    takeProfitPct: Number(document.getElementById('cfg-tp')?.value),
+    pauseOnMarketCrash: !!document.getElementById('cfg-crash')?.checked,
+  };
+  _fleetFetch('POST', '/api/bot/config', body).then((payload) => {
+    window.Toast?.success('Config saved', 'Applies to your next session.');
+    _fleetFillConfig(payload.config);
+  }).catch((err) => window.Toast?.error('Config invalid', err.message));
+}
+
+function _fleetEnsurePanel() {
+  const view = document.getElementById('view-bot') || document.getElementById('v-bot');
+  if (!view) return null;
+  let panel = document.getElementById('bot-fleet-panel');
+  if (panel) return panel;
+  panel = document.createElement('div');
+  panel.id = 'bot-fleet-panel';
+  panel.className = 'bot-fleet';
+  view.insertBefore(panel, view.firstChild);
+  return panel;
+}
+
+function _fleetAge(iso) {
+  if (!iso) return '—';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm';
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+}
+
+function renderFleet() {
+  const panel = _fleetEnsurePanel();
+  if (!panel || !Fleet.data) return;
+  const data = Fleet.data;
+  const sessions = data.sessions || [];
+  const sel = sessions.find((s) => s.sessionId === Fleet.selectedId) || null;
+  const regime = data.lastRegime || (sel && sel.riskState) || null;
+  const _e = (typeof _esc === 'function') ? _esc : ((x) => String(x == null ? '' : x));
+
+  // Risk regime card
+  const rg = regime ? regime.regime : 'UNKNOWN';
+  const rgColor = REGIME_COLORS[rg] || '#8899aa';
+  const entriesAllowed = regime ? regime.entriesAllowed !== false : true;
+  let html = '<div class="fleet-top">'
+    + '<div class="fleet-regime" style="border-color:' + rgColor + '33">'
+    + '<div class="fleet-regime__label">MARKET REGIME</div>'
+    + '<div class="fleet-regime__badge" style="color:' + rgColor + '">' + _e(rg) + '</div>'
+    + '<div class="fleet-regime__entries">Entries Allowed: <b style="color:' + (entriesAllowed ? '#00ff80' : '#ff4a4a') + '">' + (entriesAllowed ? 'YES' : 'NO') + '</b></div>'
+    + '<ul class="fleet-regime__reasons">' + ((regime && regime.reason || []).map((r) => '<li>' + _e(r) + '</li>').join('') || '<li>—</li>') + '</ul>'
+    + '<div class="fleet-regime__updated">updated ' + (regime && regime.updatedAt ? new Date(regime.updatedAt).toLocaleTimeString() : '—') + '</div>'
+    + '</div>'
+    + '<div class="fleet-actions-top">'
+    + '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT</button>'
+    + '<div id="fleet-conn" class="fleet-conn">' + (data.backend === 'blobs' ? 'durable store · ' : 'in-memory store · ') + (data.isAdmin ? 'admin' : 'user') + ' · ' + _e(data.identity && data.identity.email || '') + '</div>'
+    + '<div class="fleet-hint">Starts a local worker via swingworker://. First-time setup required.</div>'
+    + '</div>'
+    + '</div>';
+
+  // Body: worker list + detail
+  html += '<div class="fleet-body">';
+  html += '<div class="fleet-workers"><div class="fleet-col-title">WORKERS (' + sessions.length + ')</div>';
+  if (!sessions.length) html += '<div class="fleet-empty">No active sessions. Click START BOT.</div>';
+  for (const s of sessions) {
+    const online = s.worker && s.worker.online;
+    const dot = online ? '#00ff80' : '#ff6666';
+    const sel2 = s.sessionId === Fleet.selectedId ? ' fleet-worker--sel' : '';
+    html += '<div class="fleet-worker' + sel2 + '" onclick="selectFleetSession(\'' + _e(s.sessionId) + '\')">'
+      + '<span class="fleet-dot" style="background:' + dot + '"></span>'
+      + '<span class="fleet-worker__email">' + _e(s.ownerEmail || s.ownerUserId || 'unknown') + '</span>'
+      + '<span class="fleet-worker__meta">' + _e((s.worker && s.worker.platform) || '—') + ' · ' + _e(s.status) + '</span>'
+      + '</div>';
+  }
+  html += '</div>';
+
+  // Detail
+  html += '<div class="fleet-detail">';
+  if (!sel) {
+    html += '<div class="fleet-empty">Select a worker to see details.</div>';
+  } else {
+    const online = sel.worker && sel.worker.online;
+    const closeFailed = (sel.positionResults || []).some((p) => p.status === 'WORKER_CLOSE_FAILED');
+    let stateText = sel.status, stateColor = '#8899aa';
+    if (closeFailed && (sel.stopRequested || sel.status === 'stopping')) { stateText = 'CLOSE FAILED — MANUAL ATTENTION'; stateColor = '#ff4a4a'; }
+    else if (sel.stopRequested || sel.status === 'stopping') { stateText = 'STOPPING — CLOSING POSITIONS'; stateColor = '#ffaa00'; }
+    else if (sel.status === 'stopped' || sel.status === 'expired') { stateText = 'BOT STOPPED'; stateColor = '#8899aa'; }
+    else if (sel.pauseRequested || sel.status === 'paused') { stateText = 'ENTRIES PAUSED'; stateColor = '#ffaa00'; }
+    else if (online) { stateText = 'LOCAL WORKER ONLINE — BOT RUNNING'; stateColor = '#00ff80'; }
+    else if (sel.status === 'launch_requested') { stateText = 'LAUNCHING — waiting for heartbeat'; stateColor = '#ffaa00'; }
+
+    html += '<div class="fleet-state" style="color:' + stateColor + '">' + _e(stateText) + '</div>';
+    html += '<div class="fleet-meta-grid">'
+      + '<div><span>Owner</span><b>' + _e(sel.ownerEmail || '—') + '</b></div>'
+      + '<div><span>Platform</span><b>' + _e((sel.worker && sel.worker.platform) || '—') + '</b></div>'
+      + '<div><span>Session age</span><b>' + _fleetAge(sel.createdAt) + '</b></div>'
+      + '<div><span>Last heartbeat</span><b>' + (sel.worker && sel.worker.lastSeenAt ? _fleetAge(sel.worker.lastSeenAt) + ' ago' : '—') + '</b></div>'
+      + '<div><span>Worker state</span><b>' + _e((sel.worker && sel.worker.currentState) || '—') + '</b></div>'
+      + '<div><span>Realized PnL</span><b>' + (sel.realizedPnl >= 0 ? '+' : '') + (Number(sel.realizedPnl) || 0).toFixed(2) + '</b></div>'
+      + '<div><span>Open positions</span><b>' + (sel.openPositions ? sel.openPositions.length : 0) + '</b></div>'
+      + '<div><span>Mode</span><b>TESTNET</b></div>'
+      + '</div>';
+
+    const canStop = !(sel.status === 'stopped' || sel.status === 'expired');
+    html += '<div class="fleet-detail-actions">'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="stopBotSession()"' + (canStop ? '' : ' disabled') + '>STOP BOT</button>'
+      + '<button type="button" class="paperbot-control-btn" onclick="pauseBotEntries()"' + (sel.pauseRequested || !canStop ? ' disabled' : '') + '>PAUSE ENTRIES</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="resumeBotEntries()"' + (sel.pauseRequested && canStop ? '' : ' disabled') + '>RESUME ENTRIES</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseTestnet()"' + (canStop ? '' : ' disabled') + '>EMERGENCY CLOSE TESTNET</button>'
+      + '</div>';
+
+    // Positions table
+    html += '<div class="fleet-section-title">POSITIONS</div>';
+    const positions = sel.positionResults || [];
+    if (!positions.length) html += '<div class="fleet-empty">No positions reported.</div>';
+    else {
+      html += '<table class="fleet-table"><thead><tr><th>Symbol</th><th>Qty</th><th>Status</th><th>Order</th><th>Close</th></tr></thead><tbody>';
+      for (const p of positions.slice(0, 10)) {
+        const sc = p.status === 'WORKER_CLOSE_FAILED' ? '#ff4a4a' : p.status === 'closed' ? '#8899aa' : '#00ff80';
+        html += '<tr><td>' + _e(p.symbol) + '</td><td>' + _e(p.executedQty || '—') + '</td><td style="color:' + sc + '">' + _e(p.status) + '</td><td>' + _e(p.orderId || '—') + '</td><td>' + _e(p.closeOrderId || '—') + '</td></tr>';
+      }
+      html += '</tbody></table>';
+    }
+  }
+  html += '</div></div>'; // detail + body
+
+  // Config editor (per user) + event feed
+  html += '<div class="fleet-bottom">';
+  html += '<div class="fleet-config"><div class="fleet-section-title">BOT CONFIG (TESTNET, max trade ≤ $10)</div>'
+    + '<div class="fleet-config-grid">'
+    + _cfgField('Min trade $', 'cfg-min', 'number') + _cfgField('Max trade $', 'cfg-max', 'number')
+    + _cfgField('Max daily loss $', 'cfg-loss', 'number') + _cfgField('Max daily trades', 'cfg-trades', 'number')
+    + _cfgField('Max open positions', 'cfg-pos', 'number') + _cfgField('Stop loss %', 'cfg-sl', 'number')
+    + _cfgField('Take profit %', 'cfg-tp', 'number')
+    + '<label class="fleet-cfg-check"><input type="checkbox" id="cfg-crash" checked> Pause on market CRASH</label>'
+    + '</div>'
+    + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="saveBotConfig()">SAVE CONFIG</button>'
+    + '<span class="fleet-cfg-note">Live trading is locked. allowLive=false.</span>'
+    + '</div>';
+
+  html += '<div class="fleet-events"><div class="fleet-section-title">EVENT FEED</div>';
+  const events = data.events || [];
+  if (!events.length) html += '<div class="fleet-empty">No events.</div>';
+  else for (const ev of events.slice(0, 30)) {
+    const sc = ev.severity === 'warn' ? '#ffaa00' : ev.severity === 'error' ? '#ff4a4a' : '#8899aa';
+    html += '<div class="fleet-event"><span style="color:' + sc + '">' + _e(ev.type) + '</span> ' + _e(ev.message) + '</div>';
+  }
+  html += '</div>';
+  html += '</div>';
+
+  panel.innerHTML = html;
+
+  // Load config once (after inputs exist) so the editor is pre-filled.
+  if (!Fleet.configLoaded) _loadBotConfigIntoEditor();
+}
+
+function _cfgField(label, id, type) {
+  return '<label class="fleet-cfg-field"><span>' + label + '</span><input id="' + id + '" type="' + type + '" step="any"></label>';
 }
 
 function _rebuildSymbolIndex() {
