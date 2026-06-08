@@ -5343,14 +5343,15 @@ function renderFleet() {
     + '</div>'
     + '</div>';
 
+  const workerConnectOpenPosition = sel && !_fleetWorkerOnline(sel) && _fleetOpenPositionCount(sel) > 0;
   if (Fleet.workerConnectFailed) {
     html += '<div class="fleet-error-panel fleet-error-panel--connect">'
-      + '<div class="fleet-error-panel__title">Worker did not connect</div>'
-      + '<div class="fleet-error-panel__body">The local worker has not sent a heartbeat. Install or retry the local worker.</div>'
+      + '<div class="fleet-error-panel__title">' + (workerConnectOpenPosition ? 'WORKER OFFLINE &mdash; POSITION OPEN' : 'Worker did not connect') + '</div>'
+      + '<div class="fleet-error-panel__body">' + (workerConnectOpenPosition ? 'The backend has an open testnet position but no live worker heartbeat for this session.' : 'The local worker has not sent a heartbeat. Install or retry the local worker.') + '</div>'
       + '<div class="fleet-action-row">'
       + (Fleet.retryLaunchUrl ? '<button type="button" class="paperbot-control-btn" onclick="retryOpenWorkerTerminal()">Retry Open Worker Terminal</button>' : '')
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="openInstallWorker()">Install Worker</button>'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearSelectedStaleSession()">Clear stale session</button>'
+      + (workerConnectOpenPosition ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseTestnet()">Emergency Close Testnet</button>' : '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="openInstallWorker()">Install Worker</button>')
+      + (!workerConnectOpenPosition ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearSelectedStaleSession()">Clear stale session</button>' : '')
       + '</div>'
       + '</div>';
   }
@@ -5372,14 +5373,17 @@ function renderFleet() {
   if (!sessions.length) html += '<div class="fleet-empty">No active sessions. Click START BOT.</div>';
   for (const s of sessions) {
     const online = s.worker && s.worker.online;
+    const openCountRow = Array.isArray(s.openPositions) ? s.openPositions.length : 0;
+    const orphanRow = !online && openCountRow > 0;
     const staleLabel = _fleetStaleLabel(s);
-    const dot = online ? '#00ff80' : staleLabel ? '#ffaa00' : '#ff6666';
+    const dot = online ? '#00ff80' : orphanRow ? '#ff4a4a' : staleLabel ? '#ffaa00' : '#ff6666';
     const sel2 = s.sessionId === Fleet.selectedId ? ' fleet-worker--sel' : '';
     const staleClass = staleLabel ? ' fleet-worker--stale' : '';
-    html += '<div class="fleet-worker' + sel2 + staleClass + '" onclick="selectFleetSession(\'' + _e(s.sessionId) + '\')">'
+    const badge = orphanRow ? 'POSITION OPEN' : staleLabel;
+    html += '<div class="fleet-worker' + sel2 + staleClass + (orphanRow ? ' fleet-worker--orphan' : '') + '" onclick="selectFleetSession(\'' + _e(s.sessionId) + '\')">'
       + '<span class="fleet-dot" style="background:' + dot + '"></span>'
       + '<span class="fleet-worker__email">' + _e(s.ownerEmail || s.ownerUserId || 'unknown') + '</span>'
-      + (staleLabel ? '<span class="fleet-worker__badge">' + _e(staleLabel) + '</span>' : '')
+      + (badge ? '<span class="fleet-worker__badge">' + _e(badge) + '</span>' : '')
       + '<span class="fleet-worker__meta">' + _e((s.worker && s.worker.platform) || '—') + ' · ' + _e(s.status) + '</span>'
       + '</div>';
   }
@@ -5398,19 +5402,33 @@ function renderFleet() {
     html += '<div class="fleet-empty">Select a worker to see details.</div>';
   } else {
     const online = sel.worker && sel.worker.online;
+    const openCountDetail = sel.openPositions ? sel.openPositions.length : 0;
+    const orphanOpen = !online && openCountDetail > 0; // worker gone, position still open
     const selStale = _fleetIsStaleNoWorker(sel);
     const selStaleLabel = _fleetStaleLabel(sel);
     const closeFailed = (sel.positionResults || []).some((p) => p.status === 'WORKER_CLOSE_FAILED');
     let stateText = sel.status, stateColor = '#8899aa';
     if (closeFailed && (sel.stopRequested || sel.status === 'stopping')) { stateText = 'CLOSE FAILED — MANUAL ATTENTION'; stateColor = '#ff4a4a'; }
     else if (sel.stopRequested || sel.status === 'stopping') { stateText = 'STOPPING — CLOSING POSITIONS'; stateColor = '#ffaa00'; }
+    else if (orphanOpen) { stateText = 'WORKER OFFLINE — POSITION OPEN'; stateColor = '#ff4a4a'; }
     else if (sel.status === 'stopped' || sel.status === 'expired') { stateText = 'BOT STOPPED'; stateColor = '#8899aa'; }
     else if (sel.pauseRequested || sel.status === 'paused') { stateText = 'ENTRIES PAUSED'; stateColor = '#ffaa00'; }
     else if (online) { stateText = 'LOCAL WORKER ONLINE — BOT RUNNING'; stateColor = '#00ff80'; }
     else if (sel.status === 'launch_requested') { stateText = 'LAUNCHING — waiting for heartbeat'; stateColor = '#ffaa00'; }
 
-    if (selStaleLabel) { stateText = selStaleLabel; stateColor = '#ffaa00'; }
+    // A stale label must never override an open-position orphan warning.
+    if (selStaleLabel && !orphanOpen) { stateText = selStaleLabel; stateColor = '#ffaa00'; }
     html += '<div class="fleet-state" style="color:' + stateColor + '">' + _e(stateText) + '</div>';
+    if (orphanOpen) {
+      html += '<div class="fleet-orphan-warning">'
+        + '<b>WORKER OFFLINE &mdash; POSITION OPEN</b> The position is still held on Binance Spot Testnet. '
+        + 'Bring the worker back online so it can close the position, or use Emergency Close Testnet.'
+        + '<div class="fleet-action-row">'
+        + (Fleet.retryLaunchUrl ? '<button type="button" class="paperbot-control-btn" onclick="retryOpenWorkerTerminal()">Retry Open Worker Terminal</button>' : '')
+        + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseTestnet()">Emergency Close Testnet</button>'
+        + '</div>'
+        + '</div>';
+    }
     html += '<div class="fleet-meta-grid">'
       + '<div><span>Owner</span><b>' + _e(sel.ownerEmail || '—') + '</b></div>'
       + '<div><span>Platform</span><b>' + _e((sel.worker && sel.worker.platform) || '—') + '</b></div>'
@@ -5425,7 +5443,7 @@ function renderFleet() {
     const canStop = !(sel.status === 'stopped' || sel.status === 'expired');
     html += '<div class="fleet-detail-actions">'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="stopBotSession()"' + (canStop ? '' : ' disabled') + '>STOP BOT</button>'
-      + (selStale ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearSelectedStaleSession()">CLEAR STALE SESSION</button>' : '')
+      + (selStale && openCountDetail === 0 ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearSelectedStaleSession()">CLEAR STALE SESSION</button>' : '')
       + '<button type="button" class="paperbot-control-btn" onclick="pauseBotEntries()"' + (sel.pauseRequested || !canStop ? ' disabled' : '') + '>PAUSE ENTRIES</button>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="resumeBotEntries()"' + (sel.pauseRequested && canStop ? '' : ' disabled') + '>RESUME ENTRIES</button>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseTestnet()"' + (canStop ? '' : ' disabled') + '>EMERGENCY CLOSE TESTNET</button>'

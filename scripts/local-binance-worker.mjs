@@ -7,6 +7,30 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ── Self-observability: the worker writes its own log file (not only via the
+// launcher's Tee-Object). This guarantees logs exist even on a direct
+// `node scripts/local-binance-worker.mjs` run with no protocol launcher. ──
+const REPO_ROOT = path.join(__dirname, '..');
+const LOG_DIR = path.join(REPO_ROOT, 'logs');
+const LOG_FILE = path.join(LOG_DIR, 'local-binance-worker.log');
+const ERR_LOG_FILE = path.join(LOG_DIR, 'local-binance-worker.err.log');
+try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch { /* best effort */ }
+try { fs.closeSync(fs.openSync(LOG_FILE, 'a')); fs.closeSync(fs.openSync(ERR_LOG_FILE, 'a')); } catch { /* best effort */ }
+function _logTs() { return new Date().toISOString(); }
+function _appendLog(file, line) { try { fs.appendFileSync(file, line + '\n'); } catch { /* never crash on logging */ } }
+function _fmtArgs(args) {
+  return args.map((a) => {
+    if (typeof a === 'string') return a;
+    try { return JSON.stringify(a); } catch { return String(a); }
+  }).join(' ');
+}
+const _origConsole = { log: console.log.bind(console), warn: console.warn.bind(console), error: console.error.bind(console) };
+console.log = (...a) => { const m = _fmtArgs(a); _origConsole.log(m); _appendLog(LOG_FILE, `[${_logTs()}] ${m}`); };
+console.warn = (...a) => { const m = _fmtArgs(a); _origConsole.warn(m); _appendLog(LOG_FILE, `[${_logTs()}] ${m}`); };
+console.error = (...a) => { const m = _fmtArgs(a); _origConsole.error(m); _appendLog(LOG_FILE, `[${_logTs()}] ${m}`); _appendLog(ERR_LOG_FILE, `[${_logTs()}] ${m}`); };
+// Create the log file immediately so observability exists from the first instant.
+console.log(`[BOOT] Local Binance Worker booting (pid ${process.pid}). Log: ${LOG_FILE}`);
+
 // --- CLI args ---
 function getArg(name) {
   const idx = process.argv.indexOf(`--${name}`);
@@ -60,6 +84,7 @@ const launchedByProtocol = process.env.WORKER_LAUNCHED_BY_PROTOCOL === 'true';
 const HEARTBEAT_INTERVAL_MS = 5000;
 const MAX_CLOSE_RETRIES = 5;
 const TESTNET_MAX_TRADE_USD = 10;
+const MISSING_SESSION_EXIT_MS = 60000;
 
 const isPreflight = process.argv.includes('--preflight') || process.env.WORKER_PREFLIGHT === 'true';
 
@@ -70,9 +95,11 @@ const platform = `${os.platform()}-${os.arch()}`;
 const startedAt = new Date().toISOString();
 const WORKER_VERSION = '3.0.0';
 
-// State file is namespaced per session so multiple workers on one machine don't collide.
-const stateSuffix = sessionId ? `-${sessionId.replace(/[^a-zA-Z0-9_-]/g, '').slice(-16)}` : '';
-const STATE_FILE = path.join(__dirname, '..', `.paperbot-worker-state${stateSuffix}.json`);
+// State file is namespaced per session so multiple workers on one machine don't
+// collide. The FULL sanitized sessionId is used so the file is easy to find:
+//   .paperbot-worker-state-session_<...>.json
+const stateSuffix = sessionId ? `-${sessionId.replace(/[^a-zA-Z0-9_-]/g, '')}` : '';
+const STATE_FILE = path.join(REPO_ROOT, `.paperbot-worker-state${stateSuffix}.json`);
 
 // Hard gate: testnet only. Live/production trading is never reachable here.
 if (workerMode !== 'testnet') { console.error('[ERROR] WORKER_MODE must be testnet'); process.exit(1); }
@@ -86,7 +113,15 @@ if (!isPreflight && !sessionId) {
   process.exit(1);
 }
 
-const BINANCE_TESTNET_BASE = 'https://testnet.binance.vision/api';
+// TESTNET ONLY. The base is fixed to Binance Spot Testnet. A localhost-only
+// override (http://127.0.0.1 / http://localhost) is permitted purely for offline
+// lifecycle tests; any non-localhost override is ignored so production Binance
+// remains unreachable from this worker.
+const BINANCE_TESTNET_BASE = (() => {
+  const o = process.env.BINANCE_TESTNET_BASE_OVERRIDE || '';
+  if (/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(o)) return o.replace(/\/$/, '');
+  return 'https://testnet.binance.vision/api';
+})();
 
 // --- State ---
 let workerState = { usedKeys: [], positions: [] };
@@ -101,8 +136,16 @@ try {
   console.error('[WARN] Failed to load local state, starting fresh.', err.message);
 }
 function saveState() {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(workerState, null, 2)); }
-  catch (err) { console.error('[ERROR] Failed to save worker state.', err.message); }
+  try {
+    fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+    fs.writeFileSync(STATE_FILE, JSON.stringify(workerState, null, 2));
+  } catch (err) { console.error('[ERROR] Failed to save worker state.', err.message); }
+}
+// Materialize the per-session state file up front so it always exists on disk
+// (observability), independent of whether any order is ever placed.
+if (!isPreflight && sessionId) {
+  saveState();
+  console.log(`[STATE] path=${STATE_FILE} openPositions=${getOpenPositions().length}`);
 }
 function markKeyUsed(key) {
   if (!workerState.usedKeys.includes(key)) {
@@ -113,10 +156,22 @@ function markKeyUsed(key) {
 }
 function isKeyUsed(key) { return workerState.usedKeys.includes(key); }
 function getOpenPositions() { return workerState.positions.filter((p) => p && p.status === 'open'); }
+function openPositionSummary() {
+  return getOpenPositions().map((p) => ({
+    symbol: p.symbol,
+    baseAsset: p.baseAsset || null,
+    executedQty: p.executedQty,
+    orderId: p.orderId,
+    sessionId: p.sessionId || sessionId,
+    status: 'open',
+    openedAt: p.openedAt || null,
+  }));
+}
 function recordOpenPosition(pos) {
   workerState.positions.push(pos);
   workerState.positions = workerState.positions.slice(-50);
   saveState();
+  console.log(`[STATE] saved open position ${pos.symbol} qty=${pos.executedQty}`);
 }
 function markPositionClosed(orderId, closeOrderId) {
   const pos = workerState.positions.find((p) => p && p.orderId === orderId && p.status === 'open');
@@ -137,6 +192,18 @@ let stopping = false;
 const ackedCommands = new Set();
 let heartbeatDiagnosticLogged = false;
 let sessionPollDiagnosticLogged = false;
+let missingSessionSince = 0;
+let recovery404Logged = false;
+let heartbeatTimer = null;
+let pollTimer = null;
+
+function finishWorker(code) {
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  if (pollTimer) clearInterval(pollTimer);
+  heartbeatTimer = null;
+  pollTimer = null;
+  process.exitCode = code;
+}
 
 // --- Control plane I/O ---
 async function sendHeartbeat() {
@@ -150,6 +217,7 @@ async function sendHeartbeat() {
         startedAt, lastSeenAt: new Date().toISOString(),
         pid: process.pid, mode: 'testnet', version: WORKER_VERSION,
         currentState, launchedByProtocol, realProductionOrder: false,
+        openPositions: openPositionSummary(),
       }),
     });
     const payload = await res.json().catch(() => null);
@@ -157,6 +225,7 @@ async function sendHeartbeat() {
       console.log(`[DIAG] heartbeat endpoint attempt: HTTP ${res.status} ok=${res.ok} sessionKnown=${payload && payload.sessionKnown !== undefined ? payload.sessionKnown : 'unknown'}`);
       heartbeatDiagnosticLogged = true;
     }
+    console.log(`[HEARTBEAT] sent state=${currentState} ok=${res.ok} openPositions=${getOpenPositions().length}`);
     if (!res.ok) { console.warn(`[WARN] Heartbeat HTTP ${res.status}`); return null; }
     return payload;
   } catch (err) { console.warn(`[WARN] Heartbeat error: ${err.message}`); return null; }
@@ -171,7 +240,26 @@ async function fetchSession() {
       console.log(`[DIAG] worker-session poll result: HTTP ${res.status} ok=${res.ok} hasSession=${!!(payload && payload.session)} stopRequested=${payload && payload.stopRequested === true}`);
       sessionPollDiagnosticLogged = true;
     }
-    if (!res.ok) { console.warn(`[WARN] worker-session HTTP ${res.status}`); return null; }
+    console.log(`[POLL] worker-session HTTP ${res.status} hasIntent=${!!(payload && payload.intent)} stopRequested=${!!(payload && payload.stopRequested)} pauseRequested=${!!(payload && payload.pauseRequested)}`);
+    if (res.status === 404) {
+      if (!recovery404Logged) {
+        console.warn('[RECOVERY] worker-session 404; session missing from control plane.');
+        recovery404Logged = true;
+      } else {
+        console.warn('[WARN] worker-session HTTP 404');
+      }
+      return { ok: false, session: null, sessionMissing: true, recoveryMode: true, stopRequested: false, statusCode: 404, raw: payload };
+    }
+    if (!res.ok) { console.warn(`[WARN] worker-session HTTP ${res.status}`); return { ok: false, session: null, statusCode: res.status, raw: payload }; }
+    if (payload && payload.sessionMissing) {
+      if (!recovery404Logged) {
+        console.warn('[RECOVERY] worker-session 404; session missing from control plane.');
+        recovery404Logged = true;
+      }
+      return { ...payload, session: null };
+    }
+    recovery404Logged = false;
+    missingSessionSince = 0;
     return payload;
   } catch (err) { console.warn(`[WARN] Session poll error: ${err.message}`); return null; }
 }
@@ -205,6 +293,15 @@ async function reportPosition(body) {
       body: JSON.stringify({ sessionId, workerId, testnet: true, realProductionOrder: false, ...body }),
     });
   } catch (err) { console.error(`[ERROR] reportPosition: ${err.message}`); }
+}
+
+async function reportOpenPositions(reason) {
+  const open = getOpenPositions();
+  if (!open.length) return;
+  console.log(`[RECOVER] Reporting ${open.length} open position(s) to backend (${reason}).`);
+  for (const pos of open) {
+    await reportPosition({ symbol: pos.symbol, baseAsset: pos.baseAsset, executedQty: pos.executedQty, orderId: pos.orderId, status: 'open' });
+  }
 }
 
 // --- Binance (testnet only) ---
@@ -277,21 +374,27 @@ async function executeIntent(intent, config, riskState) {
       if (qty * price < minNotional) throw new Error(`Order size ${qty * price} < minNotional ${minNotional}`);
     }
 
-    console.log(`[INFO] TESTNET BUY MARKET ${qty} ${intent.symbol} (session ${sessionId.slice(0, 12)})`);
+    console.log(`[ORDER] Submitting TESTNET BUY MARKET ${qty} ${intent.symbol} (session ${sessionId.slice(0, 12)})`);
     const order = await submitMarketOrder(intent.symbol, 'BUY', qty, precision);
-    console.log(`[INFO] Order OK. OrderID: ${order.orderId}`);
+    console.log(`[ORDER] Order successful. OrderID: ${order.orderId} status=${order.status} executedQty=${order.executedQty}`);
 
+    // PERSIST FIRST: write the open position to local state BEFORE reporting to
+    // the backend, so a crash between order and report can be recovered locally.
     recordOpenPosition({
       symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, executedQty: order.executedQty,
       orderId: order.orderId, sessionId, status: 'open', openedAt: new Date().toISOString(), stepSize: lot.stepSize,
     });
+    console.log(`[POSITION] Open position persisted locally before backend report: ${intent.symbol} order ${order.orderId} -> ${STATE_FILE}`);
+
     await reportResult({
       id: intent.id, idempotencyKey: intent.idempotencyKey, status: 'submitted', exchange: 'binance_spot_testnet',
       symbol: intent.symbol, orderId: order.orderId, orderStatus: order.status, executedQty: order.executedQty,
       cummulativeQuoteQty: order.cummulativeQuoteQty, testnet: true, realProductionOrder: false,
     });
     await reportPosition({ symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, executedQty: order.executedQty, orderId: order.orderId, status: 'open' });
+    console.log(`[POSITION] Reported OPEN ${intent.symbol} to backend.`);
     markKeyUsed(intent.idempotencyKey);
+    console.log(`[IDLE] Position open for ${intent.symbol}. Holding and refusing new BUY intents until it is closed (STOP/EMERGENCY closes it).`);
   } catch (err) {
     console.error(`[ERROR] Execution failed for ${intent.id}: ${err.message}`);
     await reportResult({ id: intent.id, idempotencyKey: intent.idempotencyKey, status: 'failed', error: err.message, testnet: true, realProductionOrder: false });
@@ -307,7 +410,6 @@ async function closeAllPositions(context) {
   let allClosed = true;
   for (const pos of open) {
     try {
-      console.log(`[${context}] Closing ${pos.symbol} qty ${pos.executedQty}...`);
       let stepSize = pos.stepSize;
       if (!stepSize) {
         const info = await getSymbolInfo(pos.symbol);
@@ -320,13 +422,15 @@ async function closeAllPositions(context) {
       if (stepNum > 0) sellQty = Math.floor(sellQty / stepNum) * stepNum;
       if (!(sellQty > 0)) throw new Error(`Computed sell qty not positive for ${pos.symbol}`);
 
+      console.log(`[${context}][CLOSE] Submitting TESTNET SELL MARKET ${sellQty} ${pos.symbol} (close of order ${pos.orderId})...`);
       const close = await submitMarketOrder(pos.symbol, 'SELL', sellQty, precision);
-      console.log(`[${context}] Closed ${pos.symbol}. CloseOrderID: ${close.orderId}`);
+      console.log(`[${context}][CLOSE] Close result OK. ${pos.symbol} CloseOrderID: ${close.orderId} executedQty=${close.executedQty}`);
       markPositionClosed(pos.orderId, close.orderId);
       await reportPosition({ symbol: pos.symbol, baseAsset: pos.baseAsset, executedQty: close.executedQty, orderId: pos.orderId, closeOrderId: close.orderId, status: 'closed' });
+      console.log(`[${context}][CLOSE] Reported CLOSED ${pos.symbol} to backend.`);
     } catch (err) {
       allClosed = false;
-      console.error(`[${context}][ERROR] Failed to close ${pos.symbol}: ${err.message}`);
+      console.error(`[${context}][ERROR] Close result FAILED for ${pos.symbol}: ${err.message}. Worker stays alive; position remains open.`);
       await reportPosition({ symbol: pos.symbol, baseAsset: pos.baseAsset, executedQty: pos.executedQty, orderId: pos.orderId, status: 'WORKER_CLOSE_FAILED', error: err.message });
     }
   }
@@ -338,16 +442,17 @@ async function runStopSequence() {
   if (stopping) return;
   stopping = true;
   currentState = 'stopping';
-  console.log('[STOP] Stop requested. Closing open testnet positions before exit.');
+  console.log(`[STOP] Stop requested. Closing ${getOpenPositions().length} open testnet position(s) via MARKET SELL before exit.`);
   await sendHeartbeat();
   let retries = 0;
   while (true) {
     const allClosed = await closeAllPositions('STOP');
     if (allClosed) {
       currentState = 'stopped';
-      console.log('[STOP] All positions closed. Worker exiting.');
+      console.log('[STOP] All positions closed. [EXIT] reason=stop_requested_all_closed code=0. Worker exiting.');
       await sendHeartbeat();
-      process.exit(0);
+      finishWorker(0);
+      return;
     }
     retries++;
     if (retries >= MAX_CLOSE_RETRIES) {
@@ -379,15 +484,37 @@ async function processCommands(commands) {
   await ackCommands(toAck);
 }
 
+async function handleMissingSession(data) {
+  const open = getOpenPositions();
+  if (data && data.stopRequested) return runStopSequence();
+  if (open.length > 0) {
+    currentState = 'running';
+    console.warn(`[RECOVERY] Continuing after open position; session missing from control plane. openPositions=${open.length}`);
+    await reportOpenPositions('missing-session');
+    await sendHeartbeat();
+    return;
+  }
+  if (!missingSessionSince) {
+    missingSessionSince = Date.now();
+    console.warn(`[RECOVERY] worker-session missing without local open positions; retrying for ${Math.round(MISSING_SESSION_EXIT_MS / 1000)}s before clean exit.`);
+    return;
+  }
+  if (Date.now() - missingSessionSince >= MISSING_SESSION_EXIT_MS) {
+    currentState = 'stopped';
+    console.warn('[EXIT] reason=worker_session_missing_no_open_positions code=0. Worker exiting cleanly.');
+    await sendHeartbeat();
+    finishWorker(0);
+    return;
+  }
+}
+
 // --- Main loop ---
 async function tick() {
   if (stopping) return;
   await sendHeartbeat();
   const data = await fetchSession();
   if (!data || !data.session) {
-    // Unknown/missing session -> stop gracefully (orphan protection).
-    if (data && data.stopRequested) return runStopSequence();
-    return;
+    return handleMissingSession(data);
   }
   const session = data.session;
   const config = data.config || {};
@@ -405,7 +532,19 @@ async function tick() {
   }
 
   currentState = 'running';
+
+  // If we already hold an open position, stay alive and refuse new entries.
+  if (getOpenPositions().length > 0) {
+    if (data.intent) {
+      console.log(`[IDLE] Holding open position(s); ignoring new intent ${data.intent.id} until the current position is closed.`);
+    } else {
+      console.log('[IDLE] Position open — heartbeat/poll continue, no new entries.');
+    }
+    return;
+  }
+
   if (data.intent) {
+    console.log(`[INTENT] Claimed intent ${data.intent.id} ${data.intent.symbol} ${data.intent.side} ${data.intent.type} positionUsd=${data.intent.positionUsd}`);
     await executeIntent(data.intent, config, riskState);
   }
 }
@@ -428,6 +567,10 @@ async function runPreflight() {
     console.log('[PREFLIGHT SUCCESS] ok: true, canReachBinance: true');
     if (data.accountType) console.log(`accountType: ${data.accountType}`);
     console.log('balances:', JSON.stringify(balances));
+    const btcFree = Number(balances.BTC);
+    if (Number.isFinite(btcFree) && btcFree > 0) {
+      console.warn(`[PREFLIGHT WARNING] Non-zero BTC testnet balance detected: BTC=${balances.BTC}. Worker will not auto-sell arbitrary BTC unless the position is known in ${STATE_FILE} or the user clicks Emergency Close Testnet.`);
+    }
     return 0;
   } catch (err) { console.error(`[PREFLIGHT ERROR] ${err.message}`); return 1; }
 }
@@ -442,8 +585,11 @@ async function main() {
   if (launchedByProtocol) console.log('[INFO] Launched via swingworker:// protocol handler.');
 
   await sendHeartbeat();
-  setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
-  setInterval(() => { tick().catch((err) => console.error('[ERROR] tick failed:', err.message)); }, pollIntervalMs);
+  // Crash-recovery: if local state already holds an open position, re-report it to
+  // the backend and refuse new BUY intents until it is closed.
+  await reportOpenPositions('startup');
+  heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+  pollTimer = setInterval(() => { tick().catch((err) => console.error('[ERROR] tick failed:', err.message)); }, pollIntervalMs);
   tick().catch((err) => console.error('[ERROR] tick failed:', err.message));
 }
 

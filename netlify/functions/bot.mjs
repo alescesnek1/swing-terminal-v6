@@ -1077,6 +1077,7 @@ const STALE_SESSION_STATUSES = new Set(['launch_requested', 'launching', 'stoppi
 const STALE_LAUNCH_STATUSES = new Set(['launch_requested', 'launching', 'launch_failed']);
 const STALE_STOPPING_STATUSES = new Set(['stopping', 'stop_requested']);
 const CLEARED_ACTIVE_EXCLUDED_STATUSES = new Set(['cleared', 'stopped', 'launch_failed', 'expired']);
+const OPEN_POSITION_STATUSES = new Set(['open', 'WORKER_CLOSE_FAILED']);
 
 const DEFAULT_BOT_CONFIG = {
   minTradeUsd: 5,
@@ -1162,9 +1163,107 @@ function sessionWorkerStatus(fleet, session) {
   return statuses[0] || null;
 }
 
-function sessionOpenPositions(fleet, sessionId) {
+function positionRecordKey(record) {
+  if (!record) return '';
+  const orderId = record.orderId != null ? String(record.orderId) : '';
+  if (orderId) return `order:${orderId}`;
+  return `symbol:${String(record.symbol || '').toUpperCase()}:qty:${String(record.executedQty || '')}`;
+}
+
+function latestSessionPositionRecords(fleet, sessionId) {
   const positions = ((fleet && fleet.positionResults && fleet.positionResults[sessionId]) || []);
-  return positions.filter((p) => p && p.status === 'open');
+  const seen = new Set();
+  const latest = [];
+  for (const p of positions) {
+    const key = positionRecordKey(p);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    latest.push(p);
+  }
+  return latest;
+}
+
+function sessionOpenPositions(fleet, sessionId) {
+  return latestSessionPositionRecords(fleet, sessionId).filter((p) => p && OPEN_POSITION_STATUSES.has(p.status));
+}
+
+function normalizeOpenPositionsSummary(input, sessionId) {
+  if (!Array.isArray(input)) return [];
+  const out = [];
+  for (const p of input.slice(0, 10)) {
+    if (!p || typeof p !== 'object') continue;
+    const symbol = String(p.symbol || '').toUpperCase().slice(0, 20);
+    const executedQty = p.executedQty != null ? String(p.executedQty).slice(0, 40) : '';
+    const orderId = p.orderId != null ? String(p.orderId).slice(0, 40) : '';
+    if (!symbol || (!executedQty && !orderId)) continue;
+    out.push({
+      symbol,
+      baseAsset: typeof p.baseAsset === 'string' ? p.baseAsset.slice(0, 20) : null,
+      executedQty: executedQty || null,
+      orderId: orderId || null,
+      closeOrderId: null,
+      status: 'open',
+      sessionId,
+      error: null,
+      testnet: true,
+      realProductionOrder: false,
+      receivedAt: new Date().toISOString(),
+    });
+  }
+  return out;
+}
+
+function upsertOpenPositionReports(fleet, sessionId, openPositions) {
+  if (!openPositions.length) return 0;
+  if (!fleet.positionResults[sessionId]) fleet.positionResults[sessionId] = [];
+  const latestByKey = new Map(latestSessionPositionRecords(fleet, sessionId).map((p) => [positionRecordKey(p), p]));
+  let added = 0;
+  for (const rec of openPositions) {
+    const key = positionRecordKey(rec);
+    const latest = latestByKey.get(key);
+    if (latest && OPEN_POSITION_STATUSES.has(latest.status)) continue;
+    const next = { ...rec, receivedAt: new Date().toISOString() };
+    fleet.positionResults[sessionId].unshift(next);
+    latestByKey.set(key, next);
+    added++;
+  }
+  fleet.positionResults[sessionId] = fleet.positionResults[sessionId].slice(0, 30);
+  return added;
+}
+
+function recoverSessionWithOpenPositions(fleet, sessionId, workerId, body, openPositions, source) {
+  let session = fleet.botSessions && fleet.botSessions[sessionId];
+  if (session) return session;
+  if (!fleet.botSessions) fleet.botSessions = {};
+  const nowIso = new Date().toISOString();
+  const workerOnline = body && body.status !== 'offline';
+  session = {
+    sessionId,
+    ownerUserId: null,
+    ownerEmail: 'Recovered local worker',
+    orgId: 'default',
+    workerId: workerId || null,
+    mode: 'testnet',
+    status: workerOnline ? 'running_recovered' : 'worker_offline_position_open',
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
+    stopRequested: false,
+    pauseRequested: true,
+    closePositionsOnStop: true,
+    riskState: fleet.lastRegime || null,
+    config: completeBotConfig(DEFAULT_BOT_CONFIG),
+    recoveredAt: nowIso,
+    recoveredReason: 'openPositions',
+    recoverySource: source,
+    realOrderSubmitted: false,
+  };
+  fleet.botSessions[sessionId] = session;
+  upsertOpenPositionReports(fleet, sessionId, openPositions);
+  fevent(fleet, 'WORKER_SESSION_RECOVERED_OPEN_POSITION', 'warn',
+    `Recovered visible session ${sessionId.slice(0, 12)} from worker openPositions report.`,
+    { sessionId, ownerUserId: null, recoverySource: source });
+  return session;
 }
 
 function sessionAgeMs(session, now) {
@@ -1192,6 +1291,15 @@ function canClearNoWorkerNoPosition(session, fleet) {
 function clearStaleSession(fleet, sessionId, identity, reason) {
   const session = fleet.botSessions && fleet.botSessions[sessionId];
   if (!session) return null;
+  // HARD GUARD: never clear/hide a session that still has an open position.
+  // An orphaned worker may yet reconnect to close it; losing the session would
+  // hide a live testnet position from the operator.
+  if (sessionOpenPositions(fleet, sessionId).length > 0) {
+    fevent(fleet, 'WORKER_SESSION_CLEAR_BLOCKED_OPEN_POSITION', 'warn',
+      `Refused to clear session ${sessionId.slice(0, 12)} (${reason}): it has an open testnet position.`,
+      { sessionId, ownerUserId: session.ownerUserId, clearedReason: reason });
+    return null;
+  }
   const nowIso = new Date().toISOString();
   session.status = 'cleared';
   session.stopRequested = true;
@@ -1223,7 +1331,7 @@ function publicSessionView(fleet, session) {
   const ws = sessionWorkerStatus(fleet, session);
   const results = fleet.executionResults[session.sessionId] || [];
   const positions = fleet.positionResults[session.sessionId] || [];
-  const openPositions = positions.filter((p) => p && p.status === 'open');
+  const openPositions = sessionOpenPositions(fleet, session.sessionId);
   const realizedPnl = results.reduce((acc, r) => acc + (Number(r.realizedPnl) || 0), 0);
   const now = Date.now();
   return {
@@ -1266,8 +1374,14 @@ function sessionsVisibleTo(fleet, identity) {
   const admin = isAdmin(identity) && identity.verified === true;
   return all.filter((s) => {
     if (s.ownerUserId === identity.userId) return true;
+    if (!s.ownerUserId && sessionOpenPositions(fleet, s.sessionId).length > 0) return true;
     return admin && (s.orgId || 'default') === (identity.orgId || 'default');
   });
+}
+
+function canControlFleetSession(identity, session, fleet) {
+  if (canControlSession(identity, session)) return true;
+  return !!(session && !session.ownerUserId && sessionOpenPositions(fleet, session.sessionId).length > 0);
 }
 
 function expireStaleIntent(fleet, sessionId) {
@@ -1306,7 +1420,7 @@ async function handleFleetWorker(req, base, body) {
   }
 
   const fleet = await loadFleet();
-  const session = fleet.botSessions[sessionId];
+  let session = fleet.botSessions[sessionId];
 
   // worker-heartbeat: bind worker, persist liveness, return control flags.
   if (base === 'worker-heartbeat') {
@@ -1315,6 +1429,13 @@ async function handleFleetWorker(req, base, body) {
     if (!workerId) return json(req, { ok: false, error: 'workerId is required' }, 400);
 
     const nowIso = new Date().toISOString();
+    const reportedOpenPositions = normalizeOpenPositionsSummary(body.openPositions, sessionId);
+    if (!session && reportedOpenPositions.length > 0) {
+      session = recoverSessionWithOpenPositions(fleet, sessionId, workerId, body, reportedOpenPositions, 'worker-heartbeat');
+    }
+    if (reportedOpenPositions.length > 0) {
+      upsertOpenPositionReports(fleet, sessionId, reportedOpenPositions);
+    }
     fleet.workerStatuses[workerId] = {
       workerId,
       sessionId,
@@ -1326,6 +1447,7 @@ async function handleFleetWorker(req, base, body) {
       mode: 'testnet',
       currentState: typeof body.currentState === 'string' ? body.currentState.slice(0, 60) : null,
       pid: Number.isFinite(Number(body.pid)) ? Number(body.pid) : null,
+      openPositions: reportedOpenPositions,
       realProductionOrder: false,
     };
 
@@ -1340,8 +1462,9 @@ async function handleFleetWorker(req, base, body) {
     if (cs === 'stopped') session.status = 'stopped';
     else if (cs === 'stopping') session.status = 'stopping';
     else if (session.stopRequested) session.status = 'stopping';
+    else if (session.status === 'running_recovered' || session.status === 'worker_offline_position_open') session.status = 'running_recovered';
     else if (session.pauseRequested) session.status = 'paused';
-    else if (session.status === 'launch_requested' || session.status === 'running' || session.status === 'paused') {
+    else if (session.status === 'launch_requested' || session.status === 'running' || session.status === 'paused' || session.status === 'running_recovered' || session.status === 'worker_offline_position_open') {
       session.status = session.pauseRequested ? 'paused' : 'running';
     }
     session.updatedAt = nowIso;
@@ -1355,13 +1478,18 @@ async function handleFleetWorker(req, base, body) {
     });
   }
 
-  if (!session) {
-    return json(req, { ok: false, error: 'Unknown session', stopRequested: true }, 404);
-  }
-
   // worker-session: the ONLY place a worker receives an intent (per-session).
   if (base === 'worker-session') {
     if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    if (!session) {
+      const knownOpen = sessionOpenPositions(fleet, sessionId);
+      if (knownOpen.length > 0) {
+        session = recoverSessionWithOpenPositions(fleet, sessionId, bodyWorkerId(req, body), { status: 'offline' }, knownOpen, 'worker-session');
+      } else {
+        await saveFleet(fleet);
+        return json(req, { ok: true, session: null, sessionMissing: true, recoveryMode: true, stopRequested: false, pauseRequested: true });
+      }
+    }
     expireStaleIntent(fleet, sessionId);
     let intent = fleet.executionIntents[sessionId] || null;
     // Claim a pending intent for this session only. Never opens entries while paused/stopping.
@@ -1401,6 +1529,10 @@ async function handleFleetWorker(req, base, body) {
       pauseRequested: session.pauseRequested === true,
       closePositionsOnStop: session.closePositionsOnStop !== false,
     });
+  }
+
+  if (!session && base !== 'position-result') {
+    return json(req, { ok: false, error: 'Unknown session', stopRequested: true }, 404);
   }
 
   // worker-command-ack: mark commands consumed.
@@ -1461,8 +1593,19 @@ async function handleFleetWorker(req, base, body) {
       realProductionOrder: false,
       receivedAt: new Date().toISOString(),
     };
-    if (!fleet.positionResults[sessionId]) fleet.positionResults[sessionId] = [];
-    fleet.positionResults[sessionId] = [record, ...fleet.positionResults[sessionId]].slice(0, 30);
+    if (!session && OPEN_POSITION_STATUSES.has(record.status)) {
+      session = recoverSessionWithOpenPositions(fleet, sessionId, bodyWorkerId(req, body), { status: 'offline' }, [record], 'position-result');
+    }
+    if (!session) {
+      await saveFleet(fleet);
+      return json(req, { ok: true, sessionMissing: true, recoveryMode: true });
+    }
+    if (record.status === 'open') {
+      upsertOpenPositionReports(fleet, sessionId, [record]);
+    } else {
+      if (!fleet.positionResults[sessionId]) fleet.positionResults[sessionId] = [];
+      fleet.positionResults[sessionId] = [record, ...fleet.positionResults[sessionId]].slice(0, 30);
+    }
     const sev = record.status === 'WORKER_CLOSE_FAILED' ? 'warn' : 'info';
     fevent(fleet, record.status === 'closed' ? 'WORKER_POSITION_CLOSED' : record.status === 'WORKER_CLOSE_FAILED' ? 'WORKER_CLOSE_FAILED' : 'WORKER_POSITION_OPEN', sev,
       `${record.status} ${record.symbol} (session ${sessionId.slice(0, 12)})`, { sessionId, ownerUserId: session.ownerUserId });
@@ -1633,8 +1776,8 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       const canSee = s.ownerUserId === identity.userId
         || (adminOrgClear && (s.orgId || 'default') === (identity.orgId || 'default'));
       if (canSee && isSessionStaleNoWorker(s, fleet, now)) {
-        clearStaleSession(fleet, s.sessionId, identity, adminOrgClear && s.ownerUserId !== identity.userId ? 'admin_clear_stale_sessions' : 'clear_stale_sessions');
-        clearedSessionIds.push(s.sessionId);
+        const cleared = clearStaleSession(fleet, s.sessionId, identity, adminOrgClear && s.ownerUserId !== identity.userId ? 'admin_clear_stale_sessions' : 'clear_stale_sessions');
+        if (cleared) clearedSessionIds.push(s.sessionId);
       }
     }
     await saveFleet(fleet);
@@ -1649,7 +1792,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     const fleet = await loadFleet();
     const session = fleet.botSessions[sessionId];
     if (!session) return json(req, { ok: false, error: 'Session not found' }, 404);
-    if (!canControlSession(identity, session)) return json(req, { ok: false, error: 'Forbidden' }, 403);
+    if (!canControlFleetSession(identity, session, fleet)) return json(req, { ok: false, error: 'Forbidden' }, 403);
 
     if (!action) {
       if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
@@ -1724,7 +1867,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     const session = fleet.botSessions[sessionId];
     if (!session) {
       // Debug-safe payload so a wrong/partial id is impossible to miss.
-      const mine = Object.values(fleet.botSessions || {}).filter((s) => canControlSession(identity, s));
+      const mine = Object.values(fleet.botSessions || {}).filter((s) => canControlFleetSession(identity, s, fleet));
       const knownSessionIdsForUser = mine.map((s) => s.sessionId);
       const knownRunningSessionIdsForUser = mine
         .filter((s) => s.status === 'running' || workerIsOnline(sessionWorkerStatus(fleet, s)))
@@ -1737,7 +1880,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
         knownRunningSessionIdsForUser,
       }, 404);
     }
-    if (!canControlSession(identity, session)) return json(req, { ok: false, error: 'Forbidden' }, 403);
+    if (!canControlFleetSession(identity, session, fleet)) return json(req, { ok: false, error: 'Forbidden' }, 403);
     if (session.stopRequested) return json(req, { ok: false, error: 'Session is stopping.' }, 409);
     if (session.pauseRequested) return json(req, { ok: false, error: 'Session entries are paused.' }, 409);
 
@@ -1812,7 +1955,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       return json(req, { ok: false, error: `positionUsd ${positionUsd} violates config bounds [${config.minTradeUsd}, ${config.maxTradeUsd}].` }, 400);
     }
     // Max open positions.
-    const open = (fleet.positionResults[sessionId] || []).filter((p) => p && p.status === 'open').length;
+    const open = sessionOpenPositions(fleet, sessionId).length;
     if (open >= config.maxOpenPositions) {
       await saveFleet(fleet);
       return json(req, { ok: false, error: `Max open positions (${config.maxOpenPositions}) reached for this session.` }, 409);
