@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import { getIdentity, isAdmin, canControlSession } from './_auth.mjs';
+import { loadFleet, saveFleet, fleetBackend } from './_fleet-store.mjs';
+import { computeMarketRegime } from './_market-regime.mjs';
 
 const DEFAULT_STATE = {
   status: 'safety',
@@ -16,6 +19,10 @@ const DEFAULT_STATE = {
   executionIntent: null,
   executionResults: [],
   usedIdempotencyKeys: [],
+  // On-demand local worker session (testnet only). Replaces persistent daemon model.
+  botSession: null,
+  workerStatus: null,
+  positionResults: [],
   events: [],
   updatedAt: null,
 };
@@ -445,10 +452,33 @@ async function verifyAuth() {
   return { ok: true, authMode: 'not_enforced_skeleton' };
 }
 
+function workerOnline() {
+  const ws = botControlState.workerStatus;
+  if (!ws || !ws.lastSeenAt) return false;
+  const last = new Date(ws.lastSeenAt).getTime();
+  return Number.isFinite(last) && (Date.now() - last) < 20000;
+}
+
+function publicSession() {
+  const session = botControlState.botSession;
+  if (!session) return null;
+  // Never leak anything sensitive; session holds no secrets by design.
+  return {
+    sessionId: session.sessionId,
+    status: session.status,
+    mode: session.mode,
+    createdAt: session.createdAt,
+    expiresAt: session.expiresAt,
+    stopRequested: session.stopRequested === true,
+    closePositionsOnStop: session.closePositionsOnStop !== false,
+    realOrderSubmitted: false,
+  };
+}
+
 function publicState(extra = {}) {
   const mode = getTradingMode() || 'dry_run';
   const executionPreview = buildExecutionPreview(botControlState.paperPosition);
-  return {
+  const base = {
     ok: true,
     status: botControlState.status,
     mode: mode === 'dry_run' ? 'dry_run' : 'dry_run',
@@ -476,10 +506,20 @@ function publicState(extra = {}) {
     unrealizedPnl: botControlState.unrealizedPnl,
     executionIntent: botControlState.executionIntent || null,
     executionResults: botControlState.executionResults || [],
+    botSession: publicSession(),
+    positionResults: botControlState.positionResults || [],
     events: botControlState.events,
     scanMeta: botControlState.scanMeta || null,
-    ...extra,
   };
+
+  if (botControlState.workerStatus) {
+    base.workerStatus = {
+      ...botControlState.workerStatus,
+      online: workerOnline(),
+    };
+  }
+
+  return { ...base, ...extra };
 }
 
 function marketNumber(row, keys) {
@@ -1022,8 +1062,582 @@ async function handleTestnetOrder(req, auth) {
   }));
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// Bot Fleet Manager — multi-session, per-user, durable (Netlify Blobs) state.
+// TESTNET ONLY. No Binance secrets here; no signing here; live trading locked.
+// ══════════════════════════════════════════════════════════════════════════
+
+const WORKER_ONLINE_MS = 20000;
+const INTENT_TTL_MS = 120 * 1000;
+const SESSION_TTL_MS = 60 * 60 * 1000;
+const MAX_SESSIONS_PER_USER = 3;
+const TESTNET_MAX_TRADE_USD = 10;
+const FLEET_COMMAND_TYPES = new Set(['STOP', 'PAUSE', 'RESUME', 'EMERGENCY_CLOSE']);
+
+const DEFAULT_BOT_CONFIG = {
+  minTradeUsd: 1,
+  maxTradeUsd: 10,
+  maxDailyLossUsd: 25,
+  maxDailyTrades: 10,
+  maxOpenPositions: 1,
+  stopLossPct: 3,
+  takeProfitPct: 15,
+  pauseOnMarketCrash: true,
+  allowTestnet: true,
+  allowLive: false,
+};
+
+function numOr(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+function intOr(value, fallback) {
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) ? n : fallback;
+}
+
+// Server-side hard validation. Returns { ok, errors, config }.
+function validateBotConfig(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const c = {
+    minTradeUsd: numOr(src.minTradeUsd, DEFAULT_BOT_CONFIG.minTradeUsd),
+    maxTradeUsd: numOr(src.maxTradeUsd, DEFAULT_BOT_CONFIG.maxTradeUsd),
+    maxDailyLossUsd: numOr(src.maxDailyLossUsd, DEFAULT_BOT_CONFIG.maxDailyLossUsd),
+    maxDailyTrades: intOr(src.maxDailyTrades, DEFAULT_BOT_CONFIG.maxDailyTrades),
+    maxOpenPositions: intOr(src.maxOpenPositions, DEFAULT_BOT_CONFIG.maxOpenPositions),
+    stopLossPct: numOr(src.stopLossPct, DEFAULT_BOT_CONFIG.stopLossPct),
+    takeProfitPct: numOr(src.takeProfitPct, DEFAULT_BOT_CONFIG.takeProfitPct),
+    pauseOnMarketCrash: src.pauseOnMarketCrash !== false,
+    allowTestnet: true,
+    allowLive: false, // hard-locked
+  };
+  const errors = [];
+  if (!(c.minTradeUsd >= 1)) errors.push('minTradeUsd must be >= 1');
+  if (!(c.maxTradeUsd <= TESTNET_MAX_TRADE_USD)) errors.push(`maxTradeUsd must be <= ${TESTNET_MAX_TRADE_USD} for testnet phase`);
+  if (!(c.minTradeUsd <= c.maxTradeUsd)) errors.push('minTradeUsd must be <= maxTradeUsd');
+  if (!(c.maxDailyLossUsd >= 0)) errors.push('maxDailyLossUsd must be >= 0');
+  if (!(c.maxDailyTrades >= 1)) errors.push('maxDailyTrades must be >= 1');
+  if (!(c.maxOpenPositions >= 1 && c.maxOpenPositions <= 5)) errors.push('maxOpenPositions must be between 1 and 5');
+  if (!(c.stopLossPct > 0 && c.stopLossPct <= 50)) errors.push('stopLossPct must be in (0, 50]');
+  if (!(c.takeProfitPct > 0 && c.takeProfitPct <= 200)) errors.push('takeProfitPct must be in (0, 200]');
+  if (c.allowLive !== false) errors.push('live trading is locked (allowLive must be false)');
+  return { ok: errors.length === 0, errors, config: c };
+}
+
+function getUserConfig(fleet, userId) {
+  const stored = fleet.botConfigs && fleet.botConfigs[userId];
+  return stored ? { ...DEFAULT_BOT_CONFIG, ...stored, allowTestnet: true, allowLive: false } : { ...DEFAULT_BOT_CONFIG };
+}
+
+function fevent(fleet, type, severity, message, extra = {}) {
+  const ev = { type, severity, message, ts: new Date().toISOString(), ...extra };
+  fleet.events = [ev, ...(fleet.events || [])].slice(0, 80);
+  return ev;
+}
+
+function workerIsOnline(ws) {
+  if (!ws || !ws.lastSeenAt) return false;
+  const last = new Date(ws.lastSeenAt).getTime();
+  return Number.isFinite(last) && (Date.now() - last) < WORKER_ONLINE_MS && ws.status !== 'offline';
+}
+
+function publicSessionView(fleet, session) {
+  if (!session) return null;
+  const ws = session.workerId ? fleet.workerStatuses[session.workerId] : null;
+  const results = fleet.executionResults[session.sessionId] || [];
+  const positions = fleet.positionResults[session.sessionId] || [];
+  const openPositions = positions.filter((p) => p && p.status === 'open');
+  const realizedPnl = results.reduce((acc, r) => acc + (Number(r.realizedPnl) || 0), 0);
+  return {
+    sessionId: session.sessionId,
+    ownerUserId: session.ownerUserId,
+    ownerEmail: session.ownerEmail,
+    orgId: session.orgId,
+    workerId: session.workerId || null,
+    mode: 'testnet',
+    status: session.status,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    stopRequested: session.stopRequested === true,
+    pauseRequested: session.pauseRequested === true,
+    closePositionsOnStop: session.closePositionsOnStop !== false,
+    riskState: session.riskState || null,
+    config: session.config || null,
+    realOrderSubmitted: false,
+    worker: ws ? {
+      workerId: ws.workerId,
+      platform: ws.platform,
+      hostname: ws.hostname,
+      currentState: ws.currentState,
+      lastSeenAt: ws.lastSeenAt,
+      online: workerIsOnline(ws),
+    } : null,
+    openPositions,
+    positionResults: positions.slice(0, 20),
+    executionResults: results.slice(0, 10),
+    realizedPnl,
+  };
+}
+
+function sessionsVisibleTo(fleet, identity) {
+  const all = Object.values(fleet.botSessions || {});
+  // Org-wide admin visibility requires a cryptographically verified token.
+  const admin = isAdmin(identity) && identity.verified === true;
+  return all.filter((s) => {
+    if (s.ownerUserId === identity.userId) return true;
+    return admin && (s.orgId || 'default') === (identity.orgId || 'default');
+  });
+}
+
+function expireStaleIntent(fleet, sessionId) {
+  const intent = fleet.executionIntents[sessionId];
+  if (intent && (intent.status === 'pending' || intent.status === 'claimed')) {
+    if (new Date(intent.expiresAt).getTime() < Date.now()) {
+      intent.status = 'expired';
+      fleet.executionIntents[sessionId] = intent;
+    }
+  }
+}
+
+function queueCommand(fleet, sessionId, type, createdBy) {
+  if (!FLEET_COMMAND_TYPES.has(type)) return null;
+  if (!fleet.commandQueue[sessionId]) fleet.commandQueue[sessionId] = [];
+  const cmd = { id: `cmd_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, type, createdAt: new Date().toISOString(), createdBy };
+  fleet.commandQueue[sessionId].push(cmd);
+  fleet.commandQueue[sessionId] = fleet.commandQueue[sessionId].slice(-20);
+  return cmd;
+}
+
+function bodySessionId(req, body) {
+  const url = new URL(req.url);
+  return url.searchParams.get('sessionId') || (body && body.sessionId) || '';
+}
+function bodyWorkerId(req, body) {
+  const url = new URL(req.url);
+  return url.searchParams.get('workerId') || (body && body.workerId) || '';
+}
+
+// ── Worker-facing fleet routes (X-BOT-WORKER-TOKEN + sessionId required) ──────
+async function handleFleetWorker(req, base, body) {
+  const sessionId = bodySessionId(req, body);
+  if (!sessionId) {
+    return json(req, { ok: false, error: 'sessionId is required for worker endpoints' }, 400);
+  }
+
+  const fleet = await loadFleet();
+  const session = fleet.botSessions[sessionId];
+
+  // worker-heartbeat: bind worker, persist liveness, return control flags.
+  if (base === 'worker-heartbeat') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    const workerId = bodyWorkerId(req, body);
+    if (!workerId) return json(req, { ok: false, error: 'workerId is required' }, 400);
+
+    const nowIso = new Date().toISOString();
+    fleet.workerStatuses[workerId] = {
+      workerId,
+      sessionId,
+      ownerUserId: session ? session.ownerUserId : null,
+      platform: typeof body.platform === 'string' ? body.platform.slice(0, 60) : null,
+      hostname: typeof body.hostname === 'string' ? body.hostname.slice(0, 120) : null,
+      status: body.status === 'offline' ? 'offline' : 'online',
+      lastSeenAt: nowIso,
+      mode: 'testnet',
+      currentState: typeof body.currentState === 'string' ? body.currentState.slice(0, 60) : null,
+      pid: Number.isFinite(Number(body.pid)) ? Number(body.pid) : null,
+      realProductionOrder: false,
+    };
+
+    if (!session) {
+      // Orphan worker (session gone): tell it to stop gracefully.
+      await saveFleet(fleet);
+      return json(req, { ok: true, sessionKnown: false, stopRequested: true, closePositionsOnStop: true, pauseRequested: false });
+    }
+
+    session.workerId = workerId;
+    const cs = fleet.workerStatuses[workerId].currentState;
+    if (cs === 'stopped') session.status = 'stopped';
+    else if (cs === 'stopping') session.status = 'stopping';
+    else if (session.stopRequested) session.status = 'stopping';
+    else if (session.pauseRequested) session.status = 'paused';
+    else if (session.status === 'launch_requested' || session.status === 'running' || session.status === 'paused') {
+      session.status = session.pauseRequested ? 'paused' : 'running';
+    }
+    session.updatedAt = nowIso;
+    await saveFleet(fleet);
+    return json(req, {
+      ok: true,
+      sessionKnown: true,
+      stopRequested: session.stopRequested === true,
+      pauseRequested: session.pauseRequested === true,
+      closePositionsOnStop: session.closePositionsOnStop !== false,
+    });
+  }
+
+  if (!session) {
+    return json(req, { ok: false, error: 'Unknown session', stopRequested: true }, 404);
+  }
+
+  // worker-session: the ONLY place a worker receives an intent (per-session).
+  if (base === 'worker-session') {
+    if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    expireStaleIntent(fleet, sessionId);
+    let intent = fleet.executionIntents[sessionId] || null;
+    // Claim a pending intent for this session only. Never opens entries while paused/stopping.
+    if (intent && intent.status === 'pending') {
+      if (session.stopRequested || session.pauseRequested) {
+        intent = null; // do not hand out entries while paused/stopping
+      } else if (new Date(intent.expiresAt).getTime() < Date.now()) {
+        fleet.executionIntents[sessionId].status = 'expired';
+        intent = null;
+      } else {
+        fleet.executionIntents[sessionId].status = 'claimed';
+        intent = fleet.executionIntents[sessionId];
+      }
+    } else if (intent && intent.status !== 'claimed') {
+      intent = null;
+    } else if (intent && intent.status === 'claimed' && (session.stopRequested || session.pauseRequested)) {
+      intent = null;
+    }
+
+    const commands = (fleet.commandQueue[sessionId] || []).filter((c) => !c.consumedAt);
+    await saveFleet(fleet);
+    return json(req, {
+      ok: true,
+      session: {
+        sessionId: session.sessionId,
+        status: session.status,
+        mode: 'testnet',
+        stopRequested: session.stopRequested === true,
+        pauseRequested: session.pauseRequested === true,
+        closePositionsOnStop: session.closePositionsOnStop !== false,
+        riskState: session.riskState || null,
+      },
+      config: session.config || DEFAULT_BOT_CONFIG,
+      commands,
+      intent: intent && intent.status === 'claimed' ? intent : null,
+      stopRequested: session.stopRequested === true,
+      pauseRequested: session.pauseRequested === true,
+      closePositionsOnStop: session.closePositionsOnStop !== false,
+    });
+  }
+
+  // worker-command-ack: mark commands consumed.
+  if (base === 'worker-command-ack') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    const ids = Array.isArray(body.commandIds) ? body.commandIds : (body.commandId ? [body.commandId] : []);
+    const q = fleet.commandQueue[sessionId] || [];
+    for (const c of q) {
+      if (ids.includes(c.id)) c.consumedAt = new Date().toISOString();
+    }
+    fleet.commandQueue[sessionId] = q.filter((c) => !c.consumedAt);
+    await saveFleet(fleet);
+    return json(req, { ok: true });
+  }
+
+  // execution-result: per-session idempotency.
+  if (base === 'execution-result') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    if (!body.id || !body.idempotencyKey || !body.status) return json(req, { ok: false, error: 'Invalid payload' }, 400);
+    if (body.testnet !== true || body.realProductionOrder !== false) return json(req, { ok: false, error: 'Invalid safety payload' }, 400);
+
+    const intent = fleet.executionIntents[sessionId];
+    if (intent && body.id === intent.id) {
+      intent.status = body.status === 'failed' ? 'failed' : 'submitted';
+    }
+    if (!fleet.usedIdempotencyKeys[sessionId]) fleet.usedIdempotencyKeys[sessionId] = [];
+    if (fleet.usedIdempotencyKeys[sessionId].includes(body.idempotencyKey)) {
+      await saveFleet(fleet);
+      return json(req, { ok: false, error: 'Idempotency key already processed' }, 409);
+    }
+    fleet.usedIdempotencyKeys[sessionId].push(body.idempotencyKey);
+    fleet.usedIdempotencyKeys[sessionId] = fleet.usedIdempotencyKeys[sessionId].slice(-100);
+
+    if (!fleet.executionResults[sessionId]) fleet.executionResults[sessionId] = [];
+    fleet.executionResults[sessionId] = [{ ...body, sessionId, receivedAt: new Date().toISOString() }, ...fleet.executionResults[sessionId]].slice(0, 20);
+    fevent(fleet, body.status === 'failed' ? 'TESTNET_ORDER_FAILED' : 'TESTNET_ORDER_SUBMITTED',
+      body.status === 'failed' ? 'warn' : 'info',
+      body.status === 'failed' ? `Worker order failed: ${body.error || 'unknown'}` : `Worker submitted testnet order ${body.orderId} for ${body.symbol}.`,
+      { sessionId, ownerUserId: session.ownerUserId });
+    await saveFleet(fleet);
+    return json(req, { ok: true });
+  }
+
+  // position-result: open/close reports.
+  if (base === 'position-result') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    if (!body.symbol || !body.status) return json(req, { ok: false, error: 'Invalid payload' }, 400);
+    const record = {
+      symbol: String(body.symbol).toUpperCase().slice(0, 20),
+      baseAsset: typeof body.baseAsset === 'string' ? body.baseAsset.slice(0, 20) : null,
+      executedQty: body.executedQty != null ? String(body.executedQty).slice(0, 40) : null,
+      orderId: body.orderId != null ? String(body.orderId).slice(0, 40) : null,
+      closeOrderId: body.closeOrderId != null ? String(body.closeOrderId).slice(0, 40) : null,
+      status: String(body.status).slice(0, 30),
+      sessionId,
+      error: typeof body.error === 'string' ? body.error.slice(0, 240) : null,
+      testnet: true,
+      realProductionOrder: false,
+      receivedAt: new Date().toISOString(),
+    };
+    if (!fleet.positionResults[sessionId]) fleet.positionResults[sessionId] = [];
+    fleet.positionResults[sessionId] = [record, ...fleet.positionResults[sessionId]].slice(0, 30);
+    const sev = record.status === 'WORKER_CLOSE_FAILED' ? 'warn' : 'info';
+    fevent(fleet, record.status === 'closed' ? 'WORKER_POSITION_CLOSED' : record.status === 'WORKER_CLOSE_FAILED' ? 'WORKER_CLOSE_FAILED' : 'WORKER_POSITION_OPEN', sev,
+      `${record.status} ${record.symbol} (session ${sessionId.slice(0, 12)})`, { sessionId, ownerUserId: session.ownerUserId });
+    await saveFleet(fleet);
+    return json(req, { ok: true });
+  }
+
+  return json(req, { ok: false, error: 'Not Found' }, 404);
+}
+
+// ── Browser-facing fleet routes (Origin + identity; owner/admin authz) ────────
+async function handleFleetBrowser(req, base, segments, identity, body) {
+  // GET /api/bot/fleet
+  if (base === 'fleet') {
+    if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    const fleet = await loadFleet();
+    const sessions = sessionsVisibleTo(fleet, identity).map((s) => publicSessionView(fleet, s));
+    const myEvents = (fleet.events || []).filter((e) => !e.ownerUserId || e.ownerUserId === identity.userId || isAdmin(identity)).slice(0, 50);
+    return json(req, {
+      ok: true,
+      backend: fleetBackend(),
+      isAdmin: isAdmin(identity),
+      identity: { userId: identity.userId, email: identity.email, orgId: identity.orgId, verified: identity.verified, authMode: identity.authMode },
+      sessions,
+      lastRegime: fleet.lastRegime || null,
+      events: myEvents,
+      productionReady: false,
+      realOrderSubmitted: false,
+    });
+  }
+
+  // GET/POST /api/bot/config (per user)
+  if (base === 'config') {
+    const fleet = await loadFleet();
+    if (req.method === 'GET') {
+      return json(req, { ok: true, config: getUserConfig(fleet, identity.userId) });
+    }
+    if (req.method === 'POST') {
+      const v = validateBotConfig(body);
+      if (!v.ok) return json(req, { ok: false, error: 'Invalid config', errors: v.errors }, 400);
+      fleet.botConfigs[identity.userId] = v.config;
+      fevent(fleet, 'BOT_CONFIG_UPDATED', 'info', `Config updated by ${identity.email || identity.userId}.`, { ownerUserId: identity.userId });
+      await saveFleet(fleet);
+      return json(req, { ok: true, config: v.config });
+    }
+    return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+  }
+
+  // POST /api/bot/start-session
+  if (base === 'start-session') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    if (process.env.BINANCE_ENV !== 'testnet') return json(req, { ok: false, error: 'Worker sessions require BINANCE_ENV=testnet.' }, 403);
+    if (process.env.BOT_LIVE_TRADING_ENABLED === 'true' || process.env.BOT_ALLOW_REAL_ORDERS === 'true') {
+      return json(req, { ok: false, error: 'Live trading flags are active. Cannot start a worker session.' }, 403);
+    }
+    const fleet = await loadFleet();
+    const mine = Object.values(fleet.botSessions).filter((s) => s.ownerUserId === identity.userId && !['stopped', 'expired'].includes(s.status));
+    if (mine.length >= MAX_SESSIONS_PER_USER) {
+      return json(req, { ok: false, error: `Session limit reached (${MAX_SESSIONS_PER_USER}). Stop an existing session first.` }, 429);
+    }
+    const sessionId = `session_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+    const nowIso = new Date().toISOString();
+    const session = {
+      sessionId,
+      ownerUserId: identity.userId,
+      ownerEmail: identity.email,
+      orgId: identity.orgId || 'default',
+      workerId: null,
+      mode: 'testnet',
+      status: 'launch_requested',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
+      stopRequested: false,
+      pauseRequested: false,
+      closePositionsOnStop: true,
+      riskState: fleet.lastRegime || null,
+      config: getUserConfig(fleet, identity.userId),
+      realOrderSubmitted: false,
+    };
+    fleet.botSessions[sessionId] = session;
+    fevent(fleet, 'WORKER_SESSION_START_REQUESTED', 'info', `Session ${sessionId.slice(0, 12)} requested by ${identity.email || identity.userId}.`, { sessionId, ownerUserId: identity.userId });
+    await saveFleet(fleet);
+
+    const controlUrl = requestOrigin(req) || getAllowedOrigins()[0] || 'https://swing-terminal-v6.netlify.app';
+    const launchUrl = `swingworker://start?session=${encodeURIComponent(sessionId)}&control=${encodeURIComponent(controlUrl)}`;
+    return json(req, { ok: true, sessionId, launchUrl, controlUrl, session: publicSessionView(fleet, session) });
+  }
+
+  // /api/bot/session/:sessionId[/:action]
+  if (base === 'session') {
+    const sessionId = segments[1];
+    const action = segments[2] || null;
+    if (!sessionId) return json(req, { ok: false, error: 'sessionId required' }, 400);
+    const fleet = await loadFleet();
+    const session = fleet.botSessions[sessionId];
+    if (!session) return json(req, { ok: false, error: 'Session not found' }, 404);
+    if (!canControlSession(identity, session)) return json(req, { ok: false, error: 'Forbidden' }, 403);
+
+    if (!action) {
+      if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+      return json(req, { ok: true, session: publicSessionView(fleet, session) });
+    }
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+
+    const actor = identity.email || identity.userId;
+    if (action === 'stop') {
+      session.stopRequested = true;
+      session.status = 'stopping';
+      session.closePositionsOnStop = true;
+      expireStaleIntent(fleet, sessionId);
+      if (fleet.executionIntents[sessionId] && fleet.executionIntents[sessionId].status === 'pending') {
+        fleet.executionIntents[sessionId].status = 'cancelled';
+      }
+      queueCommand(fleet, sessionId, 'STOP', actor);
+      fevent(fleet, 'WORKER_SESSION_STOP_REQUESTED', 'info', `Stop requested for ${sessionId.slice(0, 12)} by ${actor}. Worker will close positions then exit.`, { sessionId, ownerUserId: session.ownerUserId });
+    } else if (action === 'pause') {
+      session.pauseRequested = true;
+      session.status = 'paused';
+      if (fleet.executionIntents[sessionId] && fleet.executionIntents[sessionId].status === 'pending') {
+        fleet.executionIntents[sessionId].status = 'cancelled';
+      }
+      queueCommand(fleet, sessionId, 'PAUSE', actor);
+      fevent(fleet, 'ENTRIES_PAUSED', 'info', `Entries paused for ${sessionId.slice(0, 12)} by ${actor}.`, { sessionId, ownerUserId: session.ownerUserId });
+    } else if (action === 'resume') {
+      session.pauseRequested = false;
+      if (!session.stopRequested) session.status = 'running';
+      queueCommand(fleet, sessionId, 'RESUME', actor);
+      fevent(fleet, 'ENTRIES_RESUMED', 'info', `Entries resumed for ${sessionId.slice(0, 12)} by ${actor}.`, { sessionId, ownerUserId: session.ownerUserId });
+    } else if (action === 'emergency-close') {
+      queueCommand(fleet, sessionId, 'EMERGENCY_CLOSE', actor);
+      session.pauseRequested = true; // stop new entries while closing
+      fevent(fleet, 'EMERGENCY_CLOSE_REQUESTED', 'warn', `Emergency close (testnet) requested for ${sessionId.slice(0, 12)} by ${actor}.`, { sessionId, ownerUserId: session.ownerUserId });
+    } else {
+      return json(req, { ok: false, error: 'Unknown session action' }, 404);
+    }
+    session.updatedAt = new Date().toISOString();
+    await saveFleet(fleet);
+    return json(req, { ok: true, session: publicSessionView(fleet, session) });
+  }
+
+  // POST /api/bot/create-execution-intent  (session-scoped, config + regime gated)
+  if (base === 'create-execution-intent' || base === 'create-smoke-execution-intent') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    const sessionId = body && body.sessionId;
+    if (!sessionId) return json(req, { ok: false, error: 'sessionId is required' }, 400);
+    if (process.env.BOT_LIVE_TRADING_ENABLED === 'true' || process.env.BOT_ALLOW_REAL_ORDERS === 'true') {
+      return json(req, { ok: false, error: 'Live trading flags are active.' }, 403);
+    }
+    if (process.env.BINANCE_ENV !== 'testnet' || process.env.BOT_ALLOW_TESTNET_ORDERS !== 'true') {
+      return json(req, { ok: false, error: 'Testnet execution is not allowed.' }, 403);
+    }
+
+    const fleet = await loadFleet();
+    const session = fleet.botSessions[sessionId];
+    if (!session) return json(req, { ok: false, error: 'Session not found' }, 404);
+    if (!canControlSession(identity, session)) return json(req, { ok: false, error: 'Forbidden' }, 403);
+    if (session.stopRequested) return json(req, { ok: false, error: 'Session is stopping.' }, 409);
+    if (session.pauseRequested) return json(req, { ok: false, error: 'Session entries are paused.' }, 409);
+
+    const config = session.config || getUserConfig(fleet, identity.userId);
+
+    // ── Risk regime gate ──
+    let regime = fleet.lastRegime;
+    try {
+      const markets = await fetchMarkets(req);
+      regime = computeMarketRegime(markets);
+    } catch (err) {
+      regime = regime || { regime: 'NEUTRAL', entriesAllowed: true, reason: ['regime unavailable'], updatedAt: new Date().toISOString() };
+    }
+    const prevRegime = fleet.lastRegime && fleet.lastRegime.regime;
+    fleet.lastRegime = regime;
+    session.riskState = regime;
+    if (prevRegime && prevRegime !== regime.regime) {
+      fevent(fleet, 'MARKET_REGIME_CHANGED', 'info', `Market regime ${prevRegime} → ${regime.regime}.`, { data: { metrics: regime.metrics } });
+    }
+    if (regime.regime === 'CRASH' && config.pauseOnMarketCrash) {
+      fevent(fleet, 'ENTRIES_PAUSED_MARKET_CRASH', 'warn', `Entry blocked: market CRASH. ${regime.reason.join('; ')}`, { sessionId, ownerUserId: session.ownerUserId });
+      await saveFleet(fleet);
+      return json(req, { ok: false, error: 'Entries paused: market crash regime.', regime, blockedReason: regime.reason.join('; ') }, 409);
+    }
+
+    // Existing pending/claimed intent for this session blocks a duplicate.
+    expireStaleIntent(fleet, sessionId);
+    const existing = fleet.executionIntents[sessionId];
+    if (existing && (existing.status === 'pending' || existing.status === 'claimed')) {
+      await saveFleet(fleet);
+      return json(req, { ok: false, error: 'An execution intent is already pending or claimed for this session.' }, 409);
+    }
+
+    const isSmoke = base === 'create-smoke-execution-intent';
+    let symbol, positionUsd, quoteAsset, entryReference;
+    if (isSmoke) {
+      symbol = 'BTCUSDT';
+      quoteAsset = 'USDT';
+      entryReference = null;
+      positionUsd = Math.min(config.maxTradeUsd, TESTNET_MAX_TRADE_USD);
+    } else {
+      const pp = botControlState.paperPosition;
+      if (!pp || pp.status !== 'open') return json(req, { ok: false, error: 'No open paper position. Run Wake Bot first.' }, 400);
+      if (!pp.testnetSymbolAvailable && !pp.smokeFallback) return json(req, { ok: false, error: 'Position not compatible with testnet.' }, 400);
+      quoteAsset = pp.smokeFallback ? BOT_TESTNET_SMOKE_QUOTE_ASSET : BOT_QUOTE_ASSET;
+      symbol = toBinanceQuoteSymbol(pp.symbol, quoteAsset);
+      entryReference = pp.entry;
+      positionUsd = Math.max(config.minTradeUsd, Math.min(Number(pp.positionUsd) || config.maxTradeUsd, config.maxTradeUsd));
+    }
+    // Config hard gate.
+    if (!(positionUsd >= config.minTradeUsd && positionUsd <= config.maxTradeUsd && positionUsd <= TESTNET_MAX_TRADE_USD)) {
+      await saveFleet(fleet);
+      return json(req, { ok: false, error: `positionUsd ${positionUsd} violates config bounds [${config.minTradeUsd}, ${config.maxTradeUsd}].` }, 400);
+    }
+    // Max open positions.
+    const open = (fleet.positionResults[sessionId] || []).filter((p) => p && p.status === 'open').length;
+    if (open >= config.maxOpenPositions) {
+      await saveFleet(fleet);
+      return json(req, { ok: false, error: `Max open positions (${config.maxOpenPositions}) reached for this session.` }, 409);
+    }
+
+    const intentId = `intent_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const idempotencyKey = `fleet_${sessionId}_${symbol}_${Date.now()}`;
+    const intent = {
+      id: intentId,
+      idempotencyKey,
+      sessionId,
+      mode: 'testnet',
+      symbol,
+      side: 'BUY',
+      type: 'MARKET',
+      positionUsd,
+      entryReference,
+      quoteAsset,
+      smokeFallback: isSmoke,
+      configSnapshot: { minTradeUsd: config.minTradeUsd, maxTradeUsd: config.maxTradeUsd, maxOpenPositions: config.maxOpenPositions },
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + INTENT_TTL_MS).toISOString(),
+      status: 'pending',
+      realOrderSubmitted: false,
+      testnet: true,
+      realProductionOrder: false,
+    };
+    fleet.executionIntents[sessionId] = intent;
+    fevent(fleet, isSmoke ? 'TESTNET_SMOKE_INTENT_CREATED' : 'TESTNET_EXECUTION_INTENT_CREATED', 'info',
+      `${isSmoke ? 'Smoke' : 'Execution'} intent ${intentId.slice(0, 14)} created for ${symbol} (session ${sessionId.slice(0, 12)}).`,
+      { sessionId, ownerUserId: session.ownerUserId });
+    await saveFleet(fleet);
+    return json(req, { ok: true, intent, regime, session: publicSessionView(fleet, session) });
+  }
+
+  return json(req, { ok: false, error: 'Not Found' }, 404);
+}
+
+const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack']);
+const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'session', 'create-execution-intent', 'create-smoke-execution-intent']);
+
 function isWorkerRoute(route) {
-  return route === 'execution-intent' || route === 'execution-result';
+  return route === 'execution-intent';
 }
 
 function checkWorkerToken(req) {
@@ -1038,7 +1652,34 @@ export default async function handler(req) {
   }
 
   const route = routeName(req);
+  const segments = route.split('/').filter(Boolean);
+  const base = segments[0] || route;
   let auth = { ok: true, authMode: 'worker' };
+
+  // ── Bot Fleet Manager dispatch (takes precedence over legacy routing) ──
+  if (FLEET_WORKER_BASES.has(base)) {
+    if (!checkWorkerToken(req)) {
+      return json(req, { ok: false, error: 'Forbidden', reason: 'Invalid or missing X-BOT-WORKER-TOKEN' }, 403);
+    }
+    let body = {};
+    if (req.method === 'POST') {
+      try { body = await parseBody(req); } catch (err) { return json(req, { ok: false, error: err.message }, 400); }
+    }
+    return await handleFleetWorker(req, base, body);
+  }
+  if (FLEET_BROWSER_BASES.has(base)) {
+    const origin = checkOrigin(req);
+    if (!origin.ok) return json(req, { ok: false, error: 'Origin not allowed', reason: origin.reason }, 403);
+    const identity = await getIdentity(req);
+    if (!identity.ok) return json(req, { ok: false, error: 'Unauthorized', reason: identity.reason }, 401);
+    let body = {};
+    if (req.method === 'POST') {
+      try { body = await parseBody(req); } catch (err) { return json(req, { ok: false, error: err.message }, 400); }
+      const denied = findSensitiveFields(body);
+      if (denied.length) return json(req, { ok: false, error: 'Credentials are not accepted by this endpoint.', deniedFields: denied }, 400);
+    }
+    return await handleFleetBrowser(req, base, segments, identity, body);
+  }
 
   if (isWorkerRoute(route)) {
     if (!checkWorkerToken(req)) {
@@ -1067,30 +1708,45 @@ export default async function handler(req) {
   }
 
   if (route === 'execution-intent') {
+    // Deprecated: global intent pickup is removed. Workers must use
+    // GET /api/bot/worker-session?sessionId=&workerId= for per-session intents.
     if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
-    let intent = botControlState.executionIntent;
-    if (intent && intent.status === 'pending') {
-      if (new Date(intent.expiresAt).getTime() < Date.now()) {
-        intent.status = 'expired';
-        botControlState.executionIntent = intent;
-        intent = null;
-      } else {
-        intent.status = 'claimed';
-        botControlState.executionIntent = intent;
-      }
-    } else if (intent && intent.status === 'claimed') {
-      if (new Date(intent.expiresAt).getTime() < Date.now()) {
-        intent.status = 'expired';
-        botControlState.executionIntent = intent;
-      }
-      intent = null;
-    } else {
-      intent = null;
-    }
-    return json(req, { ok: true, intent });
+    return json(req, { ok: true, intent: null, deprecated: true, reason: 'Use /api/bot/worker-session?sessionId=&workerId=' });
   }
 
-  if (route !== 'wake' && route !== 'stop' && route !== 'testnet-order' && route !== 'clear-paper-position' && route !== 'create-execution-intent' && route !== 'create-smoke-execution-intent' && route !== 'execution-result') {
+  if (route === 'worker-session') {
+    if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    const session = botControlState.botSession;
+    if (!session) {
+      return json(req, { ok: true, session: null });
+    }
+    // Expire stale sessions defensively.
+    if (session.expiresAt && new Date(session.expiresAt).getTime() < Date.now() && session.status !== 'stopped') {
+      session.status = 'expired';
+      session.stopRequested = true;
+    }
+    const intent = botControlState.executionIntent;
+    const activeIntent = intent && (intent.status === 'pending' || intent.status === 'claimed') ? intent : null;
+    return json(req, {
+      ok: true,
+      session: {
+        sessionId: session.sessionId,
+        status: session.status,
+        mode: session.mode,
+        stopRequested: session.stopRequested === true,
+        closePositionsOnStop: session.closePositionsOnStop !== false,
+        createdAt: session.createdAt,
+        expiresAt: session.expiresAt,
+        realOrderSubmitted: false,
+      },
+      intent: activeIntent,
+      mode: session.mode,
+      stopRequested: session.stopRequested === true,
+      closePositionsOnStop: session.closePositionsOnStop !== false,
+    });
+  }
+
+  if (route !== 'wake' && route !== 'stop' && route !== 'testnet-order' && route !== 'clear-paper-position' && route !== 'create-execution-intent' && route !== 'create-smoke-execution-intent' && route !== 'execution-result' && route !== 'worker-heartbeat' && route !== 'start-session' && route !== 'stop-session' && route !== 'position-result') {
     return json(req, { ok: false, error: 'Not Found' }, 404);
   }
   if (req.method !== 'POST') {
@@ -1284,6 +1940,7 @@ export default async function handler(req) {
     
     const execResult = {
       ...body,
+      sessionId: body.sessionId || (botControlState.botSession && botControlState.botSession.sessionId) || null,
       receivedAt: new Date().toISOString()
     };
     if (!botControlState.executionResults) botControlState.executionResults = [];
@@ -1301,6 +1958,154 @@ export default async function handler(req) {
       events: [resultEvent]
     }));
   }
+  if (route === 'start-session') {
+    // Browser route. Creates an on-demand local worker session and returns a
+    // swingworker:// launch URL. No secrets are ever placed in the URL.
+    const isTestnetEnv = process.env.BINANCE_ENV === 'testnet';
+    const liveTradingEnabled = process.env.BOT_LIVE_TRADING_ENABLED === 'true';
+    const allowRealOrders = process.env.BOT_ALLOW_REAL_ORDERS === 'true';
+    if (liveTradingEnabled || allowRealOrders) {
+      return json(req, { ok: false, error: 'Live trading flags are active. Cannot start a worker session.' }, 403);
+    }
+    if (!isTestnetEnv) {
+      return json(req, { ok: false, error: 'Worker sessions require BINANCE_ENV=testnet.' }, 403);
+    }
+
+    const sessionId = `session_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+    const nowIso = new Date().toISOString();
+    const session = {
+      sessionId,
+      status: 'launch_requested',
+      mode: 'testnet',
+      createdAt: nowIso,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      stopRequested: false,
+      closePositionsOnStop: true,
+      realOrderSubmitted: false,
+    };
+    botControlState.botSession = session;
+
+    const controlUrl = requestOrigin(req) || getAllowedOrigins()[0] || 'https://swing-terminal-v6.netlify.app';
+    const launchUrl = `swingworker://start?session=${encodeURIComponent(sessionId)}&control=${encodeURIComponent(controlUrl)}`;
+
+    const startEvent = event('WORKER_SESSION_START_REQUESTED', 'info', 'Local worker launch requested. Waiting for swingworker:// helper to start the worker.', { sessionId });
+    botControlState.events = [startEvent, ...botControlState.events].slice(0, 30);
+    botControlState.updatedAt = startEvent.ts;
+
+    return json(req, publicState({
+      ok: true,
+      sessionId,
+      launchUrl,
+      controlUrl,
+      botSession: publicSession(),
+      events: [startEvent],
+      authMode: auth.authMode,
+    }));
+  }
+
+  if (route === 'stop-session') {
+    // Browser route. Flags the active session for a graceful stop. The worker
+    // must stop opening new positions, close existing testnet positions, then exit.
+    const session = botControlState.botSession;
+    if (!session) {
+      return json(req, { ok: false, error: 'No active worker session.' }, 400);
+    }
+    session.stopRequested = true;
+    session.status = 'stop_requested';
+    session.closePositionsOnStop = true;
+
+    // Defensively cancel any pending intent so no new position is opened on stop.
+    const intent = botControlState.executionIntent;
+    if (intent && (intent.status === 'pending' || intent.status === 'claimed')) {
+      intent.status = 'cancelled';
+      botControlState.executionIntent = intent;
+    }
+
+    const stopEvent = event('WORKER_SESSION_STOP_REQUESTED', 'info', 'Stop requested. Worker will close testnet positions before exit.', { sessionId: session.sessionId });
+    botControlState.events = [stopEvent, ...botControlState.events].slice(0, 30);
+    botControlState.updatedAt = stopEvent.ts;
+
+    return json(req, publicState({
+      ok: true,
+      botSession: publicSession(),
+      events: [stopEvent],
+      authMode: auth.authMode,
+    }));
+  }
+
+  if (route === 'worker-heartbeat') {
+    // Worker route. Persists the worker's liveness + reported lifecycle state.
+    const nowIso = new Date().toISOString();
+    const workerStatus = {
+      workerStatus: body.workerStatus === 'offline' ? 'offline' : 'online',
+      sessionId: body.sessionId || null,
+      hostname: typeof body.hostname === 'string' ? body.hostname.slice(0, 120) : null,
+      platform: typeof body.platform === 'string' ? body.platform.slice(0, 60) : null,
+      startedAt: body.startedAt || null,
+      lastSeenAt: nowIso,
+      pid: Number.isFinite(Number(body.pid)) ? Number(body.pid) : null,
+      mode: 'testnet',
+      currentState: typeof body.currentState === 'string' ? body.currentState.slice(0, 60) : null,
+      realProductionOrder: false,
+    };
+    botControlState.workerStatus = workerStatus;
+
+    // Reflect worker lifecycle into the session for the UI.
+    const session = botControlState.botSession;
+    if (session && (!body.sessionId || body.sessionId === session.sessionId)) {
+      if (workerStatus.currentState === 'stopped') {
+        session.status = 'stopped';
+      } else if (workerStatus.currentState === 'stopping') {
+        session.status = 'stopping';
+      } else if (!session.stopRequested && session.status === 'launch_requested') {
+        session.status = 'running';
+      }
+    }
+    botControlState.updatedAt = nowIso;
+
+    return json(req, {
+      ok: true,
+      stopRequested: session ? session.stopRequested === true : false,
+      closePositionsOnStop: session ? session.closePositionsOnStop !== false : true,
+      sessionId: session ? session.sessionId : null,
+    });
+  }
+
+  if (route === 'position-result') {
+    // Worker route. Worker reports open/closed testnet positions. No secrets.
+    if (!body || !body.symbol || !body.status) {
+      return json(req, { ok: false, error: 'Invalid payload' }, 400);
+    }
+    const record = {
+      symbol: String(body.symbol).toUpperCase().slice(0, 20),
+      baseAsset: typeof body.baseAsset === 'string' ? body.baseAsset.slice(0, 20) : null,
+      executedQty: body.executedQty != null ? String(body.executedQty).slice(0, 40) : null,
+      orderId: body.orderId != null ? String(body.orderId).slice(0, 40) : null,
+      closeOrderId: body.closeOrderId != null ? String(body.closeOrderId).slice(0, 40) : null,
+      status: String(body.status).slice(0, 30),
+      sessionId: body.sessionId || (botControlState.botSession && botControlState.botSession.sessionId) || null,
+      error: typeof body.error === 'string' ? body.error.slice(0, 240) : null,
+      testnet: true,
+      realProductionOrder: false,
+      receivedAt: new Date().toISOString(),
+    };
+    if (!botControlState.positionResults) botControlState.positionResults = [];
+    botControlState.positionResults = [record, ...botControlState.positionResults].slice(0, 30);
+
+    let posEvent;
+    if (record.status === 'closed') {
+      posEvent = event('WORKER_POSITION_CLOSED', 'info', `Local worker closed testnet position ${record.symbol} (order ${record.closeOrderId}).`, { record });
+    } else if (record.status === 'WORKER_CLOSE_FAILED') {
+      posEvent = event('WORKER_CLOSE_FAILED', 'warn', `Local worker failed to close testnet position ${record.symbol}. Manual attention required.`, { record });
+    } else {
+      posEvent = event('WORKER_POSITION_OPEN', 'info', `Local worker opened testnet position ${record.symbol} (order ${record.orderId}).`, { record });
+    }
+    botControlState.events = [posEvent, ...botControlState.events].slice(0, 30);
+    botControlState.updatedAt = posEvent.ts;
+
+    return json(req, { ok: true, positionResults: botControlState.positionResults.slice(0, 10) });
+  }
+
   if (route === 'testnet-order') {
     return await handleTestnetOrder(req, auth);
   }
