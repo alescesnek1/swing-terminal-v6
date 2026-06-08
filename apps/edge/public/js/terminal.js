@@ -5024,6 +5024,45 @@ function emergencyCloseTestnet() {
   _fleetSessionAction('emergency-close', 'Emergency close');
 }
 
+// Queue a single BTCUSDT testnet MARKET BUY smoke order for the SELECTED session.
+// Uses the exact, full sessionId from fleet state (never stripped/parsed) and the
+// shared fleet auth helper (Authorization: Bearer <Supabase token>).
+function createSmokeIntent() {
+  const id = Fleet.selectedId;
+  if (!id) { window.Toast?.error('No session selected', 'Select an online worker first.'); return; }
+  Fleet.smokePending = true;
+  Fleet.smokeError = null;
+  Fleet.smokeResult = null;
+  renderFleet();
+  _fleetFetch('POST', '/api/bot/create-smoke-execution-intent', { sessionId: id }).then((payload) => {
+    Fleet.smokePending = false;
+    Fleet.smokeError = null;
+    Fleet.smokeResult = {
+      sessionId: id,
+      intentId: payload.intent && payload.intent.id,
+      symbol: (payload.intent && payload.intent.symbol) || 'BTCUSDT',
+      existing: !!payload.existing,
+      message: 'Worker will execute BTCUSDT testnet smoke order',
+    };
+    try { window.Toast?.success('Smoke intent created', Fleet.smokeResult.message); } catch {}
+    refreshFleet();
+  }).catch((err) => {
+    Fleet.smokePending = false;
+    const p = err.payload || {};
+    Fleet.smokeError = {
+      sessionId: id,
+      selectedSessionId: id,
+      message: err.message,
+      status: err.status,
+      requestedSessionId: p.requestedSessionId,
+      knownSessionIdsForUser: p.knownSessionIdsForUser,
+      knownRunningSessionIdsForUser: p.knownRunningSessionIdsForUser,
+    };
+    try { window.Toast?.error('Smoke intent failed', err.message); } catch {}
+    renderFleet();
+  });
+}
+
 // ── Config form: built ONCE, backed by a draft so polling never clobbers edits ──
 const FLEET_CONFIG_DEFAULTS = { minTradeUsd: 5, maxTradeUsd: 10, maxDailyLossUsd: 3, maxDailyTrades: 5, maxOpenPositions: 1, stopLossPct: 3, takeProfitPct: 15, pauseOnMarketCrash: true, allowTestnet: true, allowLive: false };
 const FLEET_CONFIG_FIELDS = [
@@ -5391,6 +5430,53 @@ function renderFleet() {
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="resumeBotEntries()"' + (sel.pauseRequested && canStop ? '' : ' disabled') + '>RESUME ENTRIES</button>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseTestnet()"' + (canStop ? '' : ' disabled') + '>EMERGENCY CLOSE TESTNET</button>'
       + '</div>';
+
+    // ── Testnet smoke order ──
+    // Visible only when this session has an online worker, is running, has zero
+    // open positions, and is not stopping/paused. Live trading is hard-locked.
+    const smokeOpenCount = sel.openPositions ? sel.openPositions.length : 0;
+    const smokeBusy = Fleet.smokePending && Fleet.selectedId === sel.sessionId;
+    const smokeEligible = online
+      && (sel.status === 'running' || online)
+      && sel.mode !== 'production'
+      && smokeOpenCount === 0
+      && canStop
+      && !sel.stopRequested
+      && !sel.pauseRequested;
+    if (smokeEligible || smokeBusy) {
+      html += '<div class="fleet-smoke">'
+        + '<button type="button" class="paperbot-control-btn paperbot-control-btn--smoke" onclick="createSmokeIntent()"' + (smokeBusy ? ' disabled' : '') + '>'
+        + (smokeBusy ? 'CREATING SMOKE INTENT...' : 'CREATE TESTNET SMOKE ORDER') + '</button>'
+        + '<span class="fleet-smoke__hint">Queues one BTCUSDT testnet MARKET BUY for this session (≤ $10).</span>'
+        + '</div>';
+    } else if (smokeOpenCount > 0) {
+      html += '<div class="fleet-smoke__note">Smoke order hidden: close the open position first (open positions: ' + smokeOpenCount + ').</div>';
+    }
+    if (Fleet.smokeResult && Fleet.smokeResult.sessionId === sel.sessionId) {
+      const r = Fleet.smokeResult;
+      html += '<div class="fleet-smoke-result">'
+        + '<div class="fleet-smoke-result__title">' + (r.existing ? 'SMOKE INTENT ALREADY PENDING' : 'SMOKE INTENT CREATED') + '</div>'
+        + '<div class="fleet-smoke-result__body">' + _e(r.message) + ' — ' + _e(r.symbol)
+        + (r.intentId ? ' · ' + _e(String(r.intentId).slice(0, 18)) : '') + '</div>'
+        + '</div>';
+    }
+    if (Fleet.smokeError && Fleet.smokeError.selectedSessionId === sel.sessionId) {
+      const er = Fleet.smokeError;
+      let dbg = '';
+      if (er.status === 404) {
+        dbg = '<div class="fleet-smoke-error__dbg">'
+          + 'requestedSessionId: <code>' + _e(er.requestedSessionId || '—') + '</code><br>'
+          + 'selectedSessionId: <code>' + _e(er.selectedSessionId || '—') + '</code><br>'
+          + 'knownSessionIdsForUser: <code>' + _e((er.knownSessionIdsForUser || []).join(', ') || '—') + '</code><br>'
+          + 'knownRunningSessionIdsForUser: <code>' + _e((er.knownRunningSessionIdsForUser || []).join(', ') || '—') + '</code>'
+          + '</div>';
+      }
+      html += '<div class="fleet-smoke-error">'
+        + '<div class="fleet-smoke-error__title">SMOKE INTENT FAILED' + (er.status ? ' (' + _e(er.status) + ')' : '') + '</div>'
+        + '<div class="fleet-smoke-error__body">' + _e(er.message || 'Unknown error') + '</div>'
+        + dbg
+        + '</div>';
+    }
 
     // Positions table
     html += '<div class="fleet-section-title">POSITIONS</div>';

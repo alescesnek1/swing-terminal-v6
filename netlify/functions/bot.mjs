@@ -1706,8 +1706,12 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
   // POST /api/bot/create-execution-intent  (session-scoped, config + regime gated)
   if (base === 'create-execution-intent' || base === 'create-smoke-execution-intent') {
     if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
-    const sessionId = body && body.sessionId;
-    if (!sessionId) return json(req, { ok: false, error: 'sessionId is required' }, 400);
+    // Accept several body keys for client compatibility. The FULL id is used
+    // verbatim — never normalized and never stripped of the "session_" prefix.
+    const sessionId = (body && (body.sessionId || body.targetSessionId || body.botSessionId)) || '';
+    if (!sessionId || typeof sessionId !== 'string') {
+      return json(req, { ok: false, error: 'sessionId is required' }, 400);
+    }
     if (process.env.BOT_LIVE_TRADING_ENABLED === 'true' || process.env.BOT_ALLOW_REAL_ORDERS === 'true') {
       return json(req, { ok: false, error: 'Live trading flags are active.' }, 403);
     }
@@ -1716,11 +1720,38 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     }
 
     const fleet = await loadFleet();
+    // Exact, full-id lookup using the same store as worker-heartbeat / worker-session.
     const session = fleet.botSessions[sessionId];
-    if (!session) return json(req, { ok: false, error: 'Session not found' }, 404);
+    if (!session) {
+      // Debug-safe payload so a wrong/partial id is impossible to miss.
+      const mine = Object.values(fleet.botSessions || {}).filter((s) => canControlSession(identity, s));
+      const knownSessionIdsForUser = mine.map((s) => s.sessionId);
+      const knownRunningSessionIdsForUser = mine
+        .filter((s) => s.status === 'running' || workerIsOnline(sessionWorkerStatus(fleet, s)))
+        .map((s) => s.sessionId);
+      return json(req, {
+        ok: false,
+        error: 'Session not found',
+        requestedSessionId: sessionId,
+        knownSessionIdsForUser,
+        knownRunningSessionIdsForUser,
+      }, 404);
+    }
     if (!canControlSession(identity, session)) return json(req, { ok: false, error: 'Forbidden' }, 403);
     if (session.stopRequested) return json(req, { ok: false, error: 'Session is stopping.' }, 409);
     if (session.pauseRequested) return json(req, { ok: false, error: 'Session entries are paused.' }, 409);
+
+    // Require an online/running local worker bound to THIS session before queuing
+    // an intent — otherwise no one will ever pick it up.
+    const sessWorker = sessionWorkerStatus(fleet, session);
+    if (!workerIsOnline(sessWorker)) {
+      return json(req, {
+        ok: false,
+        error: 'Worker not online',
+        requestedSessionId: sessionId,
+        reason: 'No recent heartbeat from a local worker for this session. Start the worker, then retry.',
+      }, 409);
+    }
 
     const config = completeBotConfig(session.config || getUserConfig(fleet, identity.userId));
 
@@ -1744,12 +1775,19 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       return json(req, { ok: false, error: 'Entries paused: market crash regime.', regime, blockedReason: regime.reason.join('; ') }, 409);
     }
 
-    // Existing pending/claimed intent for this session blocks a duplicate.
+    // Idempotency: if a pending/claimed intent already exists for THIS session,
+    // return it instead of creating a duplicate (no global/cross-session pickup).
     expireStaleIntent(fleet, sessionId);
     const existing = fleet.executionIntents[sessionId];
     if (existing && (existing.status === 'pending' || existing.status === 'claimed')) {
       await saveFleet(fleet);
-      return json(req, { ok: false, error: 'An execution intent is already pending or claimed for this session.' }, 409);
+      return json(req, {
+        ok: true,
+        existing: true,
+        intent: existing,
+        regime,
+        session: publicSessionView(fleet, session),
+      });
     }
 
     const isSmoke = base === 'create-smoke-execution-intent';
