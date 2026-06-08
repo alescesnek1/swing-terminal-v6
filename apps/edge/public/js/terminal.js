@@ -2612,10 +2612,15 @@ function _resolveViewTarget(v, el) {
 function _applyViewDisplay(target, v) {
   if (!target) return;
   const name = _viewNameFromId(target.id || v);
-  const flex = name === 'bot' || name === 'heatmap' || name === 'manual' || name === 'calendar';
+  const flex = name === 'heatmap' || name === 'manual' || name === 'calendar';
   target.style.display = flex ? 'flex' : 'block';
   target.style.flexDirection = flex ? 'column' : '';
-  if (name === 'bot' || name === 'calendar') {
+  if (name === 'bot') {
+    target.style.height = 'calc(100vh - 85px)';
+    target.style.overflowY = 'auto';
+    target.style.overflowX = 'hidden';
+    target.style.overscrollBehavior = 'contain';
+  } else if (name === 'calendar') {
     target.style.height = 'calc(100vh - 85px)';
     target.style.overflow = 'hidden';
   }
@@ -2637,6 +2642,9 @@ function sv(v, el) {
     x.style.flexDirection = '';
     x.style.height = '';
     x.style.overflow = '';
+    x.style.overflowX = '';
+    x.style.overflowY = '';
+    x.style.overscrollBehavior = '';
   });
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
   target.hidden = false;
@@ -4967,14 +4975,33 @@ function revertBotConfig() {
     .catch(() => _fleetApplyConfigToForm(FLEET_CONFIG_DEFAULTS));
 }
 
+function _fleetEnsureLegacyDryRunCollapsed(view) {
+  if (!view || document.getElementById('legacy-dryrun-scanner')) return;
+  const legacyNodes = Array.from(view.children).filter((el) => el && el.id !== 'bot-fleet-panel');
+  if (!legacyNodes.length) return;
+
+  const details = document.createElement('details');
+  details.id = 'legacy-dryrun-scanner';
+  details.className = 'bot-fleet-legacy';
+  const summary = document.createElement('summary');
+  summary.textContent = 'Legacy Dry-Run Scanner';
+  const body = document.createElement('div');
+  body.className = 'bot-fleet-legacy__body';
+  for (const node of legacyNodes) body.appendChild(node);
+  details.appendChild(summary);
+  details.appendChild(body);
+  view.appendChild(details);
+}
+
 function _fleetEnsurePanel() {
   const view = document.getElementById('view-bot') || document.getElementById('v-bot');
   if (!view) return null;
+  _fleetEnsureLegacyDryRunCollapsed(view);
   let panel = document.getElementById('bot-fleet-panel');
   if (panel) return panel;
   panel = document.createElement('div');
   panel.id = 'bot-fleet-panel';
-  panel.className = 'bot-fleet';
+  panel.className = 'bot-fleet pb-fleet-root';
   // #bot-fleet-dynamic is rebuilt on every poll; #bot-fleet-config is built ONCE
   // and managed via draft state so polling never wipes what the user is typing.
   const dyn = document.createElement('div');

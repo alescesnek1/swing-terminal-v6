@@ -29,6 +29,7 @@ echo "  Repo root : ${REPO_ROOT}"
 echo "  Launcher  : ${LAUNCH_SCRIPT}"
 
 mkdir -p "${MACOS_DIR}"
+REPO_ROOT_Q="$(printf '%q' "${REPO_ROOT}")"
 
 cat > "${PLIST}" <<'PLIST_EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -69,7 +70,7 @@ cat > "${STUB}" <<STUB_EOF
 #!/usr/bin/env bash
 # Launcher stub. The opened URL is delivered as the first argument by the
 # AppleScript bridge below, or via the 'open' event captured by osascript.
-REPO_ROOT="${REPO_ROOT}"
+REPO_ROOT=${REPO_ROOT_Q}
 URL="\${1:-}"
 if [ -z "\${URL}" ]; then
   exit 0
@@ -82,7 +83,7 @@ chmod +x "${STUB}"
 # the standard "open location" event, then calls our shell launcher.
 cat > "${MACOS_DIR}/handler.applescript" <<APPLE_EOF
 on open location this_URL
-    do shell script "'" & "${REPO_ROOT}/scripts/macos-launch-worker.sh" & "' " & quoted form of this_URL
+    do shell script quoted form of "${LAUNCH_SCRIPT}" & " " & quoted form of this_URL
 end open location
 APPLE_EOF
 

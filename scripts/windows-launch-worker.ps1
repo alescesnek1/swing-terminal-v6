@@ -24,14 +24,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$logDir = Join-Path $repoRoot 'logs'
-$logFile = Join-Path $logDir 'local-binance-worker.log'
-if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$LogDir = Join-Path $RepoRoot 'logs'
+$OutLog = Join-Path $LogDir 'local-binance-worker.log'
+$ErrLog = Join-Path $LogDir 'local-binance-worker.err.log'
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+function Quote-PwshSingle([string]$s) {
+    "'" + ($s -replace "'", "''") + "'"
+}
 
 function Write-Log([string]$msg) {
     $line = ('[{0}] {1}' -f (Get-Date -Format o), $msg)
-    Add-Content -Path $logFile -Value $line -Encoding utf8
+    Add-Content -Path $OutLog -Value $line -Encoding utf8
 }
 
 # --- Parse the swingworker:// URL ---
@@ -67,7 +72,7 @@ if ($action -ne 'start') {
 }
 
 # --- Load .env.worker ---
-$envFile = Join-Path $repoRoot '.env.worker'
+$envFile = Join-Path $RepoRoot '.env.worker'
 if (-not (Test-Path $envFile)) {
     Write-Log ".env.worker not found at $envFile. Copy .env.worker.example and fill in testnet keys."
     [System.Windows.Forms.MessageBox]::Show("Missing .env.worker.`nCopy .env.worker.example to .env.worker and fill in your Binance TESTNET keys and BOT_WORKER_TOKEN.", 'SwingWorker setup required') 2>$null | Out-Null
@@ -93,16 +98,41 @@ if ($sessionId) { $env:WORKER_SESSION_ID = $sessionId }
 if ($control) { $env:BOT_CONTROL_URL = $control }
 
 Write-Log "Launching worker (control=$($env:BOT_CONTROL_URL) mode=$($env:WORKER_MODE))"
+Write-Log "[LAUNCHER] Repo root: $RepoRoot"
+Write-Log "[LAUNCHER] Session: $sessionId"
+Write-Log "[LAUNCHER] Log: $OutLog"
 
 # --- Launch the worker in a visible window, teeing output to the log ---
-$argList = @('--session', $sessionId)
-$workerScript = Join-Path $repoRoot 'scripts\local-binance-worker.mjs'
-$nodeCmd = 'node "{0}" {1} 2>&1 | Tee-Object -FilePath "{2}" -Append' -f $workerScript, ($argList -join ' '), $logFile
-$inner = "Set-Location '$repoRoot'; Write-Host 'SwingWorker local testnet worker (session $sessionId)'; $nodeCmd"
+$safeSessionForFile = if ($sessionId) { ($sessionId -replace '[^A-Za-z0-9_.-]', '_') } else { 'missing-session' }
+$runnerPath = Join-Path $LogDir ("run-worker-session-{0}.ps1" -f $safeSessionForFile)
+$quotedRepoRoot = Quote-PwshSingle $RepoRoot
+$quotedOutLog = Quote-PwshSingle $OutLog
+$quotedErrLog = Quote-PwshSingle $ErrLog
+$sessionArg = if ($sessionId) { $sessionId } else { '' }
+$quotedSession = Quote-PwshSingle $sessionArg
+
+$runner = @"
+`$ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath $quotedRepoRoot
+Write-Host '[LAUNCHER] Repo root: ' -NoNewline
+Write-Host $quotedRepoRoot
+Write-Host '[LAUNCHER] Session: ' -NoNewline
+Write-Host $quotedSession
+Write-Host '[LAUNCHER] Log: ' -NoNewline
+Write-Host $quotedOutLog
+try {
+    npm run bot:worker -- --session $quotedSession 2>&1 | Tee-Object -FilePath $quotedOutLog -Append
+} catch {
+    `$msg = (`$_ | Out-String)
+    Add-Content -LiteralPath $quotedErrLog -Value `$msg -Encoding utf8
+    throw
+}
+"@
+Set-Content -LiteralPath $runnerPath -Value $runner -Encoding utf8
 
 Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') `
-    -ArgumentList @('-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $inner) `
-    -WorkingDirectory $repoRoot
+    -ArgumentList @('-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runnerPath) `
+    -WorkingDirectory $RepoRoot
 
 Write-Log 'Worker launch dispatched.'
 exit 0
