@@ -4,7 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "worker:register:windows": "powershell -ExecutionPolicy Bypass -File scripts/register-windows-worker-protocol.ps1",
+    "worker:unregister:windows": "powershell -ExecutionPolicy Bypass -File scripts/unregister-windows-worker-protocol.ps1",
+    "worker:register:macos": "bash scripts/register-macos-worker-protocol.sh",
+    "worker:unregister:macos": "bash scripts/unregister-macos-worker-protocol.sh",
+    "worker:macos:setup": "bash scripts/setup-macos-worker.sh",
+    "worker:macos:uninstall": "bash scripts/uninstall-macos-worker.sh",
+    "worker:macos:logs": "tail -f logs/local-binance-worker.log logs/local-binance-worker.err.log",
     "bot:worker": "node scripts/local-binance-worker.mjs",
     "bot:worker:preflight": "node scripts/local-binance-worker.mjs --preflight"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
   }
 }

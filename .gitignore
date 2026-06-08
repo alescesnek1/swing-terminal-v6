@@ -1,6 +1,8 @@
 # Zabezpečení
 .env
 .env.*
+# Keep the worker env template tracked (it holds only placeholders, no secrets).
+!.env.worker.example
 netlify.toml
 .netlify/
 
@@ -12,3 +14,10 @@ package-lock.json
 npm-debug.log*
 .DS_Store
 Thumbs.db
+
+# Worker
+.env.worker
+.paperbot-worker-state.json
+.paperbot-worker-state*.json
+logs/local-binance-worker.log
+logs/local-binance-worker.err.log
