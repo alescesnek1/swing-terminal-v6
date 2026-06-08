@@ -4748,7 +4748,7 @@ async function _fleetFetch(method, path, body) {
   const res = await fetch(path, init);
   const payload = await res.json().catch(() => ({}));
   if (!res.ok || payload.ok === false) {
-    throw new Error(payload.error || (Array.isArray(payload.errors) ? payload.errors.join('; ') : '') || ('HTTP ' + res.status));
+    throw new Error((Array.isArray(payload.errors) && payload.errors.length ? payload.errors.join('; ') : '') || payload.error || ('HTTP ' + res.status));
   }
   return payload;
 }
@@ -4817,40 +4817,154 @@ function emergencyCloseTestnet() {
   _fleetSessionAction('emergency-close', 'Emergency close');
 }
 
-async function _loadBotConfigIntoEditor() {
-  try {
-    const payload = await _fleetFetch('GET', '/api/bot/config');
-    Fleet.configLoaded = true;
-    _fleetFillConfig(payload.config);
-  } catch (err) { console.warn('[Fleet] config load failed:', err.message); }
+// ── Config form: built ONCE, backed by a draft so polling never clobbers edits ──
+const FLEET_CONFIG_DEFAULTS = { minTradeUsd: 5, maxTradeUsd: 10, maxDailyLossUsd: 3, maxDailyTrades: 5, maxOpenPositions: 1, stopLossPct: 3, takeProfitPct: 15, pauseOnMarketCrash: true, allowTestnet: true, allowLive: false };
+const FLEET_CONFIG_FIELDS = [
+  { name: 'minTradeUsd', label: 'Min trade $', min: 1, step: 0.01 },
+  { name: 'maxTradeUsd', label: 'Max trade $', min: 1, max: 10, step: 0.01 },
+  { name: 'maxDailyLossUsd', label: 'Max daily loss $', min: 0, step: 0.01 },
+  { name: 'maxDailyTrades', label: 'Max daily trades', min: 1, step: 1 },
+  { name: 'maxOpenPositions', label: 'Max open positions', min: 1, max: 5, step: 1 },
+  { name: 'stopLossPct', label: 'Stop loss %', min: 0.1, max: 50, step: 0.1 },
+  { name: 'takeProfitPct', label: 'Take profit %', min: 0.1, max: 100, step: 0.1 },
+];
+if (typeof window !== 'undefined') {
+  if (!window.__botFleetConfigDraft) window.__botFleetConfigDraft = { ...FLEET_CONFIG_DEFAULTS };
+  if (typeof window.__botFleetConfigDirty !== 'boolean') window.__botFleetConfigDirty = false;
 }
 
-function _fleetFillConfig(cfg) {
-  if (!cfg) return;
-  const map = { minTradeUsd: 'cfg-min', maxTradeUsd: 'cfg-max', maxDailyLossUsd: 'cfg-loss', maxDailyTrades: 'cfg-trades', maxOpenPositions: 'cfg-pos', stopLossPct: 'cfg-sl', takeProfitPct: 'cfg-tp' };
-  for (const key of Object.keys(map)) {
-    const el = document.getElementById(map[key]);
-    if (el && document.activeElement !== el) el.value = cfg[key];
+function _fleetNum(v, fallback) { const n = Number(v); return Number.isFinite(n) ? n : fallback; }
+
+function _fleetCompleteConfig(cfg) {
+  const src = cfg && typeof cfg === 'object' ? cfg : {};
+  const out = { ...FLEET_CONFIG_DEFAULTS };
+  for (const f of FLEET_CONFIG_FIELDS) out[f.name] = _fleetNum(src[f.name], FLEET_CONFIG_DEFAULTS[f.name]);
+  out.pauseOnMarketCrash = src.pauseOnMarketCrash !== false;
+  out.allowTestnet = true;
+  out.allowLive = false;
+  return out;
+}
+
+function _fleetConfigFocused() {
+  const a = document.activeElement;
+  return !!(a && a.closest && a.closest('#bot-fleet-config'));
+}
+
+function _fleetSetConfigStatus(text, kind) {
+  const el = document.getElementById('fleet-cfg-status');
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = kind === 'dirty' ? '#ffaa00' : kind === 'error' ? '#ff4a4a' : '#00ff80';
+}
+
+function _fleetReadConfigFromForm() {
+  const out = {};
+  for (const f of FLEET_CONFIG_FIELDS) {
+    const el = document.getElementById('cfg-' + f.name);
+    out[f.name] = el ? _fleetNum(el.value, FLEET_CONFIG_DEFAULTS[f.name]) : FLEET_CONFIG_DEFAULTS[f.name];
   }
-  const crash = document.getElementById('cfg-crash');
-  if (crash && document.activeElement !== crash) crash.checked = cfg.pauseOnMarketCrash !== false;
+  const crash = document.getElementById('cfg-pauseOnMarketCrash');
+  out.pauseOnMarketCrash = crash ? !!crash.checked : true;
+  out.allowTestnet = true;
+  out.allowLive = false;
+  return out;
+}
+
+function _fleetOnConfigInput() {
+  window.__botFleetConfigDirty = true;
+  window.__botFleetConfigDraft = _fleetReadConfigFromForm();
+  _fleetSetConfigStatus('Unsaved changes', 'dirty');
+  const errEl = document.getElementById('fleet-cfg-error');
+  if (errEl) errEl.textContent = '';
+}
+
+function _fleetOnConfigChange(ev) {
+  const el = ev && ev.currentTarget;
+  const field = el && FLEET_CONFIG_FIELDS.find((f) => f.name === el.name);
+  if (field && !Number.isFinite(Number(el.value))) el.value = String(FLEET_CONFIG_DEFAULTS[field.name]);
+  _fleetOnConfigInput();
+}
+
+function _fleetApplyConfigToForm(cfg) {
+  cfg = _fleetCompleteConfig(cfg);
+  for (const f of FLEET_CONFIG_FIELDS) {
+    const el = document.getElementById('cfg-' + f.name);
+    if (el) el.value = String(cfg[f.name]);
+  }
+  const crash = document.getElementById('cfg-pauseOnMarketCrash');
+  if (crash) crash.checked = cfg.pauseOnMarketCrash !== false;
+  window.__botFleetConfigDraft = _fleetReadConfigFromForm();
+  window.__botFleetConfigDirty = false;
+  _fleetSetConfigStatus('Config saved', 'saved');
+}
+
+function _fleetBuildConfigForm(container) {
+  const d = _fleetCompleteConfig(window.__botFleetConfigDraft);
+  let html = '<div class="fleet-section-title">BOT CONFIG (TESTNET, max trade ≤ $10)</div><div class="fleet-config-grid">';
+  for (const f of FLEET_CONFIG_FIELDS) {
+    const val = String(_fleetNum(d[f.name], FLEET_CONFIG_DEFAULTS[f.name]));
+    const attrs = 'type="number" name="' + f.name + '" id="cfg-' + f.name + '" value="' + val + '"'
+      + (f.min != null ? ' min="' + f.min + '"' : '')
+      + (f.max != null ? ' max="' + f.max + '"' : '')
+      + ' step="' + f.step + '"';
+    html += '<label class="fleet-cfg-field"><span>' + f.label + '</span><input ' + attrs + '></label>';
+  }
+  html += '<label class="fleet-cfg-check"><input type="checkbox" name="pauseOnMarketCrash" id="cfg-pauseOnMarketCrash"' + (d.pauseOnMarketCrash !== false ? ' checked' : '') + '> Pause on market CRASH</label>';
+  html += '</div><div class="fleet-cfg-actions">'
+    + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="saveBotConfig()">SAVE CONFIG</button>'
+    + '<button type="button" class="paperbot-control-btn" onclick="revertBotConfig()">REVERT</button>'
+    + '<span id="fleet-cfg-status" class="fleet-cfg-status">Config saved</span>'
+    + '</div>'
+    + '<div id="fleet-cfg-error" class="fleet-cfg-error"></div>'
+    + '<span class="fleet-cfg-note">Live trading is locked. allowLive=false.</span>';
+  container.innerHTML = html;
+  for (const f of FLEET_CONFIG_FIELDS) {
+    const el = document.getElementById('cfg-' + f.name);
+    if (el) {
+      el.addEventListener('input', _fleetOnConfigInput);
+      el.addEventListener('change', _fleetOnConfigChange);
+    }
+  }
+  const crash = document.getElementById('cfg-pauseOnMarketCrash');
+  if (crash) crash.addEventListener('change', _fleetOnConfigInput);
+}
+
+async function _fleetInitConfig() {
+  if (Fleet.configLoaded) return;
+  Fleet.configLoaded = true;
+  try {
+    const payload = await _fleetFetch('GET', '/api/bot/config');
+    // Initial load only: apply unless the user has already started editing.
+    if (!window.__botFleetConfigDirty && !_fleetConfigFocused()) _fleetApplyConfigToForm(payload.config);
+  } catch (err) {
+    console.warn('[Fleet] config load failed:', err.message);
+    Fleet.configLoaded = false; // allow retry on next render
+  }
 }
 
 function saveBotConfig() {
-  const body = {
-    minTradeUsd: Number(document.getElementById('cfg-min')?.value),
-    maxTradeUsd: Number(document.getElementById('cfg-max')?.value),
-    maxDailyLossUsd: Number(document.getElementById('cfg-loss')?.value),
-    maxDailyTrades: Number(document.getElementById('cfg-trades')?.value),
-    maxOpenPositions: Number(document.getElementById('cfg-pos')?.value),
-    stopLossPct: Number(document.getElementById('cfg-sl')?.value),
-    takeProfitPct: Number(document.getElementById('cfg-tp')?.value),
-    pauseOnMarketCrash: !!document.getElementById('cfg-crash')?.checked,
-  };
+  const body = _fleetReadConfigFromForm();
+  const errEl = document.getElementById('fleet-cfg-error');
+  if (errEl) errEl.textContent = '';
+  _fleetSetConfigStatus('Saving…', 'dirty');
   _fleetFetch('POST', '/api/bot/config', body).then((payload) => {
-    window.Toast?.success('Config saved', 'Applies to your next session.');
-    _fleetFillConfig(payload.config);
-  }).catch((err) => window.Toast?.error('Config invalid', err.message));
+    _fleetApplyConfigToForm(payload.config);
+    try { window.Toast?.success('CONFIG SAVED', 'Applies to your next session.'); } catch {}
+    refreshFleet();
+  }).catch((err) => {
+    window.__botFleetConfigDirty = true;
+    _fleetSetConfigStatus('Unsaved changes', 'dirty');
+    if (errEl) errEl.textContent = err.message;
+    window.Toast?.error('Config invalid', err.message);
+  });
+}
+
+function revertBotConfig() {
+  const errEl = document.getElementById('fleet-cfg-error');
+  if (errEl) errEl.textContent = '';
+  _fleetFetch('GET', '/api/bot/config')
+    .then((payload) => _fleetApplyConfigToForm(payload.config))
+    .catch(() => _fleetApplyConfigToForm(FLEET_CONFIG_DEFAULTS));
 }
 
 function _fleetEnsurePanel() {
@@ -4861,7 +4975,18 @@ function _fleetEnsurePanel() {
   panel = document.createElement('div');
   panel.id = 'bot-fleet-panel';
   panel.className = 'bot-fleet';
+  // #bot-fleet-dynamic is rebuilt on every poll; #bot-fleet-config is built ONCE
+  // and managed via draft state so polling never wipes what the user is typing.
+  const dyn = document.createElement('div');
+  dyn.id = 'bot-fleet-dynamic';
+  const cfg = document.createElement('div');
+  cfg.id = 'bot-fleet-config';
+  cfg.className = 'fleet-config';
+  panel.appendChild(dyn);
+  panel.appendChild(cfg);
   view.insertBefore(panel, view.firstChild);
+  _fleetBuildConfigForm(cfg);   // defaults render immediately
+  _fleetInitConfig();           // initial server load (won't clobber edits)
   return panel;
 }
 
@@ -4970,38 +5095,23 @@ function renderFleet() {
   }
   html += '</div></div>'; // detail + body
 
-  // Config editor (per user) + event feed
-  html += '<div class="fleet-bottom">';
-  html += '<div class="fleet-config"><div class="fleet-section-title">BOT CONFIG (TESTNET, max trade ≤ $10)</div>'
-    + '<div class="fleet-config-grid">'
-    + _cfgField('Min trade $', 'cfg-min', 'number') + _cfgField('Max trade $', 'cfg-max', 'number')
-    + _cfgField('Max daily loss $', 'cfg-loss', 'number') + _cfgField('Max daily trades', 'cfg-trades', 'number')
-    + _cfgField('Max open positions', 'cfg-pos', 'number') + _cfgField('Stop loss %', 'cfg-sl', 'number')
-    + _cfgField('Take profit %', 'cfg-tp', 'number')
-    + '<label class="fleet-cfg-check"><input type="checkbox" id="cfg-crash" checked> Pause on market CRASH</label>'
-    + '</div>'
-    + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="saveBotConfig()">SAVE CONFIG</button>'
-    + '<span class="fleet-cfg-note">Live trading is locked. allowLive=false.</span>'
-    + '</div>';
-
-  html += '<div class="fleet-events"><div class="fleet-section-title">EVENT FEED</div>';
+  // Event feed (dynamic). The config form lives in a SEPARATE, build-once
+  // container (#bot-fleet-config) so this poll-driven re-render never touches it.
+  html += '<div class="fleet-bottom"><div class="fleet-events"><div class="fleet-section-title">EVENT FEED</div>';
   const events = data.events || [];
   if (!events.length) html += '<div class="fleet-empty">No events.</div>';
   else for (const ev of events.slice(0, 30)) {
     const sc = ev.severity === 'warn' ? '#ffaa00' : ev.severity === 'error' ? '#ff4a4a' : '#8899aa';
     html += '<div class="fleet-event"><span style="color:' + sc + '">' + _e(ev.type) + '</span> ' + _e(ev.message) + '</div>';
   }
-  html += '</div>';
-  html += '</div>';
+  html += '</div></div>';
 
-  panel.innerHTML = html;
-
-  // Load config once (after inputs exist) so the editor is pre-filled.
-  if (!Fleet.configLoaded) _loadBotConfigIntoEditor();
-}
-
-function _cfgField(label, id, type) {
-  return '<label class="fleet-cfg-field"><span>' + label + '</span><input id="' + id + '" type="' + type + '" step="any"></label>';
+  // Only the dynamic half is replaced — config inputs are untouched.
+  const dyn = document.getElementById('bot-fleet-dynamic');
+  if (dyn) dyn.innerHTML = html;
+  if (data.config && !window.__botFleetConfigDirty && !_fleetConfigFocused()) _fleetApplyConfigToForm(data.config);
+  // Retry the initial config load if it failed earlier.
+  if (!Fleet.configLoaded) _fleetInitConfig();
 }
 
 function _rebuildSymbolIndex() {

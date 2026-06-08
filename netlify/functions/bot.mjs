@@ -1075,10 +1075,10 @@ const TESTNET_MAX_TRADE_USD = 10;
 const FLEET_COMMAND_TYPES = new Set(['STOP', 'PAUSE', 'RESUME', 'EMERGENCY_CLOSE']);
 
 const DEFAULT_BOT_CONFIG = {
-  minTradeUsd: 1,
+  minTradeUsd: 5,
   maxTradeUsd: 10,
-  maxDailyLossUsd: 25,
-  maxDailyTrades: 10,
+  maxDailyLossUsd: 3,
+  maxDailyTrades: 5,
   maxOpenPositions: 1,
   stopLossPct: 3,
   takeProfitPct: 15,
@@ -1087,46 +1087,52 @@ const DEFAULT_BOT_CONFIG = {
   allowLive: false,
 };
 
-function numOr(value, fallback) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
-function intOr(value, fallback) {
-  const n = Math.floor(Number(value));
-  return Number.isFinite(n) ? n : fallback;
+// Coerce a possibly-string value to a finite number. Missing/blank -> fallback.
+// Present-but-not-finite (NaN/Infinity/garbage) -> push an error and use fallback.
+function coerceNum(raw, fallback, label, errors, integer) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  let n = Number(raw);
+  if (!Number.isFinite(n)) { errors.push(`${label} must be a finite number`); return fallback; }
+  if (integer) n = Math.floor(n);
+  return n;
 }
 
 // Server-side hard validation. Returns { ok, errors, config }.
 function validateBotConfig(input) {
   const src = input && typeof input === 'object' ? input : {};
-  const c = {
-    minTradeUsd: numOr(src.minTradeUsd, DEFAULT_BOT_CONFIG.minTradeUsd),
-    maxTradeUsd: numOr(src.maxTradeUsd, DEFAULT_BOT_CONFIG.maxTradeUsd),
-    maxDailyLossUsd: numOr(src.maxDailyLossUsd, DEFAULT_BOT_CONFIG.maxDailyLossUsd),
-    maxDailyTrades: intOr(src.maxDailyTrades, DEFAULT_BOT_CONFIG.maxDailyTrades),
-    maxOpenPositions: intOr(src.maxOpenPositions, DEFAULT_BOT_CONFIG.maxOpenPositions),
-    stopLossPct: numOr(src.stopLossPct, DEFAULT_BOT_CONFIG.stopLossPct),
-    takeProfitPct: numOr(src.takeProfitPct, DEFAULT_BOT_CONFIG.takeProfitPct),
-    pauseOnMarketCrash: src.pauseOnMarketCrash !== false,
-    allowTestnet: true,
-    allowLive: false, // hard-locked
-  };
   const errors = [];
+  const c = {
+    minTradeUsd: coerceNum(src.minTradeUsd, DEFAULT_BOT_CONFIG.minTradeUsd, 'minTradeUsd', errors),
+    maxTradeUsd: coerceNum(src.maxTradeUsd, DEFAULT_BOT_CONFIG.maxTradeUsd, 'maxTradeUsd', errors),
+    maxDailyLossUsd: coerceNum(src.maxDailyLossUsd, DEFAULT_BOT_CONFIG.maxDailyLossUsd, 'maxDailyLossUsd', errors),
+    maxDailyTrades: coerceNum(src.maxDailyTrades, DEFAULT_BOT_CONFIG.maxDailyTrades, 'maxDailyTrades', errors, true),
+    maxOpenPositions: coerceNum(src.maxOpenPositions, DEFAULT_BOT_CONFIG.maxOpenPositions, 'maxOpenPositions', errors, true),
+    stopLossPct: coerceNum(src.stopLossPct, DEFAULT_BOT_CONFIG.stopLossPct, 'stopLossPct', errors),
+    takeProfitPct: coerceNum(src.takeProfitPct, DEFAULT_BOT_CONFIG.takeProfitPct, 'takeProfitPct', errors),
+    pauseOnMarketCrash: src.pauseOnMarketCrash !== false,
+    allowTestnet: true, // forced for testnet phase
+    allowLive: false,   // hard-locked
+  };
   if (!(c.minTradeUsd >= 1)) errors.push('minTradeUsd must be >= 1');
+  if (!(c.maxTradeUsd >= 1)) errors.push('maxTradeUsd must be >= 1');
   if (!(c.maxTradeUsd <= TESTNET_MAX_TRADE_USD)) errors.push(`maxTradeUsd must be <= ${TESTNET_MAX_TRADE_USD} for testnet phase`);
   if (!(c.minTradeUsd <= c.maxTradeUsd)) errors.push('minTradeUsd must be <= maxTradeUsd');
   if (!(c.maxDailyLossUsd >= 0)) errors.push('maxDailyLossUsd must be >= 0');
   if (!(c.maxDailyTrades >= 1)) errors.push('maxDailyTrades must be >= 1');
   if (!(c.maxOpenPositions >= 1 && c.maxOpenPositions <= 5)) errors.push('maxOpenPositions must be between 1 and 5');
-  if (!(c.stopLossPct > 0 && c.stopLossPct <= 50)) errors.push('stopLossPct must be in (0, 50]');
-  if (!(c.takeProfitPct > 0 && c.takeProfitPct <= 200)) errors.push('takeProfitPct must be in (0, 200]');
-  if (c.allowLive !== false) errors.push('live trading is locked (allowLive must be false)');
+  if (!(c.stopLossPct > 0 && c.stopLossPct <= 50)) errors.push('stopLossPct must be > 0 (<= 50)');
+  if (!(c.takeProfitPct > 0 && c.takeProfitPct <= 100)) errors.push('takeProfitPct must be > 0 (<= 100)');
   return { ok: errors.length === 0, errors, config: c };
+}
+
+function completeBotConfig(input) {
+  const v = validateBotConfig(input);
+  return v.ok ? v.config : { ...DEFAULT_BOT_CONFIG };
 }
 
 function getUserConfig(fleet, userId) {
   const stored = fleet.botConfigs && fleet.botConfigs[userId];
-  return stored ? { ...DEFAULT_BOT_CONFIG, ...stored, allowTestnet: true, allowLive: false } : { ...DEFAULT_BOT_CONFIG };
+  return completeBotConfig(stored || DEFAULT_BOT_CONFIG);
 }
 
 function fevent(fleet, type, severity, message, extra = {}) {
@@ -1162,7 +1168,7 @@ function publicSessionView(fleet, session) {
     pauseRequested: session.pauseRequested === true,
     closePositionsOnStop: session.closePositionsOnStop !== false,
     riskState: session.riskState || null,
-    config: session.config || null,
+    config: completeBotConfig(session.config),
     realOrderSubmitted: false,
     worker: ws ? {
       workerId: ws.workerId,
@@ -1313,7 +1319,7 @@ async function handleFleetWorker(req, base, body) {
         closePositionsOnStop: session.closePositionsOnStop !== false,
         riskState: session.riskState || null,
       },
-      config: session.config || DEFAULT_BOT_CONFIG,
+      config: completeBotConfig(session.config),
       commands,
       intent: intent && intent.status === 'claimed' ? intent : null,
       stopRequested: session.stopRequested === true,
@@ -1406,6 +1412,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       isAdmin: isAdmin(identity),
       identity: { userId: identity.userId, email: identity.email, orgId: identity.orgId, verified: identity.verified, authMode: identity.authMode },
       sessions,
+      config: getUserConfig(fleet, identity.userId),
       lastRegime: fleet.lastRegime || null,
       events: myEvents,
       productionReady: false,
@@ -1542,7 +1549,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     if (session.stopRequested) return json(req, { ok: false, error: 'Session is stopping.' }, 409);
     if (session.pauseRequested) return json(req, { ok: false, error: 'Session entries are paused.' }, 409);
 
-    const config = session.config || getUserConfig(fleet, identity.userId);
+    const config = completeBotConfig(session.config || getUserConfig(fleet, identity.userId));
 
     // ── Risk regime gate ──
     let regime = fleet.lastRegime;
