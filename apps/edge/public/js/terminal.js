@@ -4743,7 +4743,7 @@ function stopBotPlaceholder() {
 // /api/bot/start-session, /api/bot/session/:id/:action, /api/bot/config.
 // No Binance secrets ever touch the browser or the swingworker:// URL.
 // ══════════════════════════════════════════════════════════════════════════
-const Fleet = { data: null, selectedId: null, pollTimer: null, configLoaded: false };
+const Fleet = { data: null, selectedId: null, pollTimer: null, configLoaded: false, startError: null, launchNotice: null, retryLaunchUrl: null };
 
 const REGIME_COLORS = {
   RISK_ON: '#00ff80', NEUTRAL: '#8899aa', RISK_OFF: '#ffaa00', CRASH: '#ff4a4a',
@@ -4756,7 +4756,10 @@ async function _fleetFetch(method, path, body) {
   const res = await fetch(path, init);
   const payload = await res.json().catch(() => ({}));
   if (!res.ok || payload.ok === false) {
-    throw new Error((Array.isArray(payload.errors) && payload.errors.length ? payload.errors.join('; ') : '') || payload.error || ('HTTP ' + res.status));
+    const err = new Error((Array.isArray(payload.errors) && payload.errors.length ? payload.errors.join('; ') : '') || payload.error || ('HTTP ' + res.status));
+    err.payload = payload;
+    err.status = res.status;
+    throw err;
   }
   return payload;
 }
@@ -4774,8 +4777,9 @@ async function refreshFleet() {
   try {
     const payload = await _fleetFetch('GET', '/api/bot/fleet');
     Fleet.data = payload;
-    if (!Fleet.selectedId || !payload.sessions.some((s) => s.sessionId === Fleet.selectedId)) {
-      Fleet.selectedId = payload.sessions[0] ? payload.sessions[0].sessionId : null;
+    const visibleSessions = (payload.sessions || []).filter((s) => s.status !== 'cleared');
+    if (!Fleet.selectedId || !visibleSessions.some((s) => s.sessionId === Fleet.selectedId)) {
+      Fleet.selectedId = visibleSessions[0] ? visibleSessions[0].sessionId : null;
     }
     renderFleet();
   } catch (err) {
@@ -4790,17 +4794,193 @@ function selectFleetSession(id) { Fleet.selectedId = id; renderFleet(); }
 
 function startBotSession() {
   const btn = document.getElementById('fleet-start-btn');
+  Fleet.startError = null;
+  Fleet.launchNotice = null;
   if (btn) { btn.disabled = true; btn.textContent = 'LAUNCHING…'; }
   _fleetFetch('POST', '/api/bot/start-session', {}).then((payload) => {
     if (payload.session) Fleet.selectedId = payload.session.sessionId;
-    try { LiveFeed.push('Launching local worker via swingworker://', 'info', { source: 'Bot Fleet' }); } catch {}
-    if (payload.launchUrl) { try { window.location.href = payload.launchUrl; } catch (e) { console.warn('[Fleet] launch failed:', e.message); } }
+    if (payload.existing && payload.launchUrl) {
+      Fleet.retryLaunchUrl = payload.launchUrl;
+      Fleet.launchNotice = 'Existing recent launch found. Retry Open Worker Terminal if the terminal did not appear.';
+      try { window.Toast?.info('Existing launch session', 'Retry Open Worker Terminal.'); } catch {}
+    } else {
+      Fleet.retryLaunchUrl = payload.launchUrl || null;
+      try { LiveFeed.push('Launching local worker via swingworker://', 'info', { source: 'Bot Fleet' }); } catch {}
+      if (payload.launchUrl) { try { window.location.href = payload.launchUrl; } catch (e) { console.warn('[Fleet] launch failed:', e.message); } }
+    }
+    if (Fleet.selectedId) _watchWorkerConnect(Fleet.selectedId);
     _startFleetPoll();
     refreshFleet();
   }).catch((err) => {
+    Fleet.startError = err.payload || { error: err.message };
     window.Toast?.error('Start bot failed', err.message);
+    renderFleet();
     if (btn) { btn.disabled = false; btn.textContent = 'START BOT'; }
   });
+}
+
+function retryOpenWorkerTerminal() {
+  if (!Fleet.retryLaunchUrl) { window.Toast?.error('No launch URL', 'Start a bot first.'); return; }
+  try {
+    window.location.href = Fleet.retryLaunchUrl;
+    Fleet.launchNotice = 'Worker terminal launch retried for the existing session.';
+    renderFleet();
+  } catch (err) {
+    window.Toast?.error('Retry failed', err.message);
+  }
+}
+
+// ── First-time Worker Bootstrap install flow ────────────────────────────────
+// Mints a short-lived pairing code and shows ONE copy-paste install command per
+// OS. No Binance secrets and no worker token ever touch the browser: the command
+// only carries the pairing code, which the local installer exchanges for the
+// worker token via POST /api/bot/worker-pair.
+Fleet.install = Fleet.install || null;
+Fleet._installTimer = null;
+
+function _detectInstallPlatform() {
+  const p = (navigator.platform || '') + ' ' + (navigator.userAgent || '');
+  return /mac|iphone|ipad|darwin/i.test(p) ? 'macos' : 'windows';
+}
+
+function openInstallWorker() {
+  Fleet.install = { open: true, loading: true, error: null, platform: _detectInstallPlatform() };
+  _renderInstallModal();
+  _fleetFetch('POST', '/api/bot/create-worker-pairing-code', {}).then((p) => {
+    Fleet.install = {
+      open: true,
+      loading: false,
+      error: null,
+      platform: (Fleet.install && Fleet.install.platform) || _detectInstallPlatform(),
+      pairingCode: p.pairingCode,
+      expiresAt: p.expiresAt,
+      windows: p.windowsInstallCommand,
+      macos: p.macosInstallCommand,
+    };
+    _renderInstallModal();
+    _startInstallCountdown();
+  }).catch((err) => {
+    Fleet.install = { open: true, loading: false, error: err.message, platform: _detectInstallPlatform() };
+    _renderInstallModal();
+  });
+}
+
+function closeInstallModal() {
+  if (Fleet._installTimer) { clearInterval(Fleet._installTimer); Fleet._installTimer = null; }
+  Fleet.install = null;
+  const m = document.getElementById('bot-install-modal');
+  if (m) m.remove();
+}
+
+function setInstallTab(platform) {
+  if (!Fleet.install) return;
+  Fleet.install.platform = platform === 'macos' ? 'macos' : 'windows';
+  _renderInstallModal();
+}
+
+function _installCurrentCommand() {
+  if (!Fleet.install) return '';
+  return Fleet.install.platform === 'macos' ? (Fleet.install.macos || '') : (Fleet.install.windows || '');
+}
+
+function copyInstallCommand() {
+  const cmd = _installCurrentCommand();
+  if (!cmd) return;
+  const done = () => { try { window.Toast?.success('Command copied', 'Paste it into a terminal on the target computer.'); } catch {} };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(cmd).then(done).catch(() => _fallbackCopy(cmd, done));
+  } else {
+    _fallbackCopy(cmd, done);
+  }
+}
+function _fallbackCopy(text, cb) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); ta.remove();
+    if (cb) cb();
+  } catch (e) { window.Toast?.error('Copy failed', 'Select the command and copy it manually.'); }
+}
+
+function refreshAfterInstall() {
+  Fleet.workerConnectFailed = false;
+  try { window.Toast?.info('Refreshing worker status', 'Looking for an online local worker…'); } catch {}
+  refreshFleet();
+}
+
+function _installCountdownText() {
+  if (!Fleet.install || !Fleet.install.expiresAt) return '';
+  const ms = new Date(Fleet.install.expiresAt).getTime() - Date.now();
+  if (!Number.isFinite(ms) || ms <= 0) return 'expired — generate a new code';
+  const s = Math.floor(ms / 1000);
+  return 'expires in ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+function _startInstallCountdown() {
+  if (Fleet._installTimer) clearInterval(Fleet._installTimer);
+  Fleet._installTimer = setInterval(() => {
+    const el = document.getElementById('install-countdown');
+    if (!el) { clearInterval(Fleet._installTimer); Fleet._installTimer = null; return; }
+    el.textContent = _installCountdownText();
+  }, 1000);
+}
+
+function _renderInstallModal() {
+  const ins = Fleet.install;
+  let modal = document.getElementById('bot-install-modal');
+  if (!ins || !ins.open) { if (modal) modal.remove(); return; }
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'bot-install-modal';
+    modal.className = 'install-modal-backdrop';
+    modal.addEventListener('click', (e) => { if (e.target === modal) closeInstallModal(); });
+    document.body.appendChild(modal);
+  }
+  const _e = (typeof _esc === 'function') ? _esc : ((x) => String(x == null ? '' : x));
+  const plat = ins.platform === 'macos' ? 'macos' : 'windows';
+  const cmd = plat === 'macos' ? (ins.macos || '') : (ins.windows || '');
+
+  let body;
+  if (ins.loading) {
+    body = '<div class="install-loading">Generating a secure one-time pairing code…</div>';
+  } else if (ins.error) {
+    body = '<div class="install-error">Could not start install: ' + _e(ins.error) + '</div>'
+      + '<button type="button" class="paperbot-control-btn" onclick="openInstallWorker()">Try again</button>';
+  } else {
+    body = '<div class="install-tabs">'
+      + '<button type="button" class="install-tab' + (plat === 'windows' ? ' install-tab--active' : '') + '" onclick="setInstallTab(\'windows\')">Windows</button>'
+      + '<button type="button" class="install-tab' + (plat === 'macos' ? ' install-tab--active' : '') + '" onclick="setInstallTab(\'macos\')">macOS</button>'
+      + '</div>'
+      + '<div class="install-step">Open ' + (plat === 'macos' ? 'Terminal' : 'PowerShell') + ' on the computer that will run the bot, then paste &amp; run:</div>'
+      + '<div class="install-cmd-box"><code id="install-cmd">' + _e(cmd) + '</code></div>'
+      + '<div class="install-actions-row">'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="copyInstallCommand()">Copy command</button>'
+      + '<span id="install-countdown" class="install-countdown">' + _e(_installCountdownText()) + '</span>'
+      + '</div>'
+      + '<div class="install-secnote">This installs the local worker and asks for Binance Spot Testnet keys <b>locally on that computer</b>. '
+      + 'Keys are never sent to the web. The command carries only a one-time pairing code — no Binance keys and no worker token.</div>'
+      + '<div class="install-after">'
+      + '<button type="button" class="paperbot-control-btn" onclick="refreshAfterInstall()">I installed it — refresh worker status</button>'
+      + '</div>';
+  }
+
+  modal.innerHTML = '<div class="install-modal">'
+    + '<div class="install-modal__head"><span>First-time setup — Install Worker</span>'
+    + '<button type="button" class="install-modal__close" onclick="closeInstallModal()" aria-label="Close">×</button></div>'
+    + '<div class="install-modal__body">' + body + '</div>'
+    + '</div>';
+}
+
+// After START BOT, if the worker never sends a heartbeat, surface install/retry
+// guidance instead of leaving the user staring at a stale launch.
+function _watchWorkerConnect(sessionId) {
+  if (Fleet._connectTimer) clearTimeout(Fleet._connectTimer);
+  Fleet.workerConnectFailed = false;
+  Fleet._connectTimer = setTimeout(() => {
+    const data = Fleet.data;
+    const s = data && (data.sessions || []).find((x) => x.sessionId === sessionId);
+    if (s && !_fleetWorkerOnline(s)) { Fleet.workerConnectFailed = true; renderFleet(); }
+  }, 15000);
 }
 
 function _fleetSessionAction(action, label) {
@@ -4817,6 +4997,25 @@ function stopBotSession() {
   _fleetSessionAction('stop', 'Stop');
   // Optional local fallback signal to the protocol helper.
   if (id) { try { window.location.href = 'swingworker://stop?session=' + encodeURIComponent(id) + '&control=' + encodeURIComponent(location.origin); } catch {} }
+}
+function clearSelectedStaleSession() {
+  const id = Fleet.selectedId;
+  if (!id) { window.Toast?.error('No session selected', 'Select a worker first.'); return; }
+  _fleetFetch('POST', `/api/bot/session/${encodeURIComponent(id)}/clear-stale`, {}).then((payload) => {
+    Fleet.startError = null;
+    Fleet.launchNotice = null;
+    try { window.Toast?.success('Stale session cleared', id.slice(0, 12)); } catch {}
+    if (payload.session && payload.session.status === 'cleared') Fleet.selectedId = null;
+    refreshFleet();
+  }).catch((err) => window.Toast?.error('Clear stale failed', err.message));
+}
+function clearStaleSessions() {
+  _fleetFetch('POST', '/api/bot/clear-stale-sessions', {}).then((payload) => {
+    Fleet.startError = null;
+    Fleet.launchNotice = null;
+    try { window.Toast?.success('Stale sessions cleared', String(payload.count || 0)); } catch {}
+    refreshFleet();
+  }).catch((err) => window.Toast?.error('Clear stale failed', err.message));
 }
 function pauseBotEntries() { _fleetSessionAction('pause', 'Pause entries'); }
 function resumeBotEntries() { _fleetSessionAction('resume', 'Resume entries'); }
@@ -5028,14 +5227,55 @@ function _fleetAge(iso) {
   return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
 }
 
+function _fleetSessionAgeMs(s) {
+  const t = new Date((s && (s.updatedAt || s.createdAt)) || 0).getTime();
+  return Number.isFinite(t) ? Date.now() - t : Infinity;
+}
+
+function _fleetOpenPositionCount(s) {
+  return Array.isArray(s && s.openPositions) ? s.openPositions.length : 0;
+}
+
+function _fleetWorkerOnline(s) {
+  return !!(s && s.worker && s.worker.online);
+}
+
+function _fleetIsStaleNoWorker(s) {
+  if (!s) return false;
+  if (s.isStaleNoWorker === true) return true;
+  if (_fleetWorkerOnline(s) || _fleetOpenPositionCount(s) > 0) return false;
+  const age = _fleetSessionAgeMs(s);
+  if ((s.status === 'launch_requested' || s.status === 'launching' || s.status === 'launch_failed') && age > 60000) return true;
+  if ((s.status === 'stopping' || s.status === 'stop_requested') && age > 30000) return true;
+  return false;
+}
+
+function _fleetStaleLabel(s) {
+  if (!s) return '';
+  if ((s.status === 'launch_requested' || s.status === 'launching' || s.status === 'launch_failed') && !_fleetWorkerOnline(s) && _fleetSessionAgeMs(s) > 60000) return 'STALE LAUNCH';
+  if ((s.status === 'stopping' || s.status === 'stop_requested') && !_fleetWorkerOnline(s)) return 'STALE STOP';
+  return '';
+}
+
+function _fleetManualCommandHint(sessionId) {
+  const id = sessionId || '<SESSION_ID>';
+  return 'Manual: powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-launch-worker.ps1 "swingworker://start?session='
+    + id + '&control=https%3A%2F%2Fswing-terminal-v6.netlify.app"';
+}
+
 function renderFleet() {
   const panel = _fleetEnsurePanel();
   if (!panel || !Fleet.data) return;
   const data = Fleet.data;
-  const sessions = data.sessions || [];
+  const allSessions = data.sessions || [];
+  const clearedSessions = allSessions.filter((s) => s.status === 'cleared');
+  const sessions = allSessions.filter((s) => s.status !== 'cleared');
+  const staleSessions = sessions.filter(_fleetIsStaleNoWorker);
   const sel = sessions.find((s) => s.sessionId === Fleet.selectedId) || null;
   const regime = data.lastRegime || (sel && sel.riskState) || null;
   const _e = (typeof _esc === 'function') ? _esc : ((x) => String(x == null ? '' : x));
+  const anyWorkerOnline = sessions.some(_fleetWorkerOnline);
+  if (anyWorkerOnline) Fleet.workerConnectFailed = false;
 
   // Risk regime card
   const rg = regime ? regime.regime : 'UNKNOWN';
@@ -5050,11 +5290,42 @@ function renderFleet() {
     + '<div class="fleet-regime__updated">updated ' + (regime && regime.updatedAt ? new Date(regime.updatedAt).toLocaleTimeString() : '—') + '</div>'
     + '</div>'
     + '<div class="fleet-actions-top">'
+    + (!anyWorkerOnline ? '<div class="fleet-worker-offline">LOCAL WORKER OFFLINE</div>' : '')
+    + '<div class="fleet-action-row">'
+    + '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="openInstallWorker()">Install Worker on this computer</button>'
     + '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT</button>'
+    + (staleSessions.length > 1 ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearStaleSessions()">CLEAR STALE SESSIONS</button>' : '')
+    + (Fleet.retryLaunchUrl ? '<button type="button" class="paperbot-control-btn" onclick="retryOpenWorkerTerminal()">Retry Open Worker Terminal</button>' : '')
+    + '</div>'
     + '<div id="fleet-conn" class="fleet-conn">' + (data.backend === 'blobs' ? 'durable store · ' : 'in-memory store · ') + (data.isAdmin ? 'admin' : 'user') + ' · ' + _e(data.identity && data.identity.email || '') + '</div>'
-    + '<div class="fleet-hint">Starts a local worker via swingworker://. First-time setup required.</div>'
+    + (Fleet.launchNotice ? '<div class="fleet-notice">' + _e(Fleet.launchNotice) + '</div>' : '')
+    + '<div class="fleet-hint">First time on this computer? Click <b>Install Worker</b>. After that, START BOT is one-click.</div>'
+    + '<div class="fleet-hint fleet-hint--mono">' + _e(_fleetManualCommandHint(sel && sel.sessionId)) + '</div>'
     + '</div>'
     + '</div>';
+
+  if (Fleet.workerConnectFailed) {
+    html += '<div class="fleet-error-panel fleet-error-panel--connect">'
+      + '<div class="fleet-error-panel__title">Worker did not connect</div>'
+      + '<div class="fleet-error-panel__body">The local worker has not sent a heartbeat. Install or retry the local worker.</div>'
+      + '<div class="fleet-action-row">'
+      + (Fleet.retryLaunchUrl ? '<button type="button" class="paperbot-control-btn" onclick="retryOpenWorkerTerminal()">Retry Open Worker Terminal</button>' : '')
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="openInstallWorker()">Install Worker</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearSelectedStaleSession()">Clear stale session</button>'
+      + '</div>'
+      + '</div>';
+  }
+
+  if (Fleet.startError && Fleet.startError.error === 'Session limit reached') {
+    const blockers = Fleet.startError.activeSessions || [];
+    html += '<div class="fleet-error-panel">'
+      + '<div class="fleet-error-panel__title">Session limit reached</div>'
+      + '<div class="fleet-error-panel__body">Blocking sessions: '
+      + (blockers.map((s) => _e((s.sessionId || '').slice(0, 12)) + ' ' + _e(s.status || '')).join(', ') || 'none reported')
+      + '</div>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearStaleSessions()">CLEAR STALE SESSIONS</button>'
+      + '</div>';
+  }
 
   // Body: worker list + detail
   html += '<div class="fleet-body">';
@@ -5062,13 +5333,23 @@ function renderFleet() {
   if (!sessions.length) html += '<div class="fleet-empty">No active sessions. Click START BOT.</div>';
   for (const s of sessions) {
     const online = s.worker && s.worker.online;
-    const dot = online ? '#00ff80' : '#ff6666';
+    const staleLabel = _fleetStaleLabel(s);
+    const dot = online ? '#00ff80' : staleLabel ? '#ffaa00' : '#ff6666';
     const sel2 = s.sessionId === Fleet.selectedId ? ' fleet-worker--sel' : '';
-    html += '<div class="fleet-worker' + sel2 + '" onclick="selectFleetSession(\'' + _e(s.sessionId) + '\')">'
+    const staleClass = staleLabel ? ' fleet-worker--stale' : '';
+    html += '<div class="fleet-worker' + sel2 + staleClass + '" onclick="selectFleetSession(\'' + _e(s.sessionId) + '\')">'
       + '<span class="fleet-dot" style="background:' + dot + '"></span>'
       + '<span class="fleet-worker__email">' + _e(s.ownerEmail || s.ownerUserId || 'unknown') + '</span>'
+      + (staleLabel ? '<span class="fleet-worker__badge">' + _e(staleLabel) + '</span>' : '')
       + '<span class="fleet-worker__meta">' + _e((s.worker && s.worker.platform) || '—') + ' · ' + _e(s.status) + '</span>'
       + '</div>';
+  }
+  if (clearedSessions.length) {
+    html += '<details class="fleet-history"><summary>CLEARED HISTORY (' + clearedSessions.length + ')</summary>';
+    for (const s of clearedSessions.slice(0, 10)) {
+      html += '<div class="fleet-history__row"><span>' + _e((s.sessionId || '').slice(0, 12)) + '</span><b>' + _e(s.clearedReason || 'cleared') + '</b></div>';
+    }
+    html += '</details>';
   }
   html += '</div>';
 
@@ -5078,6 +5359,8 @@ function renderFleet() {
     html += '<div class="fleet-empty">Select a worker to see details.</div>';
   } else {
     const online = sel.worker && sel.worker.online;
+    const selStale = _fleetIsStaleNoWorker(sel);
+    const selStaleLabel = _fleetStaleLabel(sel);
     const closeFailed = (sel.positionResults || []).some((p) => p.status === 'WORKER_CLOSE_FAILED');
     let stateText = sel.status, stateColor = '#8899aa';
     if (closeFailed && (sel.stopRequested || sel.status === 'stopping')) { stateText = 'CLOSE FAILED — MANUAL ATTENTION'; stateColor = '#ff4a4a'; }
@@ -5087,6 +5370,7 @@ function renderFleet() {
     else if (online) { stateText = 'LOCAL WORKER ONLINE — BOT RUNNING'; stateColor = '#00ff80'; }
     else if (sel.status === 'launch_requested') { stateText = 'LAUNCHING — waiting for heartbeat'; stateColor = '#ffaa00'; }
 
+    if (selStaleLabel) { stateText = selStaleLabel; stateColor = '#ffaa00'; }
     html += '<div class="fleet-state" style="color:' + stateColor + '">' + _e(stateText) + '</div>';
     html += '<div class="fleet-meta-grid">'
       + '<div><span>Owner</span><b>' + _e(sel.ownerEmail || '—') + '</b></div>'
@@ -5102,6 +5386,7 @@ function renderFleet() {
     const canStop = !(sel.status === 'stopped' || sel.status === 'expired');
     html += '<div class="fleet-detail-actions">'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="stopBotSession()"' + (canStop ? '' : ' disabled') + '>STOP BOT</button>'
+      + (selStale ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearSelectedStaleSession()">CLEAR STALE SESSION</button>' : '')
       + '<button type="button" class="paperbot-control-btn" onclick="pauseBotEntries()"' + (sel.pauseRequested || !canStop ? ' disabled' : '') + '>PAUSE ENTRIES</button>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="resumeBotEntries()"' + (sel.pauseRequested && canStop ? '' : ' disabled') + '>RESUME ENTRIES</button>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseTestnet()"' + (canStop ? '' : ' disabled') + '>EMERGENCY CLOSE TESTNET</button>'

@@ -1073,6 +1073,10 @@ const SESSION_TTL_MS = 60 * 60 * 1000;
 const MAX_SESSIONS_PER_USER = 3;
 const TESTNET_MAX_TRADE_USD = 10;
 const FLEET_COMMAND_TYPES = new Set(['STOP', 'PAUSE', 'RESUME', 'EMERGENCY_CLOSE']);
+const STALE_SESSION_STATUSES = new Set(['launch_requested', 'launching', 'stopping', 'stop_requested', 'launch_failed']);
+const STALE_LAUNCH_STATUSES = new Set(['launch_requested', 'launching', 'launch_failed']);
+const STALE_STOPPING_STATUSES = new Set(['stopping', 'stop_requested']);
+const CLEARED_ACTIVE_EXCLUDED_STATUSES = new Set(['cleared', 'stopped', 'launch_failed', 'expired']);
 
 const DEFAULT_BOT_CONFIG = {
   minTradeUsd: 5,
@@ -1147,13 +1151,81 @@ function workerIsOnline(ws) {
   return Number.isFinite(last) && (Date.now() - last) < WORKER_ONLINE_MS && ws.status !== 'offline';
 }
 
+function sessionWorkerStatus(fleet, session) {
+  if (!session) return null;
+  if (session.workerId && fleet.workerStatuses && fleet.workerStatuses[session.workerId]) {
+    return fleet.workerStatuses[session.workerId];
+  }
+  const statuses = Object.values((fleet && fleet.workerStatuses) || {})
+    .filter((ws) => ws && ws.sessionId === session.sessionId)
+    .sort((a, b) => new Date(b.lastSeenAt || 0).getTime() - new Date(a.lastSeenAt || 0).getTime());
+  return statuses[0] || null;
+}
+
+function sessionOpenPositions(fleet, sessionId) {
+  const positions = ((fleet && fleet.positionResults && fleet.positionResults[sessionId]) || []);
+  return positions.filter((p) => p && p.status === 'open');
+}
+
+function sessionAgeMs(session, now) {
+  const ts = new Date(session.updatedAt || session.createdAt || 0).getTime();
+  return Number.isFinite(ts) ? now - ts : Infinity;
+}
+
+function isSessionStaleNoWorker(session, fleet, now = Date.now()) {
+  if (!session || !STALE_SESSION_STATUSES.has(session.status)) return false;
+  const ws = sessionWorkerStatus(fleet, session);
+  if (workerIsOnline(ws)) return false;
+  if (sessionOpenPositions(fleet, session.sessionId).length > 0) return false;
+  const age = sessionAgeMs(session, now);
+  if (STALE_LAUNCH_STATUSES.has(session.status)) return age > 60000;
+  if (STALE_STOPPING_STATUSES.has(session.status)) return age > 30000;
+  return false;
+}
+
+function canClearNoWorkerNoPosition(session, fleet) {
+  if (!session || !STALE_SESSION_STATUSES.has(session.status)) return false;
+  const ws = sessionWorkerStatus(fleet, session);
+  return !workerIsOnline(ws) && sessionOpenPositions(fleet, session.sessionId).length === 0;
+}
+
+function clearStaleSession(fleet, sessionId, identity, reason) {
+  const session = fleet.botSessions && fleet.botSessions[sessionId];
+  if (!session) return null;
+  const nowIso = new Date().toISOString();
+  session.status = 'cleared';
+  session.stopRequested = true;
+  session.closePositionsOnStop = false;
+  session.updatedAt = nowIso;
+  session.clearedAt = nowIso;
+  session.clearedReason = reason;
+  if (fleet.executionIntents[sessionId] && ['pending', 'claimed'].includes(fleet.executionIntents[sessionId].status)) {
+    fleet.executionIntents[sessionId].status = 'cancelled';
+  }
+  fleet.commandQueue[sessionId] = [];
+  const actor = identity && (identity.email || identity.userId) ? (identity.email || identity.userId) : 'system';
+  fevent(fleet, 'WORKER_SESSION_STALE_CLEARED', 'warn',
+    `Cleared stale no-worker session ${sessionId.slice(0, 12)} (${reason}) by ${actor}.`,
+    { sessionId, ownerUserId: session.ownerUserId, clearedReason: reason });
+  return session;
+}
+
+function launchUrlForSession(req, sessionId) {
+  const controlUrl = requestOrigin(req) || getAllowedOrigins()[0] || 'https://swing-terminal-v6.netlify.app';
+  return {
+    controlUrl,
+    launchUrl: `swingworker://start?session=${encodeURIComponent(sessionId)}&control=${encodeURIComponent(controlUrl)}`,
+  };
+}
+
 function publicSessionView(fleet, session) {
   if (!session) return null;
-  const ws = session.workerId ? fleet.workerStatuses[session.workerId] : null;
+  const ws = sessionWorkerStatus(fleet, session);
   const results = fleet.executionResults[session.sessionId] || [];
   const positions = fleet.positionResults[session.sessionId] || [];
   const openPositions = positions.filter((p) => p && p.status === 'open');
   const realizedPnl = results.reduce((acc, r) => acc + (Number(r.realizedPnl) || 0), 0);
+  const now = Date.now();
   return {
     sessionId: session.sessionId,
     ownerUserId: session.ownerUserId,
@@ -1167,6 +1239,9 @@ function publicSessionView(fleet, session) {
     stopRequested: session.stopRequested === true,
     pauseRequested: session.pauseRequested === true,
     closePositionsOnStop: session.closePositionsOnStop !== false,
+    clearedAt: session.clearedAt || null,
+    clearedReason: session.clearedReason || null,
+    isStaleNoWorker: isSessionStaleNoWorker(session, fleet, now),
     riskState: session.riskState || null,
     config: completeBotConfig(session.config),
     realOrderSubmitted: false,
@@ -1400,6 +1475,45 @@ async function handleFleetWorker(req, base, body) {
 
 // ── Browser-facing fleet routes (Origin + identity; owner/admin authz) ────────
 async function handleFleetBrowser(req, base, segments, identity, body) {
+  // POST /api/bot/create-worker-pairing-code
+  // Mints a short-lived, single-use pairing code for first-time worker install.
+  // Owner-only: the code is bound to the caller's identity. No secrets returned.
+  if (base === 'create-worker-pairing-code') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    if (process.env.BINANCE_ENV !== 'testnet') {
+      return json(req, { ok: false, error: 'Worker install requires BINANCE_ENV=testnet.' }, 403);
+    }
+    if (process.env.BOT_LIVE_TRADING_ENABLED === 'true' || process.env.BOT_ALLOW_REAL_ORDERS === 'true') {
+      return json(req, { ok: false, error: 'Live trading flags are active. Worker install is disabled.' }, 403);
+    }
+    const store = await loadPairings();
+    prunePairings(store);
+    const code = crypto.randomBytes(24).toString('base64url'); // ~32 chars, high entropy
+    const now = Date.now();
+    const createdAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + PAIRING_TTL_MS).toISOString();
+    store.codes[code] = {
+      code,
+      ownerUserId: identity.userId,
+      ownerEmail: identity.email || null,
+      orgId: identity.orgId || 'default',
+      createdAt,
+      expiresAt,
+      usedAt: null,
+      platform: null,
+      status: 'active',
+    };
+    await savePairings(store);
+    const origin = selfOrigin(req);
+    return json(req, {
+      ok: true,
+      pairingCode: code,
+      expiresAt,
+      windowsInstallCommand: windowsInstallCommand(origin, code),
+      macosInstallCommand: macosInstallCommand(origin, code),
+    });
+  }
+
   // GET /api/bot/fleet
   if (base === 'fleet') {
     if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
@@ -1445,9 +1559,40 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       return json(req, { ok: false, error: 'Live trading flags are active. Cannot start a worker session.' }, 403);
     }
     const fleet = await loadFleet();
-    const mine = Object.values(fleet.botSessions).filter((s) => s.ownerUserId === identity.userId && !['stopped', 'expired'].includes(s.status));
+    const now = Date.now();
+    for (const s of Object.values(fleet.botSessions || {})) {
+      if (s.ownerUserId === identity.userId && isSessionStaleNoWorker(s, fleet, now)) {
+        clearStaleSession(fleet, s.sessionId, identity, 'auto_clear_before_start');
+      }
+    }
+
+    const recent = Object.values(fleet.botSessions || {}).find((s) => {
+      if (!s || s.ownerUserId !== identity.userId || s.status !== 'launch_requested') return false;
+      if (workerIsOnline(sessionWorkerStatus(fleet, s))) return false;
+      return (now - new Date(s.createdAt || s.updatedAt || 0).getTime()) < 60000;
+    });
+    if (recent) {
+      await saveFleet(fleet);
+      const launch = launchUrlForSession(req, recent.sessionId);
+      return json(req, {
+        ok: true,
+        existing: true,
+        reusedLaunchSession: true,
+        sessionId: recent.sessionId,
+        ...launch,
+        session: publicSessionView(fleet, recent),
+      });
+    }
+
+    const mine = Object.values(fleet.botSessions || {}).filter((s) => (
+      s.ownerUserId === identity.userId && !CLEARED_ACTIVE_EXCLUDED_STATUSES.has(s.status)
+    ));
     if (mine.length >= MAX_SESSIONS_PER_USER) {
-      return json(req, { ok: false, error: `Session limit reached (${MAX_SESSIONS_PER_USER}). Stop an existing session first.` }, 429);
+      return json(req, {
+        ok: false,
+        error: 'Session limit reached',
+        activeSessions: mine.map((s) => publicSessionView(fleet, s)),
+      }, 429);
     }
     const sessionId = `session_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
     const nowIso = new Date().toISOString();
@@ -1473,9 +1618,27 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     fevent(fleet, 'WORKER_SESSION_START_REQUESTED', 'info', `Session ${sessionId.slice(0, 12)} requested by ${identity.email || identity.userId}.`, { sessionId, ownerUserId: identity.userId });
     await saveFleet(fleet);
 
-    const controlUrl = requestOrigin(req) || getAllowedOrigins()[0] || 'https://swing-terminal-v6.netlify.app';
-    const launchUrl = `swingworker://start?session=${encodeURIComponent(sessionId)}&control=${encodeURIComponent(controlUrl)}`;
-    return json(req, { ok: true, sessionId, launchUrl, controlUrl, session: publicSessionView(fleet, session) });
+    const launch = launchUrlForSession(req, sessionId);
+    return json(req, { ok: true, sessionId, ...launch, session: publicSessionView(fleet, session) });
+  }
+
+  // POST /api/bot/clear-stale-sessions
+  if (base === 'clear-stale-sessions') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    const fleet = await loadFleet();
+    const now = Date.now();
+    const adminOrgClear = isAdmin(identity) && identity.verified === true;
+    const clearedSessionIds = [];
+    for (const s of Object.values(fleet.botSessions || {})) {
+      const canSee = s.ownerUserId === identity.userId
+        || (adminOrgClear && (s.orgId || 'default') === (identity.orgId || 'default'));
+      if (canSee && isSessionStaleNoWorker(s, fleet, now)) {
+        clearStaleSession(fleet, s.sessionId, identity, adminOrgClear && s.ownerUserId !== identity.userId ? 'admin_clear_stale_sessions' : 'clear_stale_sessions');
+        clearedSessionIds.push(s.sessionId);
+      }
+    }
+    await saveFleet(fleet);
+    return json(req, { ok: true, count: clearedSessionIds.length, clearedSessionIds });
   }
 
   // /api/bot/session/:sessionId[/:action]
@@ -1496,8 +1659,13 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
 
     const actor = identity.email || identity.userId;
     if (action === 'stop') {
+      if (canClearNoWorkerNoPosition(session, fleet)) {
+        clearStaleSession(fleet, sessionId, identity, 'stop_requested_before_worker_online');
+        await saveFleet(fleet);
+        return json(req, { ok: true, cleared: true, session: publicSessionView(fleet, session) });
+      }
       session.stopRequested = true;
-      session.status = 'stopping';
+      session.status = workerIsOnline(sessionWorkerStatus(fleet, session)) ? 'stopping' : 'stop_requested';
       session.closePositionsOnStop = true;
       expireStaleIntent(fleet, sessionId);
       if (fleet.executionIntents[sessionId] && fleet.executionIntents[sessionId].status === 'pending') {
@@ -1522,6 +1690,11 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       queueCommand(fleet, sessionId, 'EMERGENCY_CLOSE', actor);
       session.pauseRequested = true; // stop new entries while closing
       fevent(fleet, 'EMERGENCY_CLOSE_REQUESTED', 'warn', `Emergency close (testnet) requested for ${sessionId.slice(0, 12)} by ${actor}.`, { sessionId, ownerUserId: session.ownerUserId });
+    } else if (action === 'clear-stale') {
+      if (!canClearNoWorkerNoPosition(session, fleet)) {
+        return json(req, { ok: false, error: 'Session is not clearable. A worker is online or open positions exist.' }, 409);
+      }
+      clearStaleSession(fleet, sessionId, identity, 'manual_clear_stale_session');
     } else {
       return json(req, { ok: false, error: 'Unknown session action' }, 404);
     }
@@ -1640,8 +1813,222 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
   return json(req, { ok: false, error: 'Not Found' }, 404);
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// Worker Bootstrap / Pairing — first-time install flow.
+//
+// A browser owner mints a short-lived, single-use pairing code. The user pastes
+// ONE install command on the target machine. The installer fetches a public
+// bootstrap script (no secrets), clones the repo, then exchanges the pairing
+// code at POST /api/bot/worker-pair for the worker bootstrap config (control
+// URL + shared worker token). The worker token is therefore NEVER exposed to
+// the browser or placed in any URL — only handed to a caller proving possession
+// of a valid pairing code.
+//
+// SECURITY: pairing codes hold NO Binance secrets and NO worker token. Binance
+// keys are prompted for locally by the installer and written only to a local,
+// gitignored .env.worker. This store is durable (Netlify Blobs) with an
+// in-memory fallback so create + redeem can hit different serverless instances.
+// ══════════════════════════════════════════════════════════════════════════
+
+const PAIRING_TTL_MS = 10 * 60 * 1000; // 10 minutes, single use
+const PAIRING_KEY = 'worker-pairing-codes';
+const WORKER_INSTALL_REPO = process.env.BOT_WORKER_INSTALL_REPO || 'alescesnek1/swing-terminal-v6';
+const WORKER_INSTALL_BRANCH = process.env.BOT_WORKER_INSTALL_BRANCH || 'main';
+
+let _pairingBackendResolved = false;
+let _pairingBlobStore = null;
+const _pairingMem = new Map();
+
+async function resolvePairingBackend() {
+  if (_pairingBackendResolved) return;
+  _pairingBackendResolved = true;
+  try {
+    const mod = await import('@netlify/blobs');
+    if (mod && typeof mod.getStore === 'function') {
+      _pairingBlobStore = mod.getStore({ name: 'bot-worker-pairing', consistency: 'strong' });
+      return;
+    }
+  } catch (err) {
+    console.warn('[pairingStore] @netlify/blobs unavailable, using in-memory fallback:', err && err.message);
+  }
+  _pairingBlobStore = null;
+}
+
+function emptyPairingStore() {
+  return { codes: {} };
+}
+
+function normalizePairingStore(data) {
+  if (!data || typeof data !== 'object' || typeof data.codes !== 'object' || Array.isArray(data.codes)) {
+    return emptyPairingStore();
+  }
+  return { codes: data.codes };
+}
+
+async function loadPairings() {
+  await resolvePairingBackend();
+  if (_pairingBlobStore) {
+    try {
+      const data = await _pairingBlobStore.get(PAIRING_KEY, { type: 'json' });
+      return normalizePairingStore(data);
+    } catch (err) {
+      console.warn('[pairingStore] blob read failed:', err && err.message);
+      return emptyPairingStore();
+    }
+  }
+  const raw = _pairingMem.get(PAIRING_KEY);
+  return normalizePairingStore(raw ? JSON.parse(raw) : null);
+}
+
+async function savePairings(store) {
+  await resolvePairingBackend();
+  if (_pairingBlobStore) {
+    try { await _pairingBlobStore.setJSON(PAIRING_KEY, store); return; }
+    catch (err) { console.error('[pairingStore] blob write failed:', err && err.message); }
+  }
+  _pairingMem.set(PAIRING_KEY, JSON.stringify(store));
+}
+
+// Mark expired codes and hard-delete long-dead ones so the document stays small.
+function prunePairings(store) {
+  const now = Date.now();
+  for (const [code, rec] of Object.entries(store.codes || {})) {
+    const exp = new Date(rec && rec.expiresAt || 0).getTime();
+    if (!Number.isFinite(exp)) { delete store.codes[code]; continue; }
+    if (rec.status !== 'used' && exp < now) rec.status = 'expired';
+    if (exp + 60 * 60 * 1000 < now) delete store.codes[code]; // 1h past expiry
+  }
+}
+
+// The function's own origin (installer/curl never sends an Origin header).
+function selfOrigin(req) {
+  try {
+    const u = new URL(req.url);
+    if (u.protocol === 'http:' || u.protocol === 'https:') return u.origin;
+  } catch { /* fall through */ }
+  return getAllowedOrigins()[0] || 'https://swing-terminal-v6.netlify.app';
+}
+
+function windowsInstallCommand(origin, code) {
+  return `powershell -ExecutionPolicy Bypass -Command "irm ${origin}/api/bot/install/windows?pair=${encodeURIComponent(code)} | iex"`;
+}
+function macosInstallCommand(origin, code) {
+  return `curl -fsSL "${origin}/api/bot/install/macos?pair=${encodeURIComponent(code)}" | bash`;
+}
+
+function textResponse(req, body, status = 200) {
+  return new Response(body, {
+    status,
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-store',
+      ...corsHeaders(req),
+    },
+  });
+}
+
+// Public bootstrap script returned by GET /api/bot/install/<platform>?pair=CODE.
+// Contains the pair code ONLY (no Binance secrets, no worker token). It fetches
+// the committed installer from the public repo and runs it with the pair code.
+function buildWindowsBootstrap(origin, code) {
+  const installerUrl = `https://raw.githubusercontent.com/${WORKER_INSTALL_REPO}/${WORKER_INSTALL_BRANCH}/scripts/install-worker-windows.ps1`;
+  return [
+    '# SwingTerminal Worker first-time installer (TESTNET only).',
+    '# This script contains only a short-lived pairing code. No secrets.',
+    "$ErrorActionPreference = 'Stop'",
+    `$PairCode = '${code}'`,
+    `$ControlUrl = '${origin}'`,
+    `$InstallerUrl = '${installerUrl}'`,
+    "Write-Host 'Fetching SwingTerminal worker installer...' -ForegroundColor Cyan",
+    '$installerText = Invoke-RestMethod -Uri $InstallerUrl',
+    '$installer = [scriptblock]::Create($installerText)',
+    '& $installer -PairCode $PairCode -ControlUrl $ControlUrl',
+    '',
+  ].join('\n');
+}
+function buildMacosBootstrap(origin, code) {
+  const installerUrl = `https://raw.githubusercontent.com/${WORKER_INSTALL_REPO}/${WORKER_INSTALL_BRANCH}/scripts/install-worker-macos.sh`;
+  return [
+    '#!/usr/bin/env bash',
+    '# SwingTerminal Worker first-time installer (TESTNET only).',
+    '# This script contains only a short-lived pairing code. No secrets.',
+    'set -euo pipefail',
+    `PAIR_CODE='${code}'`,
+    `CONTROL_URL='${origin}'`,
+    `INSTALLER_URL='${installerUrl}'`,
+    'echo "Fetching SwingTerminal worker installer..."',
+    'TMP="$(mktemp -t swingworker-install.XXXXXX)"',
+    'curl -fsSL "$INSTALLER_URL" -o "$TMP"',
+    'bash "$TMP" --pair "$PAIR_CODE" --control "$CONTROL_URL"',
+    'rm -f "$TMP"',
+    '',
+  ].join('\n');
+}
+
+// GET /api/bot/install/windows|macos?pair=CODE  (public; no auth/origin gate).
+async function handleInstallScript(req, segments) {
+  if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+  const platform = (segments[1] || '').toLowerCase();
+  const url = new URL(req.url);
+  const code = (url.searchParams.get('pair') || '').trim();
+  const origin = selfOrigin(req);
+  if (!code) return textResponse(req, '# Missing pair code. Generate one from the web app (Install Worker).\n', 400);
+  if (platform === 'windows') return textResponse(req, buildWindowsBootstrap(origin, code));
+  if (platform === 'macos') return textResponse(req, buildMacosBootstrap(origin, code));
+  return json(req, { ok: false, error: 'Unknown install platform. Use windows or macos.' }, 404);
+}
+
+// POST /api/bot/worker-pair  (called by the local installer; authenticated by the
+// pairing code itself — no browser Origin/JWT). Redeems a code for bootstrap config.
+async function handleWorkerPair(req) {
+  if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+  let body = {};
+  try { body = await parseBody(req); } catch (err) { return json(req, { ok: false, error: err.message }, 400); }
+  // Defense in depth: never accept Binance secrets on this endpoint.
+  const denied = findSensitiveFields(body);
+  if (denied.length) return json(req, { ok: false, error: 'Credentials are not accepted by this endpoint.', deniedFields: denied }, 400);
+
+  const code = typeof body.pairingCode === 'string' ? body.pairingCode.trim() : '';
+  if (!code) return json(req, { ok: false, error: 'pairingCode is required' }, 400);
+
+  if (process.env.BINANCE_ENV !== 'testnet') {
+    return json(req, { ok: false, error: 'Worker pairing requires BINANCE_ENV=testnet.' }, 403);
+  }
+  if (process.env.BOT_LIVE_TRADING_ENABLED === 'true' || process.env.BOT_ALLOW_REAL_ORDERS === 'true') {
+    return json(req, { ok: false, error: 'Live trading flags are active. Pairing is disabled.' }, 403);
+  }
+
+  const store = await loadPairings();
+  prunePairings(store);
+  const rec = store.codes[code];
+  if (!rec) { await savePairings(store); return json(req, { ok: false, error: 'Invalid pairing code.' }, 404); }
+  if (rec.status === 'used' || rec.usedAt) { return json(req, { ok: false, error: 'Pairing code already used.' }, 409); }
+  if (new Date(rec.expiresAt).getTime() < Date.now()) {
+    rec.status = 'expired';
+    await savePairings(store);
+    return json(req, { ok: false, error: 'Pairing code expired. Generate a new one from the web app.' }, 410);
+  }
+
+  const token = process.env.BOT_WORKER_TOKEN || '';
+  if (!token) return json(req, { ok: false, error: 'Worker token is not configured on the control server.' }, 500);
+
+  rec.status = 'used';
+  rec.usedAt = new Date().toISOString();
+  rec.platform = typeof body.platform === 'string' ? body.platform.slice(0, 60) : rec.platform || null;
+  rec.hostname = typeof body.hostname === 'string' ? body.hostname.slice(0, 120) : null;
+  await savePairings(store);
+
+  return json(req, {
+    ok: true,
+    controlUrl: selfOrigin(req),
+    workerToken: token,
+    ownerEmail: rec.ownerEmail || null,
+    mode: 'testnet',
+  });
+}
+
 const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack']);
-const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'session', 'create-execution-intent', 'create-smoke-execution-intent']);
+const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-worker-pairing-code']);
 
 function isWorkerRoute(route) {
   return route === 'execution-intent';
@@ -1662,6 +2049,16 @@ export default async function handler(req) {
   const segments = route.split('/').filter(Boolean);
   const base = segments[0] || route;
   let auth = { ok: true, authMode: 'worker' };
+
+  // ── Worker Bootstrap install flow (public; no Origin/JWT gate) ──
+  // GET /api/bot/install/<platform> serves a public, secret-free bootstrap.
+  // POST /api/bot/worker-pair is authenticated by the pairing code itself.
+  if (base === 'install') {
+    return await handleInstallScript(req, segments);
+  }
+  if (base === 'worker-pair') {
+    return await handleWorkerPair(req);
+  }
 
   // ── Bot Fleet Manager dispatch (takes precedence over legacy routing) ──
   if (FLEET_WORKER_BASES.has(base)) {

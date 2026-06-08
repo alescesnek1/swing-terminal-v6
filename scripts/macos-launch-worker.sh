@@ -84,22 +84,40 @@ ERR_LOG=${ERR_Q}
 SESSION_ID=${SESSION_Q}
 CONTROL=${CONTROL_Q}
 cd "\${REPO_ROOT}"
-printf '[LAUNCHER] Repo root: %s\\n' "\${REPO_ROOT}"
-printf '[LAUNCHER] Session: %s\\n' "\${SESSION_ID}"
-printf '[LAUNCHER] Log: %s\\n' "\${LOG_FILE}"
+launcher_log() { printf '%s\\n' "\$1" | tee -a "\${LOG_FILE}"; }
+launcher_log "[LAUNCHER] Repo root: \${REPO_ROOT}"
+launcher_log "[LAUNCHER] Session: \${SESSION_ID}"
+launcher_log "[LAUNCHER] Log: \${LOG_FILE}"
+launcher_log "[LAUNCHER] Loading .env.worker..."
+ENV_FILE="\${REPO_ROOT}/.env.worker"
+if [ ! -f "\${ENV_FILE}" ]; then
+  launcher_log "[LAUNCHER] .env.worker not found at \${ENV_FILE}"
+  read -r -p "Press Enter to close"
+  exit 1
+fi
 set -a
-. "\${REPO_ROOT}/.env.worker"
+. "\${ENV_FILE}"
 set +a
 export WORKER_LAUNCHED_BY_PROTOCOL=true
 export WORKER_SESSION_ID="\${SESSION_ID}"
-if [ -n "\${CONTROL}" ]; then
+if [ -z "\${BOT_CONTROL_URL:-}" ] && [ -n "\${CONTROL}" ]; then
   export BOT_CONTROL_URL="\${CONTROL}"
 fi
+launcher_log "[LAUNCHER] WORKER_MODE: \${WORKER_MODE:-}"
+launcher_log "[LAUNCHER] BINANCE_ENV: \${BINANCE_ENV:-}"
+launcher_log "[LAUNCHER] BOT_CONTROL_URL: \${BOT_CONTROL_URL:-}"
+launcher_log "[LAUNCHER] hasWorkerToken: \$([ -n "\${BOT_WORKER_TOKEN:-}" ] && printf True || printf False)"
+launcher_log "[LAUNCHER] hasBinanceKey: \$([ -n "\${BINANCE_API_KEY:-}" ] && printf True || printf False)"
+launcher_log "[LAUNCHER] hasBinanceSecret: \$([ -n "\${BINANCE_API_SECRET:-}" ] && printf True || printf False)"
+exit_code=0
 npm run bot:worker -- --session "\${SESSION_ID}" 2>&1 | tee -a "\${LOG_FILE}" || {
   status=\$?
   printf '[LAUNCHER] Worker exited with status %s\\n' "\${status}" >> "\${ERR_LOG}"
-  exit "\${status}"
+  exit_code="\${status}"
 }
+launcher_log "[LAUNCHER] Worker exited with code \${exit_code}"
+read -r -p "Press Enter to close"
+exit "\${exit_code}"
 RUNNER_EOF
 chmod +x "${RUNNER}"
 

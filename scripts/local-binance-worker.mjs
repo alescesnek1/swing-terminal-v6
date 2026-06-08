@@ -14,6 +14,37 @@ function getArg(name) {
   return undefined;
 }
 
+function loadDotEnvWorkerIfNeeded() {
+  const required = ['WORKER_MODE', 'BOT_CONTROL_URL', 'BOT_WORKER_TOKEN', 'BINANCE_ENV', 'BINANCE_API_KEY', 'BINANCE_API_SECRET'];
+  if (required.every((key) => process.env[key])) return { loaded: false, path: null, keysApplied: 0, reason: 'env_present' };
+  const envPath = path.join(__dirname, '..', '.env.worker');
+  if (!fs.existsSync(envPath)) return { loaded: false, path: envPath, keysApplied: 0, reason: 'missing_file' };
+  let keysApplied = 0;
+  const raw = fs.readFileSync(envPath, 'utf8');
+  for (const row of raw.split(/\r?\n/)) {
+    const line = row.trim();
+    if (!line || line.startsWith('#')) continue;
+    const idx = line.indexOf('=');
+    if (idx < 1) continue;
+    const key = line.slice(0, idx).trim();
+    let value = line.slice(idx + 1).trim();
+    if (!key || process.env[key]) continue;
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    process.env[key] = value;
+    keysApplied++;
+  }
+  return { loaded: true, path: envPath, keysApplied, reason: 'loaded_missing_keys' };
+}
+
+const dotEnvWorkerLoad = loadDotEnvWorkerIfNeeded();
+if (dotEnvWorkerLoad.loaded) {
+  console.log(`[ENV] Loaded .env.worker for missing worker env (${dotEnvWorkerLoad.keysApplied} keys applied).`);
+} else if (dotEnvWorkerLoad.reason === 'missing_file') {
+  console.warn(`[ENV] .env.worker not found at ${dotEnvWorkerLoad.path}; using process environment only.`);
+}
+
 // --- Configuration ---
 const workerMode = process.env.WORKER_MODE;
 const binanceEnv = process.env.BINANCE_ENV;
@@ -104,6 +135,8 @@ function stepPrecision(stepSize) {
 let currentState = 'starting';
 let stopping = false;
 const ackedCommands = new Set();
+let heartbeatDiagnosticLogged = false;
+let sessionPollDiagnosticLogged = false;
 
 // --- Control plane I/O ---
 async function sendHeartbeat() {
@@ -119,8 +152,13 @@ async function sendHeartbeat() {
         currentState, launchedByProtocol, realProductionOrder: false,
       }),
     });
+    const payload = await res.json().catch(() => null);
+    if (!heartbeatDiagnosticLogged) {
+      console.log(`[DIAG] heartbeat endpoint attempt: HTTP ${res.status} ok=${res.ok} sessionKnown=${payload && payload.sessionKnown !== undefined ? payload.sessionKnown : 'unknown'}`);
+      heartbeatDiagnosticLogged = true;
+    }
     if (!res.ok) { console.warn(`[WARN] Heartbeat HTTP ${res.status}`); return null; }
-    return await res.json().catch(() => null);
+    return payload;
   } catch (err) { console.warn(`[WARN] Heartbeat error: ${err.message}`); return null; }
 }
 
@@ -128,8 +166,13 @@ async function fetchSession() {
   try {
     const url = `${controlUrl}/api/bot/worker-session?sessionId=${encodeURIComponent(sessionId)}&workerId=${encodeURIComponent(workerId)}`;
     const res = await fetch(url, { headers: { 'X-BOT-WORKER-TOKEN': workerToken } });
+    const payload = await res.json().catch(() => null);
+    if (!sessionPollDiagnosticLogged) {
+      console.log(`[DIAG] worker-session poll result: HTTP ${res.status} ok=${res.ok} hasSession=${!!(payload && payload.session)} stopRequested=${payload && payload.stopRequested === true}`);
+      sessionPollDiagnosticLogged = true;
+    }
     if (!res.ok) { console.warn(`[WARN] worker-session HTTP ${res.status}`); return null; }
-    return await res.json().catch(() => null);
+    return payload;
   } catch (err) { console.warn(`[WARN] Session poll error: ${err.message}`); return null; }
 }
 
@@ -394,6 +437,8 @@ async function main() {
   currentState = 'running';
   console.log(`[START] Local Binance Worker (Testnet, session=${sessionId}, workerId=${workerId})`);
   console.log(`[INFO] Control URL: ${controlUrl} | poll ${pollIntervalMs}ms | heartbeat ${HEARTBEAT_INTERVAL_MS}ms`);
+  console.log(`[INFO] Session ID: ${sessionId}`);
+  console.log(`[INFO] workerId: ${workerId}`);
   if (launchedByProtocol) console.log('[INFO] Launched via swingworker:// protocol handler.');
 
   await sendHeartbeat();

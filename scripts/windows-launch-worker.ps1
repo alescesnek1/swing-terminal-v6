@@ -108,25 +108,78 @@ $runnerPath = Join-Path $LogDir ("run-worker-session-{0}.ps1" -f $safeSessionFor
 $quotedRepoRoot = Quote-PwshSingle $RepoRoot
 $quotedOutLog = Quote-PwshSingle $OutLog
 $quotedErrLog = Quote-PwshSingle $ErrLog
+$quotedEnvPath = Quote-PwshSingle (Join-Path $RepoRoot '.env.worker')
 $sessionArg = if ($sessionId) { $sessionId } else { '' }
 $quotedSession = Quote-PwshSingle $sessionArg
+$controlArg = if ($control) { $control } else { '' }
+$quotedControl = Quote-PwshSingle $controlArg
 
 $runner = @"
 `$ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $quotedRepoRoot
-Write-Host '[LAUNCHER] Repo root: ' -NoNewline
-Write-Host $quotedRepoRoot
-Write-Host '[LAUNCHER] Session: ' -NoNewline
-Write-Host $quotedSession
-Write-Host '[LAUNCHER] Log: ' -NoNewline
-Write-Host $quotedOutLog
+`$EnvPath = $quotedEnvPath
+`$SessionId = $quotedSession
+`$ControlUrl = $quotedControl
+`$OutLog = $quotedOutLog
+`$ErrLog = $quotedErrLog
+
+function Write-LauncherLog([string]`$msg) {
+    Write-Host `$msg
+    Add-Content -LiteralPath `$OutLog -Value `$msg -Encoding utf8
+}
+
+function Load-DotEnvWorker([string]`$envPath) {
+    if (-not (Test-Path -LiteralPath `$envPath)) {
+        throw ".env.worker not found at `$envPath"
+    }
+
+    Get-Content -LiteralPath `$envPath | ForEach-Object {
+        `$line = `$_.Trim()
+        if (-not `$line -or `$line.StartsWith('#')) { return }
+
+        `$idx = `$line.IndexOf('=')
+        if (`$idx -lt 1) { return }
+
+        `$key = `$line.Substring(0, `$idx).Trim()
+        `$value = `$line.Substring(`$idx + 1).Trim()
+
+        if ((`$value.StartsWith('"') -and `$value.EndsWith('"')) -or (`$value.StartsWith("'") -and `$value.EndsWith("'"))) {
+            `$value = `$value.Substring(1, `$value.Length - 2)
+        }
+
+        [Environment]::SetEnvironmentVariable(`$key, `$value, 'Process')
+    }
+}
+
+Write-LauncherLog "[LAUNCHER] Repo root: $RepoRoot"
+Write-LauncherLog "[LAUNCHER] Session: `$SessionId"
+Write-LauncherLog "[LAUNCHER] Log: `$OutLog"
+Write-LauncherLog '[LAUNCHER] Loading .env.worker...'
+`$exitCode = 0
 try {
-    npm run bot:worker -- --session $quotedSession 2>&1 | Tee-Object -FilePath $quotedOutLog -Append
+    Load-DotEnvWorker `$EnvPath
+    `$env:WORKER_SESSION_ID = `$SessionId
+    `$env:WORKER_LAUNCHED_BY_PROTOCOL = 'true'
+    if (-not `$env:BOT_CONTROL_URL -and `$ControlUrl) { `$env:BOT_CONTROL_URL = `$ControlUrl }
+
+    Write-LauncherLog "[LAUNCHER] WORKER_MODE: `$env:WORKER_MODE"
+    Write-LauncherLog "[LAUNCHER] BINANCE_ENV: `$env:BINANCE_ENV"
+    Write-LauncherLog "[LAUNCHER] BOT_CONTROL_URL: `$env:BOT_CONTROL_URL"
+    Write-LauncherLog "[LAUNCHER] hasWorkerToken: `$([bool]`$env:BOT_WORKER_TOKEN)"
+    Write-LauncherLog "[LAUNCHER] hasBinanceKey: `$([bool]`$env:BINANCE_API_KEY)"
+    Write-LauncherLog "[LAUNCHER] hasBinanceSecret: `$([bool]`$env:BINANCE_API_SECRET)"
+
+    npm run bot:worker -- --session `$SessionId 2>&1 | Tee-Object -FilePath `$OutLog -Append
+    `$exitCode = `$LASTEXITCODE
 } catch {
     `$msg = (`$_ | Out-String)
-    Add-Content -LiteralPath $quotedErrLog -Value `$msg -Encoding utf8
-    throw
+    Add-Content -LiteralPath `$ErrLog -Value `$msg -Encoding utf8
+    Write-LauncherLog `$msg
+    `$exitCode = 1
 }
+Write-LauncherLog "[LAUNCHER] Worker exited with code `$exitCode"
+Read-Host "Press Enter to close"
+exit `$exitCode
 "@
 Set-Content -LiteralPath $runnerPath -Value $runner -Encoding utf8
 

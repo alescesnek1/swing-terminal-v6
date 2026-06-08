@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "worker:install:windows": "powershell -ExecutionPolicy Bypass -File scripts/install-worker-windows.ps1",
+    "worker:install:macos": "bash scripts/install-worker-macos.sh",
     "worker:register:windows": "powershell -ExecutionPolicy Bypass -File scripts/register-windows-worker-protocol.ps1",
     "worker:unregister:windows": "powershell -ExecutionPolicy Bypass -File scripts/unregister-windows-worker-protocol.ps1",
     "worker:register:macos": "bash scripts/register-macos-worker-protocol.sh",
