@@ -4796,21 +4796,21 @@ function _renderBotConfirmModal() {
   const sev = cfg.severity || 'warning';
   const effects = _botConfirmList(cfg.effects);
   const warnings = _botConfirmList(cfg.warnings);
-  modal.innerHTML = '<div class="bot-confirm bot-confirm--' + _e(sev) + '" role="dialog" aria-modal="true" aria-labelledby="bot-confirm-title">'
+  modal.innerHTML = '<div class="bot-confirm bot-confirm--' + _esc(sev) + '" role="dialog" aria-modal="true" aria-labelledby="bot-confirm-title">'
     + '<div class="bot-confirm__head">'
-    + '<div id="bot-confirm-title" class="bot-confirm__title">' + _e(cfg.title || 'Confirm Action') + '</div>'
+    + '<div id="bot-confirm-title" class="bot-confirm__title">' + _esc(cfg.title || 'Confirm Action') + '</div>'
     + '<button type="button" class="bot-confirm__x" onclick="closeBotConfirmModal()" aria-label="Cancel"' + (cfg.busy ? ' disabled' : '') + '>x</button>'
     + '</div>'
     + '<div class="bot-confirm__body">'
-    + (cfg.summary ? '<p class="bot-confirm__summary">' + _e(cfg.summary) + '</p>' : '')
-    + (effects.length ? '<div class="bot-confirm__section"><div class="bot-confirm__label">Effects</div><ul>' + effects.map((x) => '<li>' + _e(x) + '</li>').join('') + '</ul></div>' : '')
-    + (warnings.length ? '<div class="bot-confirm__section bot-confirm__section--warning"><div class="bot-confirm__label">Warnings</div><ul>' + warnings.map((x) => '<li>' + _e(x) + '</li>').join('') + '</ul></div>' : '')
-    + (cfg.error ? '<div class="bot-confirm__error">' + _e(cfg.error) + '</div>' : '')
+    + (cfg.summary ? '<p class="bot-confirm__summary">' + _esc(cfg.summary) + '</p>' : '')
+    + (effects.length ? '<div class="bot-confirm__section"><div class="bot-confirm__label">Effects</div><ul>' + effects.map((x) => '<li>' + _esc(x) + '</li>').join('') + '</ul></div>' : '')
+    + (warnings.length ? '<div class="bot-confirm__section bot-confirm__section--warning"><div class="bot-confirm__label">Warnings</div><ul>' + warnings.map((x) => '<li>' + _esc(x) + '</li>').join('') + '</ul></div>' : '')
+    + (cfg.error ? '<div class="bot-confirm__error">' + _esc(cfg.error) + '</div>' : '')
     + '</div>'
     + '<div class="bot-confirm__actions">'
-    + '<button type="button" class="paperbot-control-btn" onclick="closeBotConfirmModal()"' + (cfg.busy ? ' disabled' : '') + '>' + _e(cfg.cancelLabel || 'Cancel') + '</button>'
+    + '<button type="button" class="paperbot-control-btn" onclick="closeBotConfirmModal()"' + (cfg.busy ? ' disabled' : '') + '>' + _esc(cfg.cancelLabel || 'Cancel') + '</button>'
     + '<button id="bot-confirm-continue" type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="confirmBotConfirmModal()"' + (cfg.busy ? ' disabled' : '') + '>'
-    + _e(cfg.busy ? 'Working...' : (cfg.confirmLabel || 'Continue')) + '</button>'
+    + _esc(cfg.busy ? 'Working...' : (cfg.confirmLabel || 'Continue')) + '</button>'
     + '</div>'
     + '</div>';
 }
@@ -5181,7 +5181,7 @@ function _renderInstallModal() {
   if (ins.loading) {
     body = '<div class="install-loading">Generating a secure one-time pairing code…</div>';
   } else if (ins.error) {
-    body = '<div class="install-error">Could not start install: ' + _e(ins.error) + '</div>'
+    body = '<div class="install-error">Could not start install: ' + _esc(ins.error) + '</div>'
       + '<button type="button" class="paperbot-control-btn" onclick="openInstallWorker()">Try again</button>';
   } else {
     body = '<div class="install-tabs">'
@@ -5189,10 +5189,10 @@ function _renderInstallModal() {
       + '<button type="button" class="install-tab' + (plat === 'macos' ? ' install-tab--active' : '') + '" onclick="setInstallTab(\'macos\')">macOS</button>'
       + '</div>'
       + '<div class="install-step">Open ' + (plat === 'macos' ? 'Terminal' : 'PowerShell') + ' on the computer that will run the bot, then paste &amp; run:</div>'
-      + '<div class="install-cmd-box"><code id="install-cmd">' + _e(cmd) + '</code></div>'
+      + '<div class="install-cmd-box"><code id="install-cmd">' + _esc(cmd) + '</code></div>'
       + '<div class="install-actions-row">'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="copyInstallCommand()">Copy command</button>'
-      + '<span id="install-countdown" class="install-countdown">' + _e(_installCountdownText()) + '</span>'
+      + '<span id="install-countdown" class="install-countdown">' + _esc(_installCountdownText()) + '</span>'
       + '</div>'
       + '<div class="install-secnote">This installs the local worker and asks for Binance Spot Testnet keys <b>locally on that computer</b>. '
       + 'Keys are never sent to the web. The command carries only a one-time pairing code — no Binance keys and no worker token.</div>'
@@ -5770,20 +5770,20 @@ function _fleetClosedTradeCardHtml(t, _e, opts) {
   const netText = t.pnlIsNet && Number.isFinite(Number(t.netPnl)) ? _fmtPnlUsd(t.netPnl) : 'gross PnL';
   return '<div class="fleet-result-card' + (dust ? ' fleet-result-card--dust' : '') + '">'
     + '<div class="fleet-result-card__head">'
-    + '<span class="fleet-result-card__title">' + _e(t.symbol || 'TRADE') + ' CLOSED</span>'
-    + '<span class="fleet-result-card__pnl" style="color:' + pnlColor + '">' + _e(_fmtPnlUsd(t.realizedPnl))
-    + (Number.isFinite(Number(t.realizedPnlPct)) ? ' · ' + _e(_fmtPnlPct(t.realizedPnlPct)) : '') + '</span>'
+    + '<span class="fleet-result-card__title">' + _esc(t.symbol || 'TRADE') + ' CLOSED</span>'
+    + '<span class="fleet-result-card__pnl" style="color:' + pnlColor + '">' + _esc(_fmtPnlUsd(t.realizedPnl))
+    + (Number.isFinite(Number(t.realizedPnlPct)) ? ' · ' + _esc(_fmtPnlPct(t.realizedPnlPct)) : '') + '</span>'
     + '</div>'
     + '<div class="fleet-result-card__grid">'
-    + '<div><span>Entry → Exit</span><b>' + _e(_fmtPrice(t.entryAvgPrice)) + ' → ' + _e(_fmtPrice(t.closeAvgPrice)) + '</b></div>'
-    + '<div><span>Bought / Sold</span><b>' + _e(_fmtQty(t.boughtQty)) + ' / ' + _e(_fmtQty(t.soldQty)) + '</b></div>'
-    + '<div><span>Entry order</span><b>' + _e(t.entryOrderId || '—') + '</b></div>'
-    + '<div><span>Close order</span><b>' + _e(t.closeOrderId || '—') + '</b></div>'
-    + '<div><span>Duration</span><b>' + _e(_fleetFmtDuration(t.durationMs)) + '</b></div>'
-    + '<div><span>Status</span><b>' + _e(statusLabel) + '</b></div>'
-    + (dust ? '<div><span>Residual dust</span><b>' + _e(_fmtQty(t.residualDust)) + ' ' + _e((t.symbol || '').replace(/USDT$|USDC$/, '')) + '</b></div>' : '')
-    + '<div><span>Fees</span><b>' + _e(feeText) + '</b></div>'
-    + '<div><span>PnL basis</span><b>' + _e(netText) + '</b></div>'
+    + '<div><span>Entry → Exit</span><b>' + _esc(_fmtPrice(t.entryAvgPrice)) + ' → ' + _esc(_fmtPrice(t.closeAvgPrice)) + '</b></div>'
+    + '<div><span>Bought / Sold</span><b>' + _esc(_fmtQty(t.boughtQty)) + ' / ' + _esc(_fmtQty(t.soldQty)) + '</b></div>'
+    + '<div><span>Entry order</span><b>' + _esc(t.entryOrderId || '—') + '</b></div>'
+    + '<div><span>Close order</span><b>' + _esc(t.closeOrderId || '—') + '</b></div>'
+    + '<div><span>Duration</span><b>' + _esc(_fleetFmtDuration(t.durationMs)) + '</b></div>'
+    + '<div><span>Status</span><b>' + _esc(statusLabel) + '</b></div>'
+    + (dust ? '<div><span>Residual dust</span><b>' + _esc(_fmtQty(t.residualDust)) + ' ' + _esc((t.symbol || '').replace(/USDT$|USDC$/, '')) + '</b></div>' : '')
+    + '<div><span>Fees</span><b>' + _esc(feeText) + '</b></div>'
+    + '<div><span>PnL basis</span><b>' + _esc(netText) + '</b></div>'
     + '</div>'
     + (showStart ? '<div class="fleet-action-row"><button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT AGAIN</button></div>' : '')
     + '</div>';
@@ -5850,9 +5850,9 @@ function renderFleet() {
   let html = '<div class="fleet-top">'
     + '<div class="fleet-regime" style="border-color:' + rgColor + '33">'
     + '<div class="fleet-regime__label">MARKET REGIME</div>'
-    + '<div class="fleet-regime__badge" style="color:' + rgColor + '">' + _e(rg) + '</div>'
+    + '<div class="fleet-regime__badge" style="color:' + rgColor + '">' + _esc(rg) + '</div>'
     + '<div class="fleet-regime__entries">Entries Allowed: <b style="color:' + (entriesAllowed ? '#00ff80' : '#ff4a4a') + '">' + (entriesAllowed ? 'YES' : 'NO') + '</b></div>'
-    + '<ul class="fleet-regime__reasons">' + ((regime && regime.reason || []).map((r) => '<li>' + _e(r) + '</li>').join('') || '<li>—</li>') + '</ul>'
+    + '<ul class="fleet-regime__reasons">' + ((regime && regime.reason || []).map((r) => '<li>' + _esc(r) + '</li>').join('') || '<li>—</li>') + '</ul>'
     + '<div class="fleet-regime__updated">updated ' + (regime && regime.updatedAt ? new Date(regime.updatedAt).toLocaleTimeString() : '—') + '</div>'
     + '</div>'
     + '<div class="fleet-actions-top">'
@@ -5863,7 +5863,7 @@ function renderFleet() {
     + (anyOpenPosition
         // Open position → START is disabled with a reason; reconnect is primary.
         ? '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" disabled title="Disabled: close BTCUSDT position first">START BOT (disabled: close position first)</button>'
-          + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="reconnectWorkerToSession(\'' + _e(openPosSession.sessionId) + '\')">Reconnect Worker to Position Session</button>'
+          + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="reconnectWorkerToSession(\'' + _esc(openPosSession.sessionId) + '\')">Reconnect Worker to Position Session</button>'
         : !newEntriesAllowed
           // Non-durable store → START disabled (close-only mode).
           ? '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" disabled title="Disabled: control state not durable">START BOT (disabled: store not durable)</button>'
@@ -5871,8 +5871,8 @@ function renderFleet() {
     + (staleSessions.length > 1 && !anyOpenPosition ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearStaleSessions()">CLEAR STALE SESSIONS</button>' : '')
     + (Fleet.retryLaunchUrl ? '<button type="button" class="paperbot-control-btn" onclick="retryOpenWorkerTerminal()">Retry Open Worker Terminal</button>' : '')
     + '</div>'
-    + '<div id="fleet-conn" class="fleet-conn">' + (durable ? 'durable store (durable_blobs) · ' : 'in-memory store (memory_fallback) · ') + (data.isAdmin ? 'admin' : 'user') + ' · ' + _e(data.identity && data.identity.email || '') + '</div>'
-    + (Fleet.launchNotice ? '<div class="fleet-notice">' + _e(Fleet.launchNotice) + '</div>' : '')
+    + '<div id="fleet-conn" class="fleet-conn">' + (durable ? 'durable store (durable_blobs) · ' : 'in-memory store (memory_fallback) · ') + (data.isAdmin ? 'admin' : 'user') + ' · ' + _esc(data.identity && data.identity.email || '') + '</div>'
+    + (Fleet.launchNotice ? '<div class="fleet-notice">' + _esc(Fleet.launchNotice) + '</div>' : '')
     + (anyOpenPosition ? '' : '<div class="fleet-hint">First time on this computer? Click <b>Install Worker</b>. After that, the entire testnet lifecycle is button-driven — no terminal needed.</div>')
     + '</div>'
     + '</div>';
@@ -5881,15 +5881,15 @@ function renderFleet() {
   // blocked, say exactly that. Closing existing positions stays allowed. ──
   html += '<div class="fleet-live-readiness' + (String(liveDisplayState).indexOf('LIVE RUNNING') === 0 ? ' fleet-live-readiness--running' : '') + '">'
     + '<div class="fleet-live-readiness__head">'
-    + '<div><div class="fleet-live-readiness__kicker">LIVE READINESS</div><div class="fleet-live-readiness__state">' + _e(liveDisplayState) + '</div></div>'
+    + '<div><div class="fleet-live-readiness__kicker">LIVE READINESS</div><div class="fleet-live-readiness__state">' + _esc(liveDisplayState) + '</div></div>'
     + '<div class="fleet-live-readiness__banner">LIVE SPOT</div>'
     + '</div>'
     + '<div class="fleet-live-readiness__warn">REAL MONEY SPOT TRADING</div>'
     + '<div class="fleet-live-readiness__caps">'
-    + '<div><span>Max trade</span><b>$' + _e(liveCaps.maxPositionUsd || 10) + '</b></div>'
-    + '<div><span>Max daily loss</span><b>$' + _e(liveCaps.maxDailyLossUsd || 5) + '</b></div>'
-    + '<div><span>Max daily trades</span><b>' + _e(liveCaps.maxDailyTrades || 3) + '</b></div>'
-    + '<div><span>Allowed symbols</span><b>' + _e((liveCaps.allowedSymbols || ['BTCUSDT']).join(', ')) + '</b></div>'
+    + '<div><span>Max trade</span><b>$' + _esc(liveCaps.maxPositionUsd || 10) + '</b></div>'
+    + '<div><span>Max daily loss</span><b>$' + _esc(liveCaps.maxDailyLossUsd || 5) + '</b></div>'
+    + '<div><span>Max daily trades</span><b>' + _esc(liveCaps.maxDailyTrades || 3) + '</b></div>'
+    + '<div><span>Allowed symbols</span><b>' + _esc((liveCaps.allowedSymbols || ['BTCUSDT']).join(', ')) + '</b></div>'
     + '</div>'
     + (globalKillActive ? '<div class="fleet-live-readiness__kill">GLOBAL KILL SWITCH ACTIVE</div><div class="fleet-smoke__note">Entries are blocked because global kill switch is active.</div>' : '')
     + adminLiveControls
@@ -5898,8 +5898,8 @@ function renderFleet() {
   if (!newEntriesAllowed) {
     html += '<div class="fleet-error-panel fleet-error-panel--danger">'
       + '<div class="fleet-error-panel__title">CONTROL STATE NOT DURABLE — ONLY CLOSE EXISTING POSITIONS ALLOWED</div>'
-      + '<div class="fleet-error-panel__body">Fleet store is <b>' + _e(data.storeMode || 'memory_fallback') + '</b>'
-      + (data.storeError ? ' (' + _e(data.storeError) + ')' : '') + '. '
+      + '<div class="fleet-error-panel__body">Fleet store is <b>' + _esc(data.storeMode || 'memory_fallback') + '</b>'
+      + (data.storeError ? ' (' + _esc(data.storeError) + ')' : '') + '. '
       + 'START BOT and smoke orders are blocked. Enable Netlify Blobs (or set NETLIFY_SITE_ID + NETLIFY_API_TOKEN) before starting new sessions.</div>'
       + '</div>';
   }
@@ -5915,26 +5915,26 @@ function renderFleet() {
   if (openPosSession) {
     const pos0 = (openPosSession.openPositions && openPosSession.openPositions[0]) || {};
     const sym = (pos0.symbol || 'POSITION');
-    const posLine = _e(sym + ' qty ' + (pos0.executedQty || '—') + ' · order ' + (pos0.orderId || '—'));
+    const posLine = _esc(sym + ' qty ' + (pos0.executedQty || '—') + ' · order ' + (pos0.orderId || '—'));
     const workerSid = openPosWorkerOnline ? openPosSession.sessionId : ((mismatchWorker && sessions.find(_fleetWorkerOnline)) ? sessions.find(_fleetWorkerOnline).sessionId : null);
     const progress = _fleetCloseProgress(openPosSession);
     // ONE giant primary panel (spec A): close is the only primary action.
     html += '<div class="fleet-error-panel fleet-error-panel--danger fleet-close-panel">'
-      + '<div class="fleet-error-panel__title">' + _e(sym) + ' OPEN — CLOSE REQUIRED</div>'
+      + '<div class="fleet-error-panel__title">' + _esc(sym) + ' OPEN — CLOSE REQUIRED</div>'
       + '<div class="fleet-error-panel__body">' + posLine + ' &middot; status open. START BOT and smoke orders are disabled until it is closed.</div>'
       + (mismatchWorker ? '<div class="fleet-orphan-warning" style="color:#ff4a4a;border-color:#ff4a4a"><b>WORKER CONNECTED TO DIFFERENT SESSION — RECONNECT REQUIRED</b></div>' : '')
-      + (progress ? '<div class="fleet-progress">' + _e(progress) + '</div>' : '')
+      + (progress ? '<div class="fleet-progress">' + _esc(progress) + '</div>' : '')
       + '<div class="fleet-action-row">'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop fleet-close-primary" onclick="stopAndCloseSession(\'' + _e(openPosSession.sessionId) + '\')">CLOSE ' + _e(sym) + ' TESTNET POSITION</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop fleet-close-primary" onclick="stopAndCloseSession(\'' + _esc(openPosSession.sessionId) + '\')">CLOSE ' + _esc(sym) + ' TESTNET POSITION</button>'
       + '</div>'
       + '<div class="fleet-action-row fleet-action-row--secondary">'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _e(openPosSession.sessionId) + '\')">Emergency Close Testnet</button>'
-      + (openPosWorkerOnline ? '' : '<button type="button" class="paperbot-control-btn" onclick="reconnectWorkerToSession(\'' + _e(openPosSession.sessionId) + '\')">Reconnect Worker</button>')
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _esc(openPosSession.sessionId) + '\')">Emergency Close Testnet</button>'
+      + (openPosWorkerOnline ? '' : '<button type="button" class="paperbot-control-btn" onclick="reconnectWorkerToSession(\'' + _esc(openPosSession.sessionId) + '\')">Reconnect Worker</button>')
       + '</div>'
       + '<div class="fleet-debug-rows">'
-      + '<div class="fleet-hint fleet-hint--mono">open-position sessionId: <code onclick="_fleetCopy(\'' + _e(openPosSession.sessionId) + '\')" title="Click to copy" style="cursor:pointer">' + _e(openPosSession.sessionId) + '</code></div>'
-      + '<div class="fleet-hint fleet-hint--mono">selected sessionId: ' + _e(Fleet.selectedId || '—') + '</div>'
-      + '<div class="fleet-hint fleet-hint--mono">worker sessionId: ' + _e(workerSid || (openPosWorkerOnline ? openPosSession.sessionId : 'offline')) + '</div>'
+      + '<div class="fleet-hint fleet-hint--mono">open-position sessionId: <code onclick="_fleetCopy(\'' + _esc(openPosSession.sessionId) + '\')" title="Click to copy" style="cursor:pointer">' + _esc(openPosSession.sessionId) + '</code></div>'
+      + '<div class="fleet-hint fleet-hint--mono">selected sessionId: ' + _esc(Fleet.selectedId || '—') + '</div>'
+      + '<div class="fleet-hint fleet-hint--mono">worker sessionId: ' + _esc(workerSid || (openPosWorkerOnline ? openPosSession.sessionId : 'offline')) + '</div>'
       + '</div>'
       + '</div>';
   }
@@ -5968,7 +5968,7 @@ function renderFleet() {
     html += '<div class="fleet-error-panel">'
       + '<div class="fleet-error-panel__title">Session limit reached</div>'
       + '<div class="fleet-error-panel__body">Blocking sessions: '
-      + (blockers.map((s) => _e((s.sessionId || '').slice(0, 12)) + ' ' + _e(s.status || '')).join(', ') || 'none reported')
+      + (blockers.map((s) => _esc((s.sessionId || '').slice(0, 12)) + ' ' + _esc(s.status || '')).join(', ') || 'none reported')
       + '</div>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearStaleSessions()">CLEAR STALE SESSIONS</button>'
       + '</div>';
@@ -5991,11 +5991,11 @@ function renderFleet() {
     const sel2 = s.sessionId === Fleet.selectedId ? ' fleet-worker--sel' : '';
     const staleClass = staleLabel ? ' fleet-worker--stale' : '';
     const badge = orphanRow ? 'POSITION OPEN' : staleLabel;
-    html += '<div class="fleet-worker' + sel2 + staleClass + (orphanRow ? ' fleet-worker--orphan' : '') + '" onclick="selectFleetSession(\'' + _e(s.sessionId) + '\')">'
+    html += '<div class="fleet-worker' + sel2 + staleClass + (orphanRow ? ' fleet-worker--orphan' : '') + '" onclick="selectFleetSession(\'' + _esc(s.sessionId) + '\')">'
       + '<span class="fleet-dot" style="background:' + dot + '"></span>'
-      + '<span class="fleet-worker__email">' + _e(s.ownerEmail || s.ownerUserId || 'unknown') + '</span>'
-      + (badge ? '<span class="fleet-worker__badge">' + _e(badge) + '</span>' : '')
-      + '<span class="fleet-worker__meta">' + _e((s.worker && s.worker.platform) || '—') + ' · ' + _e(s.status) + '</span>'
+      + '<span class="fleet-worker__email">' + _esc(s.ownerEmail || s.ownerUserId || 'unknown') + '</span>'
+      + (badge ? '<span class="fleet-worker__badge">' + _esc(badge) + '</span>' : '')
+      + '<span class="fleet-worker__meta">' + _esc((s.worker && s.worker.platform) || '—') + ' · ' + _esc(s.status) + '</span>'
       + '</div>';
   }
   // History / Stopped Sessions: collapsed, neutral (never red), out of the way.
@@ -6005,13 +6005,13 @@ function renderFleet() {
     for (const s of historySessions.slice(0, 12)) {
       const exitedClean = _fleetExitedCleanly(s);
       const note = exitedClean ? 'exited cleanly' : (_fleetStaleLabel(s) || s.status || 'stopped');
-      html += '<div class="fleet-history__row fleet-history__row--btn" onclick="selectFleetSession(\'' + _e(s.sessionId) + '\')">'
+      html += '<div class="fleet-history__row fleet-history__row--btn" onclick="selectFleetSession(\'' + _esc(s.sessionId) + '\')">'
         + '<span class="fleet-dot" style="background:#5a6b7a"></span>'
-        + '<span>' + _e((s.sessionId || '').slice(0, 12)) + '</span>'
-        + '<b>' + _e(note) + '</b></div>';
+        + '<span>' + _esc((s.sessionId || '').slice(0, 12)) + '</span>'
+        + '<b>' + _esc(note) + '</b></div>';
     }
     for (const s of clearedSessions.slice(0, 10)) {
-      html += '<div class="fleet-history__row"><span class="fleet-dot" style="background:#5a6b7a"></span><span>' + _e((s.sessionId || '').slice(0, 12)) + '</span><b>' + _e(s.clearedReason || 'cleared') + '</b></div>';
+      html += '<div class="fleet-history__row"><span class="fleet-dot" style="background:#5a6b7a"></span><span>' + _esc((s.sessionId || '').slice(0, 12)) + '</span><b>' + _esc(s.clearedReason || 'cleared') + '</b></div>';
     }
     html += '</details>';
   }
@@ -6033,14 +6033,14 @@ function renderFleet() {
     let stateText = primary.text, stateColor = primary.color;
     // Stale label is informational only and never overrides an open-position/close state.
     if (selStaleLabel && openCountDetail === 0 && !closeFailed && !orphanOpen) { stateText = selStaleLabel; stateColor = '#ffaa00'; }
-    html += '<div class="fleet-state" style="color:' + stateColor + '">' + _e(stateText) + '</div>';
+    html += '<div class="fleet-state" style="color:' + stateColor + '">' + _esc(stateText) + '</div>';
     if (sel.entryBlockedReason === 'global_kill_switch') {
       html += '<div class="fleet-smoke__note">Entries are paused because GLOBAL KILL SWITCH is active.</div>';
     } else if (sel.entryBlockedReason === 'session_paused' || sel.pauseRequested === true) {
       html += '<div class="fleet-smoke__note">Entries are paused for this session.</div>';
     }
     const detailProgress = _fleetCloseProgress(sel);
-    if (detailProgress) html += '<div class="fleet-progress">' + _e(detailProgress) + '</div>';
+    if (detailProgress) html += '<div class="fleet-progress">' + _esc(detailProgress) + '</div>';
     // Neutral (not red) confirmation for a worker that finished and exited (spec B.5).
     if (_fleetExitedCleanly(sel)) {
       html += '<div class="fleet-clean-exit">Last worker exited cleanly — no open position. START BOT to run again.</div>';
@@ -6050,17 +6050,17 @@ function renderFleet() {
         + '<b>WORKER OFFLINE &mdash; POSITION OPEN</b> The position is still held on Binance Spot Testnet. '
         + 'Bring the worker back online so it can close the position, or use Emergency Close Testnet.'
         + '<div class="fleet-action-row">'
-        + '<button type="button" class="paperbot-control-btn" onclick="reconnectWorkerToSession(\'' + _e(sel.sessionId) + '\')">Reconnect Worker to Position Session</button>'
-        + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _e(sel.sessionId) + '\')">Emergency Close Testnet</button>'
+        + '<button type="button" class="paperbot-control-btn" onclick="reconnectWorkerToSession(\'' + _esc(sel.sessionId) + '\')">Reconnect Worker to Position Session</button>'
+        + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _esc(sel.sessionId) + '\')">Emergency Close Testnet</button>'
         + '</div>'
         + '</div>';
     }
     html += '<div class="fleet-meta-grid">'
-      + '<div><span>Owner</span><b>' + _e(sel.ownerEmail || '—') + '</b></div>'
-      + '<div><span>Platform</span><b>' + _e((sel.worker && sel.worker.platform) || '—') + '</b></div>'
+      + '<div><span>Owner</span><b>' + _esc(sel.ownerEmail || '—') + '</b></div>'
+      + '<div><span>Platform</span><b>' + _esc((sel.worker && sel.worker.platform) || '—') + '</b></div>'
       + '<div><span>Session age</span><b>' + _fleetAge(sel.createdAt) + '</b></div>'
       + '<div><span>Last heartbeat</span><b>' + (sel.worker && sel.worker.lastSeenAt ? _fleetAge(sel.worker.lastSeenAt) + ' ago' : '—') + '</b></div>'
-      + '<div><span>Worker state</span><b>' + _e((sel.worker && sel.worker.currentState) || '—') + '</b></div>'
+      + '<div><span>Worker state</span><b>' + _esc((sel.worker && sel.worker.currentState) || '—') + '</b></div>'
       + '<div><span>Realized PnL</span><b>' + (sel.realizedPnl >= 0 ? '+' : '') + (Number(sel.realizedPnl) || 0).toFixed(2) + '</b></div>'
       + '<div><span>Open positions</span><b>' + (sel.openPositions ? sel.openPositions.length : 0) + '</b></div>'
       + '<div><span>Mode</span><b>TESTNET</b></div>'
@@ -6069,9 +6069,9 @@ function renderFleet() {
     // Copyable debug rows (spec F): exact sessionId + the worker's bound session.
     const workerSessionId = (sel.worker && sel.worker.workerId) ? sel.sessionId : null; // worker reports against this session when online
     html += '<div class="fleet-debug-rows">'
-      + '<div class="fleet-hint fleet-hint--mono">selected sessionId: <code onclick="_fleetCopy(\'' + _e(sel.sessionId) + '\')" title="Click to copy" style="cursor:pointer">' + _e(sel.sessionId) + '</code></div>'
-      + (online && sel.worker ? '<div class="fleet-hint fleet-hint--mono">worker: ' + _e(sel.worker.workerId || '—') + ' · session ' + _e(workerSessionId || sel.sessionId) + '</div>' : '')
-      + (openPosSession ? '<div class="fleet-hint fleet-hint--mono">open-position sessionId: ' + _e(openPosSession.sessionId) + '</div>' : '')
+      + '<div class="fleet-hint fleet-hint--mono">selected sessionId: <code onclick="_fleetCopy(\'' + _esc(sel.sessionId) + '\')" title="Click to copy" style="cursor:pointer">' + _esc(sel.sessionId) + '</code></div>'
+      + (online && sel.worker ? '<div class="fleet-hint fleet-hint--mono">worker: ' + _esc(sel.worker.workerId || '—') + ' · session ' + _esc(workerSessionId || sel.sessionId) + '</div>' : '')
+      + (openPosSession ? '<div class="fleet-hint fleet-hint--mono">open-position sessionId: ' + _esc(openPosSession.sessionId) + '</div>' : '')
       + (mismatchWorker && openPosSession && sel.sessionId === openPosSession.sessionId
           ? '<div class="fleet-orphan-warning" style="color:#ff4a4a;border-color:#ff4a4a"><b>WORKER CONNECTED TO DIFFERENT SESSION — RECONNECT REQUIRED</b></div>'
           : '')
@@ -6111,7 +6111,7 @@ function renderFleet() {
         + '<span class="fleet-smoke__hint">Queues one BTCUSDT testnet MARKET BUY for this session (≤ $10).</span>'
         + '</div>';
     } else if (smokeBlockedReason) {
-      html += '<div class="fleet-smoke__note">' + _e(smokeBlockedReason) + '</div>';
+      html += '<div class="fleet-smoke__note">' + _esc(smokeBlockedReason) + '</div>';
     }
     // Smoke result card: once a position is actually open, do NOT keep showing the
     // intent as if still actionable — show the resulting open order instead (C5).
@@ -6121,14 +6121,14 @@ function renderFleet() {
       if (smokeOpenCount > 0 && openFromSmoke) {
         html += '<div class="fleet-smoke-result">'
           + '<div class="fleet-smoke-result__title">POSITION OPENED BY SMOKE TEST</div>'
-          + '<div class="fleet-smoke-result__body">Position opened by smoke test order ' + _e(openFromSmoke.orderId || '—')
-          + ' — ' + _e(openFromSmoke.symbol || r.symbol) + ' qty ' + _e(openFromSmoke.executedQty || '—') + '</div>'
+          + '<div class="fleet-smoke-result__body">Position opened by smoke test order ' + _esc(openFromSmoke.orderId || '—')
+          + ' — ' + _esc(openFromSmoke.symbol || r.symbol) + ' qty ' + _esc(openFromSmoke.executedQty || '—') + '</div>'
           + '</div>';
       } else {
         html += '<div class="fleet-smoke-result">'
           + '<div class="fleet-smoke-result__title">' + (r.existing ? 'SMOKE INTENT ALREADY PENDING' : 'SMOKE INTENT CREATED') + '</div>'
-          + '<div class="fleet-smoke-result__body">' + _e(r.message) + ' — ' + _e(r.symbol)
-          + (r.intentId ? ' · ' + _e(String(r.intentId).slice(0, 18)) : '') + '</div>'
+          + '<div class="fleet-smoke-result__body">' + _esc(r.message) + ' — ' + _esc(r.symbol)
+          + (r.intentId ? ' · ' + _esc(String(r.intentId).slice(0, 18)) : '') + '</div>'
           + '</div>';
       }
     }
@@ -6137,15 +6137,15 @@ function renderFleet() {
       let dbg = '';
       if (er.status === 404) {
         dbg = '<div class="fleet-smoke-error__dbg">'
-          + 'requestedSessionId: <code>' + _e(er.requestedSessionId || '—') + '</code><br>'
-          + 'selectedSessionId: <code>' + _e(er.selectedSessionId || '—') + '</code><br>'
-          + 'knownSessionIdsForUser: <code>' + _e((er.knownSessionIdsForUser || []).join(', ') || '—') + '</code><br>'
-          + 'knownRunningSessionIdsForUser: <code>' + _e((er.knownRunningSessionIdsForUser || []).join(', ') || '—') + '</code>'
+          + 'requestedSessionId: <code>' + _esc(er.requestedSessionId || '—') + '</code><br>'
+          + 'selectedSessionId: <code>' + _esc(er.selectedSessionId || '—') + '</code><br>'
+          + 'knownSessionIdsForUser: <code>' + _esc((er.knownSessionIdsForUser || []).join(', ') || '—') + '</code><br>'
+          + 'knownRunningSessionIdsForUser: <code>' + _esc((er.knownRunningSessionIdsForUser || []).join(', ') || '—') + '</code>'
           + '</div>';
       }
       html += '<div class="fleet-smoke-error">'
-        + '<div class="fleet-smoke-error__title">SMOKE INTENT FAILED' + (er.status ? ' (' + _e(er.status) + ')' : '') + '</div>'
-        + '<div class="fleet-smoke-error__body">' + _e(er.message || 'Unknown error') + '</div>'
+        + '<div class="fleet-smoke-error__title">SMOKE INTENT FAILED' + (er.status ? ' (' + _esc(er.status) + ')' : '') + '</div>'
+        + '<div class="fleet-smoke-error__body">' + _esc(er.message || 'Unknown error') + '</div>'
         + dbg
         + '</div>';
     }
@@ -6158,7 +6158,7 @@ function renderFleet() {
       html += '<table class="fleet-table"><thead><tr><th>Symbol</th><th>Qty</th><th>Status</th><th>Order</th><th>Close</th></tr></thead><tbody>';
       for (const p of positions.slice(0, 10)) {
         const sc = p.status === 'WORKER_CLOSE_FAILED' ? '#ff4a4a' : (p.status === 'closed' || p.status === 'CLOSED_WITH_DUST') ? '#8899aa' : '#00ff80';
-        html += '<tr><td>' + _e(p.symbol) + '</td><td>' + _e(p.executedQty || '—') + '</td><td style="color:' + sc + '">' + _e(p.status) + '</td><td>' + _e(p.orderId || '—') + '</td><td>' + _e(p.closeOrderId || '—') + '</td></tr>';
+        html += '<tr><td>' + _esc(p.symbol) + '</td><td>' + _esc(p.executedQty || '—') + '</td><td style="color:' + sc + '">' + _esc(p.status) + '</td><td>' + _esc(p.orderId || '—') + '</td><td>' + _esc(p.closeOrderId || '—') + '</td></tr>';
       }
       html += '</tbody></table>';
     }
@@ -6177,17 +6177,17 @@ function renderFleet() {
         const pnl = Number(t.realizedPnl);
         const pc = !Number.isFinite(pnl) ? '#8899aa' : pnl >= 0 ? '#00ff80' : '#ff6b6b';
         html += '<tr>'
-          + '<td>' + _e(t.timeClosed ? new Date(t.timeClosed).toLocaleTimeString() : '—') + '</td>'
-          + '<td>' + _e(t.symbol || '—') + '</td>'
-          + '<td>' + _e(t.side || 'LONG') + '</td>'
-          + '<td>' + _e(_fmtPrice(t.entryAvgPrice)) + '</td>'
-          + '<td>' + _e(_fmtPrice(t.closeAvgPrice)) + '</td>'
-          + '<td>' + _e(_fmtQty(t.boughtQty)) + '</td>'
-          + '<td>' + _e(_fmtQty(t.soldQty)) + '</td>'
-          + '<td>' + (Number(t.residualDust) > 0 ? _e(_fmtQty(t.residualDust)) : '—') + '</td>'
-          + '<td style="color:' + pc + '">' + _e(_fmtPnlUsd(t.realizedPnl)) + '</td>'
-          + '<td style="color:' + pc + '">' + _e(_fmtPnlPct(t.realizedPnlPct)) + '</td>'
-          + '<td>' + _e(t.status) + '</td>'
+          + '<td>' + _esc(t.timeClosed ? new Date(t.timeClosed).toLocaleTimeString() : '—') + '</td>'
+          + '<td>' + _esc(t.symbol || '—') + '</td>'
+          + '<td>' + _esc(t.side || 'LONG') + '</td>'
+          + '<td>' + _esc(_fmtPrice(t.entryAvgPrice)) + '</td>'
+          + '<td>' + _esc(_fmtPrice(t.closeAvgPrice)) + '</td>'
+          + '<td>' + _esc(_fmtQty(t.boughtQty)) + '</td>'
+          + '<td>' + _esc(_fmtQty(t.soldQty)) + '</td>'
+          + '<td>' + (Number(t.residualDust) > 0 ? _esc(_fmtQty(t.residualDust)) : '—') + '</td>'
+          + '<td style="color:' + pc + '">' + _esc(_fmtPnlUsd(t.realizedPnl)) + '</td>'
+          + '<td style="color:' + pc + '">' + _esc(_fmtPnlPct(t.realizedPnlPct)) + '</td>'
+          + '<td>' + _esc(t.status) + '</td>'
           + '</tr>';
       }
       html += '</tbody></table>';
@@ -6202,7 +6202,7 @@ function renderFleet() {
   if (!events.length) html += '<div class="fleet-empty">No events.</div>';
   else for (const ev of events.slice(0, 30)) {
     const sc = ev.severity === 'warn' ? '#ffaa00' : ev.severity === 'error' ? '#ff4a4a' : '#8899aa';
-    html += '<div class="fleet-event"><span style="color:' + sc + '">' + _e(ev.type) + '</span> ' + _e(ev.message) + '</div>';
+    html += '<div class="fleet-event"><span style="color:' + sc + '">' + _esc(ev.type) + '</span> ' + _esc(ev.message) + '</div>';
   }
   html += '</div></div>';
 

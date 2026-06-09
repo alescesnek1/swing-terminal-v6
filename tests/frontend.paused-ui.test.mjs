@@ -75,7 +75,7 @@ function loadBotConfirmHarness(extraFunctions = []) {
         error: (...args) => toasts.push(['error', ...args]),
       },
     },
-    _e: (value) => String(value == null ? '' : value)
+    _esc: (value) => String(value == null ? '' : value)
       .replaceAll('&', '&amp;')
       .replaceAll('<', '&lt;')
       .replaceAll('>', '&gt;')
@@ -228,4 +228,10 @@ test('frontend kill-switch controls render for the right active state', () => {
   assert.doesNotMatch(terminalJs, /Type: CLEAR GLOBAL KILL SWITCH/);
   assert.doesNotMatch(terminalJs, /Type: ACTIVATE GLOBAL KILL SWITCH/);
   assert.match(terminalJs, /Type: I UNDERSTAND THIS USES REAL MONEY/);
+});
+
+test('terminal.js must not contain deprecated _e( references', () => {
+  // Static scan for `_e(` to prevent regression.
+  const hasDeprecatedHelper = /\b_e\s*\(/.test(terminalJs);
+  assert.equal(hasDeprecatedHelper, false, 'Use _esc() instead of _e()');
 });
