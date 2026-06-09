@@ -1,26 +1,14 @@
-﻿{
+{
   "name": "swing-terminal-workspace",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
+  "private": true,
   "scripts": {
-    "worker:install:windows": "powershell -ExecutionPolicy Bypass -File scripts/install-worker-windows.ps1",
-    "worker:install:macos": "bash scripts/install-worker-macos.sh",
-    "worker:register:windows": "powershell -ExecutionPolicy Bypass -File scripts/register-windows-worker-protocol.ps1",
-    "worker:unregister:windows": "powershell -ExecutionPolicy Bypass -File scripts/unregister-windows-worker-protocol.ps1",
-    "worker:register:macos": "bash scripts/register-macos-worker-protocol.sh",
-    "worker:unregister:macos": "bash scripts/unregister-macos-worker-protocol.sh",
-    "worker:macos:setup": "bash scripts/setup-macos-worker.sh",
-    "worker:macos:uninstall": "bash scripts/uninstall-macos-worker.sh",
-    "worker:macos:logs": "tail -f logs/local-binance-worker.log logs/local-binance-worker.err.log",
-    "bot:worker": "node scripts/local-binance-worker.mjs",
-    "bot:worker:preflight": "node scripts/local-binance-worker.mjs --preflight",
-    "bot:worker:live-preflight": "node scripts/local-binance-worker.mjs --preflight",
     "test": "node --test \"tests/**/*.test.mjs\"",
-    "test:worker-subprocess": "node --test tests/run-worker-subprocess.mjs",e2e": "node tests/e2e-close.mjs"
+    "test:worker-subprocess": "node --test tests/run-worker-subprocess.mjs",
+    "e2e": "node tests/e2e-close.mjs",
+    "bot:worker": "node scripts/local-binance-worker.mjs",
+    "bot:worker:live-preflight": "node scripts/local-binance-worker.mjs --live-preflight"
   },
-  "dependencies": {
-    "@netlify/blobs": "^8.2.0"
-  }
+  "dependencies": {}
 }
-
