@@ -19,6 +19,6 @@
     "e2e": "node tests/e2e-close.mjs"
   },
   "dependencies": {
-    "@netlify/blobs": "^8.1.0"
+    "@netlify/blobs": "^8.2.0"
   }
 }
