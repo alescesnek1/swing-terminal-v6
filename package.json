@@ -15,6 +15,7 @@
     "worker:macos:logs": "tail -f logs/local-binance-worker.log logs/local-binance-worker.err.log",
     "bot:worker": "node scripts/local-binance-worker.mjs",
     "bot:worker:preflight": "node scripts/local-binance-worker.mjs --preflight",
+    "bot:worker:live-preflight": "node scripts/local-binance-worker.mjs --preflight",
     "test": "node --test \"tests/**/*.test.mjs\"",
     "e2e": "node tests/e2e-close.mjs"
   },

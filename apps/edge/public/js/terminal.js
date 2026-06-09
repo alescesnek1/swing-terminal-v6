@@ -6054,6 +6054,15 @@ function renderFleet() {
         + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _esc(sel.sessionId) + '\')">Emergency Close Testnet</button>'
         + '</div>'
         + '</div>';
+    } else if (openCountDetail > 0 && online && sel.worker && sel.worker.openPositions === 0) {
+      html += '<div class="fleet-orphan-warning" style="color:#ffaa00; border-color:#ffaa00">'
+        + '<b>RECOVERY MISMATCH</b> The backend has an open position, but the worker local state is empty. '
+        + 'Reconnect worker / Emergency Close required.'
+        + '<div class="fleet-action-row">'
+        + '<button type="button" class="paperbot-control-btn" onclick="reconnectWorkerToSession(\'' + _esc(sel.sessionId) + '\')">Reconnect Worker</button>'
+        + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _esc(sel.sessionId) + '\')">Emergency Close Testnet</button>'
+        + '</div>'
+        + '</div>';
     }
     html += '<div class="fleet-meta-grid">'
       + '<div><span>Owner</span><b>' + _esc(sel.ownerEmail || '—') + '</b></div>'

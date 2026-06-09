@@ -44,6 +44,9 @@ function emptyFleet() {
     commandQueue: {},     // sessionId -> Command[]
     usedIdempotencyKeys: {}, // sessionId -> string[]
     events: [],           // tagged event ring (sessionId/ownerUserId)
+    liveAuditEvents: [],   // immutable live_spot action ring, no secrets
+    livePreflight: null,   // sanitized latest local-worker live preflight result
+    globalKillSwitch: false,
     lastRegime: null,     // { regime, entriesAllowed, reason[], metrics, updatedAt }
     updatedAt: null,
   };
@@ -60,6 +63,8 @@ function normalize(data) {
     if (typeof base[k] !== 'object' || Array.isArray(base[k])) base[k] = {};
   }
   if (!Array.isArray(base.events)) base.events = [];
+  if (!Array.isArray(base.liveAuditEvents)) base.liveAuditEvents = [];
+  if (typeof base.globalKillSwitch !== 'boolean') base.globalKillSwitch = false;
   return base;
 }
 

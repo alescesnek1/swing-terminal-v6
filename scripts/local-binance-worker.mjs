@@ -15,7 +15,9 @@ const LOG_DIR = path.join(REPO_ROOT, 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'local-binance-worker.log');
 const ERR_LOG_FILE = path.join(LOG_DIR, 'local-binance-worker.err.log');
 try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch { /* best effort */ }
-try { fs.closeSync(fs.openSync(LOG_FILE, 'a')); fs.closeSync(fs.openSync(ERR_LOG_FILE, 'a')); } catch { /* best effort */ }
+try { fs.closeSync(fs.openSync(LOG_FILE,
+  _resetStoppingForTest, 'a')); fs.closeSync(fs.openSync(ERR_LOG_FILE,
+  _resetStoppingForTest, 'a')); } catch { /* best effort */ }
 function _logTs() { return new Date().toISOString(); }
 function _appendLog(file, line) { try { fs.appendFileSync(file, line + '\n'); } catch { /* never crash on logging */ } }
 function _fmtArgs(args) {
@@ -25,9 +27,13 @@ function _fmtArgs(args) {
   }).join(' ');
 }
 const _origConsole = { log: console.log.bind(console), warn: console.warn.bind(console), error: console.error.bind(console) };
-console.log = (...a) => { const m = _fmtArgs(a); _origConsole.log(m); _appendLog(LOG_FILE, `[${_logTs()}] ${m}`); };
-console.warn = (...a) => { const m = _fmtArgs(a); _origConsole.warn(m); _appendLog(LOG_FILE, `[${_logTs()}] ${m}`); };
-console.error = (...a) => { const m = _fmtArgs(a); _origConsole.error(m); _appendLog(LOG_FILE, `[${_logTs()}] ${m}`); _appendLog(ERR_LOG_FILE, `[${_logTs()}] ${m}`); };
+console.log = (...a) => { const m = _fmtArgs(a); _origConsole.log(m); _appendLog(LOG_FILE,
+  _resetStoppingForTest, `[${_logTs()}] ${m}`); };
+console.warn = (...a) => { const m = _fmtArgs(a); _origConsole.warn(m); _appendLog(LOG_FILE,
+  _resetStoppingForTest, `[${_logTs()}] ${m}`); };
+console.error = (...a) => { const m = _fmtArgs(a); _origConsole.error(m); _appendLog(LOG_FILE,
+  _resetStoppingForTest, `[${_logTs()}] ${m}`); _appendLog(ERR_LOG_FILE,
+  _resetStoppingForTest, `[${_logTs()}] ${m}`); };
 // Create the log file immediately so observability exists from the first instant.
 console.log(`[BOOT] Local Binance Worker booting (pid ${process.pid}). Log: ${LOG_FILE}`);
 
@@ -80,11 +86,26 @@ const maxPositionUsd = Number(process.env.MAX_POSITION_USD) || 10;
 const pollIntervalMs = Number(process.env.POLL_INTERVAL_MS) || 5000;
 const sessionId = getArg('session') || process.env.WORKER_SESSION_ID || null;
 const launchedByProtocol = process.env.WORKER_LAUNCHED_BY_PROTOCOL === 'true';
+const WORKER_MODES = new Set(['testnet', 'live_spot']);
+const BINANCE_ENVS = new Set(['testnet', 'live_spot']);
+const isLiveSpot = workerMode === 'live_spot' || binanceEnv === 'live_spot';
 
 const HEARTBEAT_INTERVAL_MS = 5000;
 const MAX_CLOSE_RETRIES = 5;
 const TESTNET_MAX_TRADE_USD = 10;
 const MISSING_SESSION_EXIT_MS = 60000;
+const BINANCE_TESTNET_BASE_URL = 'https://testnet.binance.vision/api';
+const BINANCE_LIVE_SPOT_BASE_URL = 'https://api.binance.com/api';
+const LIVE_SPOT_ACK_TEXT = 'I_UNDERSTAND_REAL_MONEY_RISK';
+const LIVE_PREFLIGHT_MAX_AGE_MS = Number(process.env.LIVE_PREFLIGHT_MAX_AGE_MS) || 60 * 60 * 1000;
+const LIVE_PREFLIGHT_FILE = path.join(REPO_ROOT, '.paperbot-live-spot-preflight.json');
+const SPOT_ONLY_FORBIDDEN_RE = /\/sapi|\/fapi|\/dapi|withdraw|margin|leverage|borrow|repay|marginType|isolated|cross/i;
+const SPOT_ONLY_ALLOWED = new Set([
+  'GET /v3/account',
+  'POST /v3/order',
+  'GET /v3/exchangeInfo',
+  'GET /v3/ticker/price',
+]);
 
 const isPreflight = process.argv.includes('--preflight') || process.env.WORKER_PREFLIGHT === 'true';
 
@@ -100,15 +121,18 @@ const platform = `${os.platform()}-${os.arch()}`;
 const startedAt = new Date().toISOString();
 const WORKER_VERSION = '3.0.0';
 
-// State file is namespaced per session so multiple workers on one machine don't
-// collide. The FULL sanitized sessionId is used so the file is easy to find:
-//   .paperbot-worker-state-session_<...>.json
-const stateSuffix = sessionId ? `-${sessionId.replace(/[^a-zA-Z0-9_-]/g, '')}` : '';
-const STATE_FILE = path.join(REPO_ROOT, `.paperbot-worker-state${stateSuffix}.json`);
+// State file is namespaced by mode and session so testnet can never close a live
+// position and live can never close a testnet position.
+const stateModePrefix = workerMode === 'live_spot' ? 'live' : 'testnet';
+const stateSession = sessionId ? sessionId.replace(/[^a-zA-Z0-9_-]/g, '') : 'none';
+const STATE_FILE = path.join(REPO_ROOT, `.paperbot-worker-state-${stateModePrefix}-session_${stateSession}.json`);
 
-// Hard gate: testnet only. Live/production trading is never reachable here.
-if (workerMode !== 'testnet') { console.error('[ERROR] WORKER_MODE must be testnet'); process.exit(1); }
-if (binanceEnv !== 'testnet') { console.error('[ERROR] BINANCE_ENV must be testnet'); process.exit(1); }
+if (!WORKER_MODES.has(workerMode)) { console.error('[ERROR] WORKER_MODE must be testnet or live_spot'); process.exit(1); }
+if (!BINANCE_ENVS.has(binanceEnv)) { console.error('[ERROR] BINANCE_ENV must be testnet or live_spot'); process.exit(1); }
+if ((workerMode === 'live_spot') !== (binanceEnv === 'live_spot')) {
+  console.error('[ERROR] WORKER_MODE and BINANCE_ENV must match exactly for live_spot/testnet separation.');
+  process.exit(1);
+}
 if (!controlUrl || !workerToken || !apiKey || !apiSecret) {
   console.error('[ERROR] Missing required env (BOT_CONTROL_URL, BOT_WORKER_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET).');
   process.exit(1);
@@ -118,24 +142,43 @@ if (!isPreflight && !sessionId) {
   process.exit(1);
 }
 
-// TESTNET ONLY. The base is fixed to Binance Spot Testnet. A localhost-only
-// override (http://127.0.0.1 / http://localhost) is permitted purely for offline
-// lifecycle tests; any non-localhost override is ignored so production Binance
-// remains unreachable from this worker.
-const BINANCE_TESTNET_BASE = (() => {
-  const o = process.env.BINANCE_TESTNET_BASE_OVERRIDE || '';
+function localhostOverride(name) {
+  const o = process.env[name] || '';
   if (/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(o)) return o.replace(/\/$/, '');
-  return 'https://testnet.binance.vision/api';
-})();
+  return null;
+}
+
+function getBinanceBaseUrl() {
+  if (binanceEnv === 'live_spot') return BINANCE_LIVE_SPOT_BASE_URL;
+  return localhostOverride('BINANCE_TESTNET_BASE_OVERRIDE') || BINANCE_TESTNET_BASE_URL;
+}
+
+const LEGACY_STATE_FILE = path.join(REPO_ROOT, `.paperbot-worker-state-session_${stateSession}.json`);
 
 // --- State ---
-let workerState = { usedKeys: [], positions: [] };
+let workerState = { usedKeys: [], positions: [], pendingReports: [] };
 try {
   if (fs.existsSync(STATE_FILE)) {
     const loaded = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    workerState = { usedKeys: [], positions: [], ...loaded };
+    workerState = { usedKeys: [], positions: [], pendingReports: [], ...loaded };
     if (!Array.isArray(workerState.usedKeys)) workerState.usedKeys = [];
     if (!Array.isArray(workerState.positions)) workerState.positions = [];
+    if (!Array.isArray(workerState.pendingReports)) workerState.pendingReports = [];
+  } else if (fs.existsSync(LEGACY_STATE_FILE)) {
+    const loaded = JSON.parse(fs.readFileSync(LEGACY_STATE_FILE, 'utf8'));
+    workerState = { usedKeys: [], positions: [], pendingReports: [], ...loaded };
+    if (!Array.isArray(workerState.usedKeys)) workerState.usedKeys = [];
+    if (!Array.isArray(workerState.positions)) workerState.positions = [];
+    if (!Array.isArray(workerState.pendingReports)) workerState.pendingReports = [];
+    if (workerState.positions.length > 0) {
+      console.log(`[STATE] Migrating legacy state with open positions to canonical path: ${STATE_FILE}`);
+      try {
+        fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+        fs.writeFileSync(STATE_FILE, JSON.stringify(workerState, null, 2));
+      } catch (e) {
+        console.error('[WARN] Failed to write migrated state file', e.message);
+      }
+    }
   }
 } catch (err) {
   console.error('[WARN] Failed to load local state, starting fresh.', err.message);
@@ -306,6 +349,18 @@ function computeCloseMetrics(pos, closeOrder, opts = {}) {
   const residualDust = residualDustQty(boughtQty, soldQty);
   const sellable = isResidualSellable(residualDust, opts.minQty, opts.minNotional, closeAvgPrice != null ? closeAvgPrice : entryAvgPrice);
   const status = residualDust > 0 && !sellable ? 'CLOSED_WITH_DUST' : 'closed';
+  const fees = [
+    ...feeSummaryFromFills(pos && pos.entryFills),
+    ...feeSummaryFromFills(closeOrder && closeOrder.fills),
+  ].reduce((acc, row) => {
+    const found = acc.find((x) => x.asset === row.asset);
+    if (found) found.amount += row.amount;
+    else acc.push({ ...row });
+    return acc;
+  }, []);
+  const quoteAsset = opts.quoteAsset || (pos && pos.quoteAsset) || (pos && pos.symbol && String(pos.symbol).endsWith('USDC') ? 'USDC' : 'USDT');
+  const quoteFee = fees.find((f) => f.asset === quoteAsset);
+  const netPnl = realizedPnl != null && quoteFee ? realizedPnl - quoteFee.amount : null;
   return {
     status,
     boughtQty,
@@ -316,7 +371,12 @@ function computeCloseMetrics(pos, closeOrder, opts = {}) {
     closeAvgPrice,
     realizedPnl: realizedPnl != null ? Number(realizedPnl) : null,
     realizedPnlPct: realizedPnlPct != null ? Number(realizedPnlPct) : null,
-    feesAvailable: false,
+    feesAvailable: fees.length > 0,
+    fees,
+    feeAsset: fees.length === 1 ? fees[0].asset : null,
+    feeAmount: fees.length === 1 ? fees[0].amount : null,
+    netPnl: netPnl != null ? Number(netPnl) : null,
+    pnlIsNet: netPnl != null,
   };
 }
 
@@ -364,8 +424,9 @@ async function sendHeartbeat() {
         workerId, sessionId, hostname, platform,
         status: currentState === 'stopped' ? 'offline' : 'online',
         startedAt, lastSeenAt: new Date().toISOString(),
-        pid: process.pid, mode: 'testnet', version: WORKER_VERSION,
-        currentState, launchedByProtocol, realProductionOrder: false,
+        pid: process.pid, mode: workerMode, version: WORKER_VERSION,
+        currentState, launchedByProtocol, realProductionOrder: isLiveSpot,
+        livePreflight: isLiveSpot ? readLivePreflight() : null,
         openPositions: openPositionSummary(),
       }),
     });
@@ -397,20 +458,26 @@ async function fetchSession() {
       } else {
         console.warn('[WARN] worker-session HTTP 404');
       }
-      return { ok: false, session: null, sessionMissing: true, recoveryMode: true, stopRequested: false, statusCode: 404, raw: payload };
+      return { ok: false, session: null, sessionMissing: true, recoveryMode: true, stopRequested: false, statusCode: 404, raw: payload, is5xx: false };
     }
-    if (!res.ok) { console.warn(`[WARN] worker-session HTTP ${res.status}`); return { ok: false, session: null, statusCode: res.status, raw: payload }; }
+    if (!res.ok) { 
+      console.warn(`[WARN] worker-session HTTP ${res.status}`); 
+      return { ok: false, session: null, statusCode: res.status, raw: payload, is5xx: res.status >= 500 }; 
+    }
     if (payload && payload.sessionMissing) {
       if (!recovery404Logged) {
         console.warn('[RECOVERY] worker-session 404; session missing from control plane.');
         recovery404Logged = true;
       }
-      return { ...payload, session: null };
+      return { ...payload, session: null, is5xx: false };
     }
     recovery404Logged = false;
     missingSessionSince = 0;
-    return payload;
-  } catch (err) { console.warn(`[WARN] Session poll error: ${err.message}`); return null; }
+    return { ...payload, is5xx: false };
+  } catch (err) { 
+    console.warn(`[WARN] Session poll error: ${err.message}`); 
+    return { ok: false, session: null, statusCode: 500, raw: null, is5xx: true }; 
+  }
 }
 
 async function ackCommands(ids) {
@@ -424,24 +491,78 @@ async function ackCommands(ids) {
   } catch (err) { console.warn(`[WARN] command ack error: ${err.message}`); }
 }
 
+async function flushPendingReports() {
+  if (!workerState.pendingReports || workerState.pendingReports.length === 0) return;
+  const pending = [...workerState.pendingReports];
+  const stillPending = [];
+  for (const req of pending) {
+    try {
+      const url = `${controlUrl}/api/bot/${req.endpoint}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-BOT-WORKER-TOKEN': workerToken },
+        body: JSON.stringify(req.body),
+      });
+      if (!res.ok) {
+        if (res.status >= 500) {
+          console.warn(`[WARN] Pending report retry 5xx for ${req.endpoint}. Keeping in queue.`);
+          stillPending.push(req);
+        } else {
+          console.warn(`[WARN] Pending report retry HTTP ${res.status} for ${req.endpoint}. Dropping.`);
+        }
+      } else {
+        console.log(`[INFO] Successfully flushed pending report to ${req.endpoint}.`);
+      }
+    } catch (err) {
+      console.warn(`[WARN] Pending report retry network error: ${err.message}. Keeping in queue.`);
+      stillPending.push(req);
+    }
+  }
+  if (workerState.pendingReports.length !== stillPending.length) {
+    workerState.pendingReports = stillPending;
+    saveState();
+  }
+}
+
+async function queueReport(endpoint, body) {
+  if (!workerState.pendingReports) workerState.pendingReports = [];
+  workerState.pendingReports.push({ endpoint, body: { sessionId, workerId, ...body } });
+  saveState();
+}
+
 async function reportResult(body) {
   try {
-    await fetch(`${controlUrl}/api/bot/execution-result`, {
+    const res = await fetch(`${controlUrl}/api/bot/execution-result`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-BOT-WORKER-TOKEN': workerToken },
       body: JSON.stringify({ sessionId, workerId, ...body }),
     });
-  } catch (err) { console.error(`[ERROR] reportResult: ${err.message}`); }
+    if (!res.ok && res.status >= 500) {
+      console.warn(`[WARN] reportResult HTTP ${res.status}, queuing for retry.`);
+      await queueReport('execution-result', body);
+    }
+  } catch (err) { 
+    console.error(`[ERROR] reportResult: ${err.message}. Queuing for retry.`);
+    await queueReport('execution-result', body);
+  }
 }
 
 async function reportPosition(body) {
+  const payload = { mode: workerMode, testnet: !isLiveSpot, realProductionOrder: isLiveSpot, ...body };
   try {
-    await fetch(`${controlUrl}/api/bot/position-result`, {
+    const res = await fetch(`${controlUrl}/api/bot/position-result`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-BOT-WORKER-TOKEN': workerToken },
-      body: JSON.stringify({ sessionId, workerId, testnet: true, realProductionOrder: false, ...body }),
+      body: JSON.stringify({ sessionId, workerId, ...payload }),
     });
-  } catch (err) { console.error(`[ERROR] reportPosition: ${err.message}`); }
+    if (!res.ok && res.status >= 500) {
+      console.warn(`[WARN] reportPosition HTTP ${res.status}, queuing for retry.`);
+      await queueReport('position-result', payload);
+    }
+  } catch (err) { 
+    console.error(`[ERROR] reportPosition: ${err.message}. Queuing for retry.`);
+    await queueReport('position-result', payload);
+  }
 }
 
 async function reportOpenPositions(reason) {
@@ -453,48 +574,211 @@ async function reportOpenPositions(reason) {
   }
 }
 
-// --- Binance (testnet only) ---
-async function submitMarketOrder(symbol, side, quantity, precision) {
+function liveEnvGateSnapshot() {
+  return {
+    workerMode,
+    binanceEnv,
+    liveTradingEnabled: process.env.BOT_LIVE_TRADING_ENABLED === 'true',
+    allowRealOrders: process.env.BOT_ALLOW_REAL_ORDERS === 'true',
+    liveSpotAck: process.env.LIVE_SPOT_ACK === LIVE_SPOT_ACK_TEXT,
+    localConfirm: process.env.LOCAL_WORKER_LIVE_CONFIRM === 'true',
+    globalKillSwitch: process.env.BOT_GLOBAL_KILL_SWITCH === 'true',
+  };
+}
+
+function liveRiskCaps() {
+  const maxSymbols = Number(process.env.LIVE_MAX_SYMBOLS) > 0 ? Math.floor(Number(process.env.LIVE_MAX_SYMBOLS)) : 1;
+  const allowed = String(process.env.LIVE_ALLOWED_SYMBOLS || 'BTCUSDT')
+    .split(',')
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean)
+    .slice(0, maxSymbols);
+  return {
+    maxPositionUsd: Number(process.env.LIVE_MAX_POSITION_USD) > 0 ? Number(process.env.LIVE_MAX_POSITION_USD) : 10,
+    maxDailyLossUsd: Number(process.env.LIVE_MAX_DAILY_LOSS_USD) > 0 ? Number(process.env.LIVE_MAX_DAILY_LOSS_USD) : 5,
+    maxDailyTrades: Number(process.env.LIVE_MAX_DAILY_TRADES) > 0 ? Math.floor(Number(process.env.LIVE_MAX_DAILY_TRADES)) : 3,
+    maxOpenPositions: Number(process.env.LIVE_MAX_OPEN_POSITIONS) > 0 ? Math.floor(Number(process.env.LIVE_MAX_OPEN_POSITIONS)) : 1,
+    maxSymbols,
+    allowedSymbols: allowed.length ? allowed : ['BTCUSDT'],
+    allowMarketBuy: process.env.LIVE_ALLOW_MARKET_BUY !== 'false',
+    allowMarketSell: process.env.LIVE_ALLOW_MARKET_SELL !== 'false',
+    allowLimitOrders: process.env.LIVE_ALLOW_LIMIT_ORDERS === 'true',
+  };
+}
+
+function readLivePreflight() {
+  if (!fs.existsSync(LIVE_PREFLIGHT_FILE)) return { ok: false, reason: 'live preflight has not been run' };
+  try {
+    const data = JSON.parse(fs.readFileSync(LIVE_PREFLIGHT_FILE, 'utf8'));
+    const at = new Date(data.checkedAt || 0).getTime();
+    if (!data.ok) return { ok: false, reason: 'live preflight failed' };
+    if (!Number.isFinite(at) || Date.now() - at > LIVE_PREFLIGHT_MAX_AGE_MS) return { ok: false, reason: 'live preflight is stale' };
+    return { ok: true, checkedAt: data.checkedAt, accountType: data.accountType || null };
+  } catch (err) {
+    return { ok: false, reason: `live preflight marker unreadable: ${err.message}` };
+  }
+}
+
+function dailyLiveStats() {
+  const start = new Date();
+  start.setUTCHours(0, 0, 0, 0);
+  let trades = 0;
+  let realizedLoss = 0;
+  for (const p of workerState.positions || []) {
+    const closedAt = new Date(p.closedAt || 0).getTime();
+    if (!Number.isFinite(closedAt) || closedAt < start.getTime()) continue;
+    if (p.status === 'closed') trades++;
+    const pnl = Number(p.realizedPnl);
+    if (Number.isFinite(pnl) && pnl < 0) realizedLoss += Math.abs(pnl);
+  }
+  return { trades, realizedLoss };
+}
+
+function assertSpotOnlyRequest(method, url, params = {}) {
+  const m = String(method || 'GET').toUpperCase();
+  const raw = String(url || '');
+  let parsed;
+  try { parsed = new URL(raw, getBinanceBaseUrl()); } catch { throw new Error('SPOT_ONLY_BLOCKED: invalid Binance URL'); }
+  const pathName = parsed.pathname.replace(/^\/api(?=\/v3\/)/, '');
+  const haystack = [
+    parsed.pathname,
+    parsed.search,
+    ...Object.keys(params || {}),
+    ...Object.values(params || {}).map((v) => String(v)),
+  ].join(' ');
+  if (SPOT_ONLY_FORBIDDEN_RE.test(haystack)) {
+    throw new Error(`SPOT_ONLY_BLOCKED: forbidden Binance endpoint or parameter (${pathName})`);
+  }
+  const key = `${m} ${pathName}`;
+  if (!SPOT_ONLY_ALLOWED.has(key)) {
+    throw new Error(`SPOT_ONLY_BLOCKED: ${key} is not in the Spot-only allowlist`);
+  }
+  if (binanceEnv === 'live_spot' && parsed.origin + '/api' !== BINANCE_LIVE_SPOT_BASE_URL) {
+    throw new Error('SPOT_ONLY_BLOCKED: live_spot base URL must be exactly https://api.binance.com/api');
+  }
+  return true;
+}
+
+async function binanceFetch(pathName, { method = 'GET', params = {}, signed = false } = {}) {
+  const base = getBinanceBaseUrl();
   const qp = new URLSearchParams();
-  qp.append('symbol', symbol);
-  qp.append('side', side);
-  qp.append('type', 'MARKET');
-  qp.append('quantity', Number(quantity).toFixed(precision));
-  qp.append('timestamp', Date.now().toString());
-  qp.append('recvWindow', '5000');
-  const qs = qp.toString();
-  const signature = hmacSha256(qs, apiSecret);
-  const res = await fetch(`${BINANCE_TESTNET_BASE}/v3/order?${qs}&signature=${signature}`, {
-    method: 'POST',
-    headers: { 'X-MBX-APIKEY': apiKey, 'Content-Type': 'application/x-www-form-urlencoded' },
-  });
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value !== undefined && value !== null) qp.append(key, String(value));
+  }
+  if (signed) {
+    qp.append('timestamp', Date.now().toString());
+    qp.append('recvWindow', '5000');
+  }
+  const qsBeforeSig = qp.toString();
+  if (signed) qp.append('signature', hmacSha256(qsBeforeSig, apiSecret));
+  const url = `${base}${pathName}${qp.toString() ? `?${qp.toString()}` : ''}`;
+  assertSpotOnlyRequest(method, url, params);
+  const headers = { Accept: 'application/json' };
+  if (signed) headers['X-MBX-APIKEY'] = apiKey;
+  if (method !== 'GET') headers['Content-Type'] = 'application/x-www-form-urlencoded';
+  const res = await fetch(url, { method, headers });
   const data = await res.json();
   if (!res.ok) throw new Error(`Binance error: ${data.msg || JSON.stringify(data)}`);
   return data;
 }
+
+function feeSummaryFromFills(fills) {
+  const byAsset = {};
+  if (Array.isArray(fills)) {
+    for (const f of fills) {
+      const asset = f && f.commissionAsset ? String(f.commissionAsset).toUpperCase() : '';
+      const amount = Number(f && f.commission);
+      if (!asset || !Number.isFinite(amount) || amount <= 0) continue;
+      byAsset[asset] = (byAsset[asset] || 0) + amount;
+    }
+  }
+  return Object.entries(byAsset).map(([asset, amount]) => ({ asset, amount }));
+}
+
+// --- Binance Spot adapter ---
+async function submitMarketOrder(symbol, side, quantity, precision) {
+  const caps = liveRiskCaps();
+  if (isLiveSpot && side === 'BUY' && !caps.allowMarketBuy) throw new Error('Live MARKET BUY is disabled');
+  if (isLiveSpot && side === 'SELL' && !caps.allowMarketSell) throw new Error('Live MARKET SELL is disabled');
+  return await binanceFetch('/v3/order', {
+    method: 'POST',
+    signed: true,
+    params: {
+      symbol,
+      side,
+      type: 'MARKET',
+      quantity: Number(quantity).toFixed(precision),
+    },
+  });
+}
 async function getSymbolInfo(symbol) {
-  const res = await fetch(`${BINANCE_TESTNET_BASE}/v3/exchangeInfo?symbol=${symbol}`);
-  const data = await res.json();
+  const data = await binanceFetch('/v3/exchangeInfo', { params: { symbol } });
   if (!data || !data.symbols || !data.symbols[0]) throw new Error(`Symbol ${symbol} not found in exchangeInfo`);
   return data.symbols[0];
 }
 
+async function getTickerPrice(symbol) {
+  const data = await binanceFetch('/v3/ticker/price', { params: { symbol } });
+  if (!data || !data.price) throw new Error('Failed to fetch ticker price');
+  return parseFloat(data.price);
+}
+
+function validateLiveIntentGate(intent, config, riskState, session, control) {
+  const env = liveEnvGateSnapshot();
+  const caps = liveRiskCaps();
+  const preflight = readLivePreflight();
+  const posUsd = Number(intent && intent.positionUsd);
+  const userMax = Number(config && config.maxTradeUsd);
+  const maxUsd = Math.min(Number.isFinite(userMax) && userMax > 0 ? userMax : caps.maxPositionUsd, caps.maxPositionUsd);
+  const stats = dailyLiveStats();
+  const checks = [
+    { ok: workerMode === 'live_spot', reason: 'WORKER_MODE must be live_spot' },
+    { ok: binanceEnv === 'live_spot', reason: 'BINANCE_ENV must be live_spot' },
+    { ok: env.liveTradingEnabled, reason: 'BOT_LIVE_TRADING_ENABLED must be true' },
+    { ok: env.allowRealOrders, reason: 'BOT_ALLOW_REAL_ORDERS must be true' },
+    { ok: env.liveSpotAck, reason: 'LIVE_SPOT_ACK is missing or incorrect' },
+    { ok: env.localConfirm, reason: 'LOCAL_WORKER_LIVE_CONFIRM must be true' },
+    { ok: !env.globalKillSwitch, reason: 'BOT_GLOBAL_KILL_SWITCH active: entries blocked' },
+    { ok: preflight.ok, reason: preflight.reason || 'live preflight failed' },
+    { ok: control && control.durable === true, reason: 'durable store is required for live entries' },
+    { ok: config && config.allowLive === true, reason: 'user config allowLive must be true' },
+    { ok: session && session.liveModeConfirmed === true, reason: 'per-session liveModeConfirmed must be true' },
+    { ok: intent && intent.mode === 'live_spot', reason: 'intent mode must be live_spot' },
+    { ok: caps.allowedSymbols.includes(String(intent && intent.symbol || '').toUpperCase()), reason: 'symbol is not allowlisted for live Spot' },
+    { ok: intent && intent.side === 'BUY' && intent.type === 'MARKET', reason: 'live entries support BUY MARKET only' },
+    { ok: posUsd > 0 && posUsd <= maxUsd, reason: `positionUsd ${posUsd} exceeds live cap ${maxUsd}` },
+    { ok: getOpenPositions().length < caps.maxOpenPositions, reason: `max open live positions (${caps.maxOpenPositions}) reached` },
+    { ok: !(riskState && (riskState.regime === 'CRASH' || riskState.entriesAllowed === false) && config && config.pauseOnMarketCrash), reason: 'entries blocked by market regime (CRASH)' },
+    { ok: stats.realizedLoss < caps.maxDailyLossUsd, reason: `daily realized loss cap reached (${stats.realizedLoss}/${caps.maxDailyLossUsd})` },
+    { ok: stats.trades < caps.maxDailyTrades, reason: `daily trade cap reached (${stats.trades}/${caps.maxDailyTrades})` },
+  ];
+  const failed = checks.find((check) => !check.ok);
+  return failed ? { ok: false, reason: failed.reason, caps, preflight } : { ok: true, caps, preflight, maxUsd };
+}
+
 // --- Intent execution (BUY MARKET only), gated by config snapshot ---
-async function executeIntent(intent, config, riskState) {
+async function executeIntent(intent, config, riskState, session = null, control = {}) {
   if (isKeyUsed(intent.idempotencyKey)) return;
 
   // ── Worker-side hard validation (defense in depth) ──
   const reject = async (reason) => {
     console.warn(`[GATE] Intent ${intent.id} rejected: ${reason}`);
-    await reportResult({ id: intent.id, idempotencyKey: intent.idempotencyKey, status: 'failed', error: reason, testnet: true, realProductionOrder: false });
+    await reportResult({ id: intent.id, idempotencyKey: intent.idempotencyKey, status: 'failed', error: reason, mode: workerMode, testnet: !isLiveSpot, realProductionOrder: isLiveSpot });
     markKeyUsed(intent.idempotencyKey);
   };
-  if (intent.mode !== 'testnet') return reject('Intent mode is not testnet');
+  if (isLiveSpot) {
+    const gate = validateLiveIntentGate(intent, config, riskState, session, control);
+    if (!gate.ok) return reject(`LIVE LOCKED: ${gate.reason}`);
+  } else if (intent.mode !== 'testnet') {
+    return reject('Intent mode is not testnet');
+  }
   if (intent.side !== 'BUY' || intent.type !== 'MARKET') return reject('Only BUY MARKET supported');
   if (!/^[A-Z0-9]+(USDT|USDC)$/.test(intent.symbol)) return reject('Invalid symbol format');
   const posUsd = Number(intent.positionUsd);
   const minUsd = Number(config && config.minTradeUsd) || 1;
-  const maxUsd = Math.min(Number(config && config.maxTradeUsd) || TESTNET_MAX_TRADE_USD, TESTNET_MAX_TRADE_USD, maxPositionUsd);
+  const maxUsd = isLiveSpot
+    ? Math.min(Number(config && config.maxTradeUsd) || liveRiskCaps().maxPositionUsd, liveRiskCaps().maxPositionUsd)
+    : Math.min(Number(config && config.maxTradeUsd) || TESTNET_MAX_TRADE_USD, TESTNET_MAX_TRADE_USD, maxPositionUsd);
   if (!(posUsd >= minUsd && posUsd <= maxUsd)) return reject(`positionUsd ${posUsd} outside config bounds [${minUsd}, ${maxUsd}]`);
   const maxOpen = Number(config && config.maxOpenPositions) || 1;
   if (getOpenPositions().length >= maxOpen) return reject(`max open positions (${maxOpen}) reached`);
@@ -508,10 +792,7 @@ async function executeIntent(intent, config, riskState) {
     if (!lot) throw new Error('LOT_SIZE filter not found');
     const stepSize = parseFloat(lot.stepSize);
 
-    const priceRes = await fetch(`${BINANCE_TESTNET_BASE}/v3/ticker/price?symbol=${intent.symbol}`);
-    const priceData = await priceRes.json();
-    if (!priceData || !priceData.price) throw new Error('Failed to fetch ticker price');
-    const price = parseFloat(priceData.price);
+    const price = await getTickerPrice(intent.symbol);
 
     const precision = Math.max(0, -Math.floor(Math.log10(stepSize)));
     const stepPow = Math.pow(10, precision);
@@ -523,7 +804,8 @@ async function executeIntent(intent, config, riskState) {
       if (qty * price < minNotional) throw new Error(`Order size ${qty * price} < minNotional ${minNotional}`);
     }
 
-    console.log(`[ORDER] Submitting TESTNET BUY MARKET ${qty} ${intent.symbol} (session ${sessionId.slice(0, 12)})`);
+    const modeLabel = isLiveSpot ? 'LIVE SPOT REAL MONEY' : 'TESTNET';
+    console.log(`[ORDER] Submitting ${modeLabel} BUY MARKET ${qty} ${intent.symbol} (session ${sessionId.slice(0, 12)})`);
     const order = await submitMarketOrder(intent.symbol, 'BUY', qty, precision);
     console.log(`[ORDER] Order successful. OrderID: ${order.orderId} status=${order.status} executedQty=${order.executedQty}`);
 
@@ -534,10 +816,11 @@ async function executeIntent(intent, config, riskState) {
     // PERSIST FIRST: write the open position to local state BEFORE reporting to
     // the backend, so a crash between order and report can be recovered locally.
     recordOpenPosition({
-      symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, executedQty: order.executedQty,
+      mode: workerMode, symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, executedQty: order.executedQty,
       orderId: order.orderId, sessionId, status: 'open', openedAt: new Date().toISOString(), stepSize: lot.stepSize,
       entryQuoteQty: order.cummulativeQuoteQty != null ? String(order.cummulativeQuoteQty) : null,
       entryAvgPrice: entryAvgPrice != null ? entryAvgPrice : null,
+      entryFills: Array.isArray(order.fills) ? order.fills : null,
       minQty: lot.minQty != null ? String(lot.minQty) : null,
       minNotional: (() => { const n = symbolInfo.filters.find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL'); return n && n.minNotional != null ? String(n.minNotional) : null; })(),
     });
@@ -546,7 +829,7 @@ async function executeIntent(intent, config, riskState) {
     await reportResult({
       id: intent.id, idempotencyKey: intent.idempotencyKey, status: 'submitted', exchange: 'binance_spot_testnet',
       symbol: intent.symbol, orderId: order.orderId, orderStatus: order.status, executedQty: order.executedQty,
-      cummulativeQuoteQty: order.cummulativeQuoteQty, testnet: true, realProductionOrder: false,
+      cummulativeQuoteQty: order.cummulativeQuoteQty, mode: workerMode, testnet: !isLiveSpot, realProductionOrder: isLiveSpot,
     });
     await reportPosition({ symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, executedQty: order.executedQty, orderId: order.orderId, status: 'open', openedAt: new Date().toISOString(), entryAvgPrice: entryAvgPrice != null ? entryAvgPrice : null });
     console.log(`[POSITION] Reported OPEN ${intent.symbol} to backend.`);
@@ -554,7 +837,7 @@ async function executeIntent(intent, config, riskState) {
     console.log(`[IDLE] Position open for ${intent.symbol}. Holding and refusing new BUY intents until it is closed (STOP/EMERGENCY closes it).`);
   } catch (err) {
     console.error(`[ERROR] Execution failed for ${intent.id}: ${err.message}`);
-    await reportResult({ id: intent.id, idempotencyKey: intent.idempotencyKey, status: 'failed', error: err.message, testnet: true, realProductionOrder: false });
+    await reportResult({ id: intent.id, idempotencyKey: intent.idempotencyKey, status: 'failed', error: err.message, mode: workerMode, testnet: !isLiveSpot, realProductionOrder: isLiveSpot });
     markKeyUsed(intent.idempotencyKey);
   }
 }
@@ -588,7 +871,8 @@ async function closeAllPositions(context) {
       if (stepNum > 0) sellQty = Math.floor(sellQty / stepNum) * stepNum;
       if (!(sellQty > 0)) throw new Error(`Computed sell qty not positive for ${pos.symbol}`);
 
-      console.log(`[${context}][CLOSE] Submitting TESTNET SELL MARKET ${sellQty} ${pos.symbol} (close of order ${pos.orderId})...`);
+      const modeLabel = isLiveSpot ? 'LIVE SPOT REAL MONEY' : 'TESTNET';
+      console.log(`[${context}][CLOSE] Submitting ${modeLabel} SELL MARKET ${sellQty} ${pos.symbol} (close of order ${pos.orderId})...`);
       const close = await submitMarketOrder(pos.symbol, 'SELL', sellQty, precision);
       console.log(`[${context}][CLOSE] Close result OK. ${pos.symbol} CloseOrderID: ${close.orderId} executedQty=${close.executedQty}`);
 
@@ -596,7 +880,8 @@ async function closeAllPositions(context) {
       // operator sees a clean trade-result card instead of raw order JSON. When the
       // exchange minQty is unknown, the lot stepSize is the dust floor: a remainder
       // smaller than one step is never independently sellable.
-      const metrics = computeCloseMetrics(pos, close, { minQty: minQty != null ? minQty : stepSize, minNotional });
+      const quoteAsset = String(pos.symbol || '').endsWith('USDC') ? 'USDC' : 'USDT';
+      const metrics = computeCloseMetrics(pos, close, { minQty: minQty != null ? minQty : stepSize, minNotional, quoteAsset });
       const closedAt = new Date().toISOString();
       markPositionClosed(pos.orderId, close.orderId, metrics);
       const pnlLog = metrics.realizedPnl != null ? `${metrics.realizedPnl >= 0 ? '+' : ''}${metrics.realizedPnl.toFixed(4)} (${metrics.realizedPnlPct != null ? metrics.realizedPnlPct.toFixed(2) : '—'}%)` : 'n/a';
@@ -607,7 +892,9 @@ async function closeAllPositions(context) {
         entryOrderId: pos.orderId, openedAt: pos.openedAt || null, closedAt,
         entryAvgPrice: metrics.entryAvgPrice, closeAvgPrice: metrics.closeAvgPrice,
         boughtQty: metrics.boughtQty, soldQty: metrics.soldQty, residualDust: metrics.residualDust,
-        realizedPnl: metrics.realizedPnl, realizedPnlPct: metrics.realizedPnlPct, feesAvailable: false,
+        realizedPnl: metrics.realizedPnl, realizedPnlPct: metrics.realizedPnlPct,
+        feesAvailable: metrics.feesAvailable, fees: metrics.fees, feeAsset: metrics.feeAsset,
+        feeAmount: metrics.feeAmount, netPnl: metrics.netPnl, pnlIsNet: metrics.pnlIsNet,
       });
       console.log(`[${context}][CLOSE] Reported ${metrics.status} ${pos.symbol} to backend.`);
     } catch (err) {
@@ -619,9 +906,48 @@ async function closeAllPositions(context) {
   return allClosed;
 }
 
+async function emergencyReconcileAndClose() {
+  if (isLiveSpot) {
+    console.warn('[RECONCILE] Live spot reconciliation not automated for safety.');
+    return;
+  }
+  try {
+    const symbol = 'BTCUSDT';
+    console.log(`[RECONCILE] Attempting fallback account reconciliation for ${symbol}`);
+    const data = await binanceFetch('/v3/account', { signed: true });
+    const btcBalance = data.balances.find((b) => b.asset === 'BTC');
+    if (!btcBalance) return;
+    const freeBtc = Number(btcBalance.free);
+    if (!(freeBtc > 0)) return;
+
+    // Must not sell whole BTC balance, only min(accountFreeBtc, sessionExpectedQty) for session-bound order.
+    // If no session-bound expected qty is known locally, we must not auto-sell arbitrary BTC.
+    // However, if the control plane explicitly sent 'emergencyCloseRequested', the user pressed Emergency Close.
+    // Since the original original state might be completely lost, we ask the user to clear it manually or wait.
+    console.error('[RECONCILE][CRITICAL] Account holds BTC but no local session-bound quantity is known. Auto-sell of arbitrary BTC is UNSAFE.');
+    await reportResult({ error: 'WORKER_RECONCILIATION_REQUIRED', message: `Worker holds ${freeBtc} BTC but lacks session-bound order size. Please manually sell dust or clear kill switch.` });
+  } catch (err) {
+    console.error(`[RECONCILE] Error: ${err.message}`);
+  }
+}
+
 // --- Graceful STOP: close positions, then exit. Never exit with open positions. ---
-async function runStopSequence() {
+async function runStopSequence(data) {
   if (stopping) return;
+
+  // Final check: if backend thinks we have open positions but local state is 0, hydrate them!
+  if (data && Array.isArray(data.openPositions) && data.openPositions.length > 0 && getOpenPositions().length === 0) {
+    console.log('[STOP] Backend reports open positions but local state is empty. Hydrating before close.');
+    hydrateOpenPositionsFromBackend(data.openPositions);
+  }
+
+  // If local is still 0 but backend reports open, hydration failed or backend is out of sync.
+  if (data && Array.isArray(data.openPositions) && data.openPositions.length > 0 && getOpenPositions().length === 0) {
+    console.error('[STOP][CRITICAL] Backend reports open positions but local hydration failed. Worker will NOT exit with 0 closures.');
+    await reportResult({ error: 'WORKER_RECOVERY_REQUIRED', message: 'Backend has open positions but worker failed to hydrate.' });
+    return; // Stay alive
+  }
+
   stopping = true;
   currentState = 'stopping';
   console.log(`[STOP] Stop requested. Closing ${getOpenPositions().length} open testnet position(s) via MARKET SELL before exit.`);
@@ -657,8 +983,11 @@ async function processCommands(commands) {
     if (!cmd || !cmd.id || ackedCommands.has(cmd.id)) continue;
     console.log(`[CMD] ${cmd.type} (${cmd.id})`);
     if (cmd.type === 'EMERGENCY_CLOSE') {
-      // Close everything but keep the worker alive (unless STOP also queued).
-      await closeAllPositions('EMERGENCY');
+      if (getOpenPositions().length === 0) {
+        await emergencyReconcileAndClose();
+      } else {
+        await closeAllPositions('EMERGENCY');
+      }
     }
     // STOP/PAUSE/RESUME are also reflected via session flags; ack so they don't repeat.
     ackedCommands.add(cmd.id);
@@ -668,8 +997,12 @@ async function processCommands(commands) {
 }
 
 async function handleMissingSession(data) {
+  if (data && data.is5xx) {
+    console.warn(`[POLL] Transient 5xx error (${data.statusCode}). Keeping worker alive...`);
+    return;
+  }
   const open = getOpenPositions();
-  if (data && data.stopRequested) return runStopSequence();
+  if (data && data.stopRequested) return runStopSequence(data);
   if (open.length > 0) {
     currentState = 'running';
     console.warn(`[RECOVERY] Continuing after open position; session missing from control plane. openPositions=${open.length}`);
@@ -696,12 +1029,20 @@ async function handleMissingSession(data) {
 async function tick() {
   if (stopping) return;
   await sendHeartbeat();
+  await flushPendingReports();
   const data = await fetchSession();
+  
   // Backend-driven recovery: hydrate before any session/null branching so an
   // orphan open position the control plane knows about is adopted locally.
   if (data && Array.isArray(data.openPositions) && data.openPositions.length > 0 && getOpenPositions().length === 0) {
     hydrateOpenPositionsFromBackend(data.openPositions);
   }
+  
+  if (data && data.is5xx) {
+    console.warn(`[POLL] Transient 5xx error (${data.statusCode}). Keeping worker alive...`);
+    return;
+  }
+
   if (!data || !data.session) {
     return handleMissingSession(data);
   }
@@ -713,13 +1054,17 @@ async function tick() {
 
   // Emergency close can also arrive as a session flag (in case the command was
   // already acked/consumed). Honour it even while paused, before stop handling.
-  if (data.emergencyCloseRequested === true && getOpenPositions().length > 0) {
-    console.log('[EMERGENCY] emergencyCloseRequested set by backend; closing open testnet position(s) via MARKET SELL.');
-    await closeAllPositions('EMERGENCY');
+  if (data.emergencyCloseRequested === true) {
+    if (getOpenPositions().length > 0) {
+      console.log('[EMERGENCY] emergencyCloseRequested set by backend; closing open testnet position(s) via MARKET SELL.');
+      await closeAllPositions('EMERGENCY');
+    } else {
+      await emergencyReconcileAndClose();
+    }
   }
 
   if (session.stopRequested === true || data.stopRequested === true) {
-    return runStopSequence();
+    return runStopSequence(data);
   }
 
   if (session.pauseRequested === true || data.pauseRequested === true) {
@@ -741,27 +1086,90 @@ async function tick() {
 
   if (data.intent) {
     console.log(`[INTENT] Claimed intent ${data.intent.id} ${data.intent.symbol} ${data.intent.side} ${data.intent.type} positionUsd=${data.intent.positionUsd}`);
-    await executeIntent(data.intent, config, riskState);
+    await executeIntent(data.intent, config, riskState, session, data);
+  }
+}
+
+async function reportLivePreflightResult(result) {
+  if (!isLiveSpot || !controlUrl || !workerToken) return;
+  try {
+    await fetch(`${controlUrl}/api/bot/live-preflight-result`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-BOT-WORKER-TOKEN': workerToken },
+      body: JSON.stringify({ workerId, hostname, platform, mode: 'live_spot', ...result }),
+    });
+  } catch (err) {
+    console.warn(`[PREFLIGHT] Control-plane live preflight report failed: ${err.message}`);
   }
 }
 
 async function runPreflight() {
-  console.log('[PREFLIGHT] Binance Spot Testnet preflight...');
+  const modeLabel = isLiveSpot ? 'Live Spot' : 'Spot Testnet';
+  console.log(`[PREFLIGHT] Binance ${modeLabel} preflight...`);
   try {
-    const qp = new URLSearchParams();
-    qp.append('timestamp', Date.now().toString());
-    qp.append('recvWindow', '5000');
-    const qs = qp.toString();
-    const signature = hmacSha256(qs, apiSecret);
-    const res = await fetch(`${BINANCE_TESTNET_BASE}/v3/account?${qs}&signature=${signature}`, {
-      headers: { 'X-MBX-APIKEY': apiKey, 'Accept': 'application/json' },
-    });
-    const data = await res.json();
-    if (!res.ok) { console.error(`[PREFLIGHT ERROR] ${data.msg || res.status}`); return 1; }
+    if (isLiveSpot) {
+      const env = liveEnvGateSnapshot();
+      const missing = [];
+      if (env.workerMode !== 'live_spot') missing.push('WORKER_MODE=live_spot');
+      if (env.binanceEnv !== 'live_spot') missing.push('BINANCE_ENV=live_spot');
+      if (!env.liveTradingEnabled) missing.push('BOT_LIVE_TRADING_ENABLED=true');
+      if (!env.allowRealOrders) missing.push('BOT_ALLOW_REAL_ORDERS=true');
+      if (!env.liveSpotAck) missing.push(`LIVE_SPOT_ACK="${LIVE_SPOT_ACK_TEXT}"`);
+      if (!env.localConfirm) missing.push('LOCAL_WORKER_LIVE_CONFIRM=true');
+      if (getBinanceBaseUrl() !== BINANCE_LIVE_SPOT_BASE_URL) missing.push('live base URL mismatch');
+      if (missing.length) {
+        const fail = { ok: false, checkedAt: new Date().toISOString(), reason: missing.join('; '), spotOnlyPolicy: true };
+        fs.writeFileSync(LIVE_PREFLIGHT_FILE, JSON.stringify(fail, null, 2));
+        await reportLivePreflightResult(fail);
+        console.log('LIVE PREFLIGHT FAIL');
+        console.log(`reason: ${fail.reason}`);
+        return 1;
+      }
+    }
+    const data = await binanceFetch('/v3/account', { signed: true });
     const balances = {};
-    if (Array.isArray(data.balances)) for (const b of data.balances) if (['BTC', 'USDT', 'BNB', 'USDC'].includes(b.asset)) balances[b.asset] = b.free;
+    const caps = liveRiskCaps();
+    const relevantAssets = new Set(['USDT', 'USDC', 'BNB']);
+    for (const sym of caps.allowedSymbols) {
+      if (sym.endsWith('USDT')) relevantAssets.add(sym.replace(/USDT$/, ''));
+      if (sym.endsWith('USDC')) relevantAssets.add(sym.replace(/USDC$/, ''));
+    }
+    if (Array.isArray(data.balances)) for (const b of data.balances) if (relevantAssets.has(b.asset)) balances[b.asset] = b.free;
+    let exchangeInfoOk = false;
+    for (const symbol of caps.allowedSymbols) {
+      const info = await getSymbolInfo(symbol);
+      const lot = info.filters && info.filters.find((f) => f.filterType === 'LOT_SIZE');
+      const notional = info.filters && info.filters.find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
+      if (lot && notional && info.isSpotTradingAllowed !== false) exchangeInfoOk = true;
+    }
+    const accountType = data.accountType || null;
+    const permissions = Array.isArray(data.permissions) ? data.permissions : [];
+    const canTradeSpot = data.canTrade === true && (accountType === 'SPOT' || permissions.includes('SPOT') || permissions.length === 0);
+    const result = {
+      ok: canTradeSpot && exchangeInfoOk,
+      checkedAt: new Date().toISOString(),
+      canTradeSpot,
+      accountType,
+      permissions,
+      balances,
+      riskCaps: caps,
+      spotOnlyPolicy: true,
+      baseUrl: getBinanceBaseUrl(),
+    };
+    if (isLiveSpot) {
+      fs.writeFileSync(LIVE_PREFLIGHT_FILE, JSON.stringify(result, null, 2));
+      await reportLivePreflightResult(result);
+      console.log(result.ok ? 'LIVE PREFLIGHT PASS' : 'LIVE PREFLIGHT FAIL');
+      console.log(`canTradeSpot: ${result.canTradeSpot}`);
+      console.log(`accountType: ${accountType || 'unknown'}`);
+      console.log('permissions:', JSON.stringify(permissions));
+      console.log('balances:', JSON.stringify(balances));
+      console.log('risk caps:', JSON.stringify(caps));
+      console.log('spotOnlyPolicy=true');
+      return result.ok ? 0 : 1;
+    }
     console.log('[PREFLIGHT SUCCESS] ok: true, canReachBinance: true');
-    if (data.accountType) console.log(`accountType: ${data.accountType}`);
+    if (accountType) console.log(`accountType: ${accountType}`);
     console.log('balances:', JSON.stringify(balances));
     const btcFree = Number(balances.BTC);
     if (Number.isFinite(btcFree) && btcFree > 0) {
@@ -774,7 +1182,7 @@ async function runPreflight() {
 async function main() {
   if (isPreflight) return await runPreflight();
   currentState = 'running';
-  console.log(`[START] Local Binance Worker (Testnet, session=${sessionId}, workerId=${workerId})`);
+  console.log(`[START] Local Binance Worker (${isLiveSpot ? 'LIVE SPOT - REAL MONEY LOCKED BY GATES' : 'Testnet'}, session=${sessionId}, workerId=${workerId})`);
   console.log(`[INFO] Control URL: ${controlUrl} | poll ${pollIntervalMs}ms | heartbeat ${HEARTBEAT_INTERVAL_MS}ms`);
   console.log(`[INFO] Session ID: ${sessionId}`);
   console.log(`[INFO] workerId: ${workerId}`);
@@ -802,6 +1210,8 @@ if (isMainModule) {
 }
 
 // Exported for unit tests (recovery + close paths). No effect on direct runs.
+function _resetStoppingForTest() { stopping = false; }
+
 export {
   workerState,
   getOpenPositions,
@@ -816,6 +1226,12 @@ export {
   residualDustQty,
   isResidualSellable,
   computeCloseMetrics,
+  assertSpotOnlyRequest,
+  validateLiveIntentGate,
+  liveRiskCaps,
+  readLivePreflight,
   STATE_FILE,
+  LIVE_PREFLIGHT_FILE,
   LOG_FILE,
+  _resetStoppingForTest,
 };

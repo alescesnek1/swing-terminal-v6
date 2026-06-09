@@ -22,10 +22,13 @@ import fs from 'node:fs';
 const worker = await import('../scripts/local-binance-worker.mjs');
 const {
   workerState, getOpenPositions, hydrateOpenPositionsFromBackend, closeAllPositions,
-  executeIntent, handleMissingSession, runStopSequence, STATE_FILE, LOG_FILE,
+  executeIntent, handleMissingSession, runStopSequence, STATE_FILE, LOG_FILE, _resetStoppingForTest,
 } = worker;
 
-function reset() { workerState.positions.length = 0; }
+function reset() { 
+  workerState.positions.length = 0; 
+  _resetStoppingForTest();
+}
 
 // A Binance + control-plane fetch stub. `orderResult(side)` lets callers force
 // a SELL failure. `onPositionReport` observes report ordering.
@@ -236,4 +239,30 @@ test('worker-G4: a failed close keeps the command actionable (position stays ope
 test('worker-9/10: importing/starting the worker creates its log file and per-session state file', () => {
   assert.ok(fs.existsSync(LOG_FILE), 'worker log file should exist');
   assert.ok(fs.existsSync(STATE_FILE), 'per-session state file should exist');
+});
+
+test('worker-new-1: STOP sequence hydrates backend openPositions before exiting if local is empty', async () => {
+  reset();
+  const sells = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    if (String(url).includes('/v3/order') && new URL(String(url)).searchParams.get('side') === 'SELL') sells.push(1);
+    return makeFetchStub()(url, init);
+  };
+  try {
+    await runStopSequence({ openPositions: [{ symbol: 'BTCUSDT', executedQty: '0.00010000', orderId: 'held-5', status: 'open', stepSize: '0.00001000' }] });
+  } finally {
+    global.fetch = origFetch;
+  }
+  assert.ok(sells.length >= 1, 'Hydrated position must be sold');
+  assert.equal(getOpenPositions().length, 0);
+});
+
+test('worker-new-2: handleMissingSession with 5xx keeps worker alive and does not enter 404 exit sequence', async () => {
+  reset();
+  const prevExit = process.exitCode;
+  process.exitCode = undefined;
+  await handleMissingSession({ is5xx: true, statusCode: 502 });
+  assert.notEqual(process.exitCode, 0, 'Worker must not exit on transient 5xx');
+  process.exitCode = prevExit;
 });
