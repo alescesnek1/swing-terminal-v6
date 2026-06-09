@@ -208,6 +208,31 @@ test('worker-6: STOP closes the open position via MARKET SELL before exiting (ex
   process.exitCode = prevExit;
 });
 
+test('worker-G2: emergencyCloseRequested closes a backend-hydrated open position via MARKET SELL', async () => {
+  reset();
+  hydrateOpenPositionsFromBackend([{ symbol: 'BTCUSDT', baseAsset: 'BTC', executedQty: '0.00015000', orderId: 'hg2', status: 'open', stepSize: '0.00001000' }]);
+  const sells = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    if (String(url).includes('/v3/order') && new URL(String(url)).searchParams.get('side') === 'SELL') sells.push(1);
+    return makeFetchStub()(url, init);
+  };
+  try { await closeAllPositions('EMERGENCY'); } finally { global.fetch = origFetch; }
+  assert.ok(sells.length >= 1);
+  assert.equal(getOpenPositions().length, 0);
+});
+
+test('worker-G4: a failed close keeps the command actionable (position stays open, worker alive)', async () => {
+  reset();
+  hydrateOpenPositionsFromBackend([{ symbol: 'BTCUSDT', executedQty: '0.00015000', orderId: 'hg4', status: 'open', stepSize: '0.00001000' }]);
+  const origFetch = global.fetch;
+  global.fetch = makeFetchStub({ failOrder: true });
+  let allClosed;
+  try { allClosed = await closeAllPositions('EMERGENCY'); } finally { global.fetch = origFetch; }
+  assert.equal(allClosed, false);
+  assert.equal(getOpenPositions().length, 1); // remains so the close command stays relevant on the next poll
+});
+
 test('worker-9/10: importing/starting the worker creates its log file and per-session state file', () => {
   assert.ok(fs.existsSync(LOG_FILE), 'worker log file should exist');
   assert.ok(fs.existsSync(STATE_FILE), 'per-session state file should exist');

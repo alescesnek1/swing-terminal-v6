@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { getIdentity, isAdmin, canControlSession } from './_auth.mjs';
-import { loadFleet, saveFleet, fleetBackend, fleetStoreInfo } from './_fleet-store.mjs';
+import { loadFleet, saveFleet, mutateFleet, fleetBackend, fleetStoreInfo } from './_fleet-store.mjs';
 import { computeMarketRegime } from './_market-regime.mjs';
 
 const DEFAULT_STATE = {
@@ -1438,7 +1438,10 @@ async function handleFleetWorker(req, base, body) {
     return json(req, { ok: false, error: 'sessionId is required for worker endpoints' }, 400);
   }
 
-  const fleet = await loadFleet();
+  // All worker writes run under mutateFleet so a concurrent browser command
+  // (STOP / EMERGENCY_CLOSE) is never clobbered by a worker heartbeat/poll write
+  // (lost-update protection via etag CAS on Blobs / mutex in memory).
+  return await mutateFleet(async (fleet) => {
   let session = fleet.botSessions[sessionId];
 
   // worker-heartbeat: bind worker, persist liveness, return control flags.
@@ -1472,7 +1475,6 @@ async function handleFleetWorker(req, base, body) {
 
     if (!session) {
       // Orphan worker (session gone): tell it to stop gracefully.
-      await saveFleet(fleet);
       return json(req, { ok: true, sessionKnown: false, stopRequested: true, closePositionsOnStop: true, pauseRequested: false });
     }
 
@@ -1496,12 +1498,13 @@ async function handleFleetWorker(req, base, body) {
       session.status = session.pauseRequested ? 'paused' : 'running';
     }
     session.updatedAt = nowIso;
-    await saveFleet(fleet);
+    const hbCommands = (fleet.commandQueue[sessionId] || []).filter((c) => !c.consumedAt);
     return json(req, {
       ok: true,
       sessionKnown: true,
       stopRequested: session.stopRequested === true,
       pauseRequested: session.pauseRequested === true,
+      emergencyCloseRequested: hbCommands.some((c) => c.type === 'EMERGENCY_CLOSE'),
       closePositionsOnStop: session.closePositionsOnStop !== false,
     });
   }
@@ -1519,11 +1522,11 @@ async function handleFleetWorker(req, base, body) {
         // different sessionId) sit paused forever — the symptom the operator saw
         // as "pause leaking globally". Never force a pause here: signal
         // sessionMissing so the worker exits cleanly on its own timer.
-        await saveFleet(fleet);
         return json(req, {
           ok: true, session: null, sessionMissing: true, recoveryMode: true,
           stopRequested: false, pauseRequested: false, emergencyCloseRequested: false,
           openPositions: [], openPositionsCount: 0,
+          commandsForThisSession: [], ignoredCommandsForOtherSessionsCount: 0,
           sessionId, workerId: bodyWorkerId(req, body), commandSessionId: sessionId,
         });
       }
@@ -1552,7 +1555,9 @@ async function handleFleetWorker(req, base, body) {
     const commands = (fleet.commandQueue[sessionId] || []).filter((c) => !c.consumedAt);
     const openPositions = sessionOpenPositions(fleet, sessionId);
     const emergencyCloseRequested = commands.some((c) => c.type === 'EMERGENCY_CLOSE');
-    await saveFleet(fleet);
+    const ignoredCommandsForOtherSessionsCount = Object.entries(fleet.commandQueue || {})
+      .filter(([k]) => k !== sessionId)
+      .reduce((n, [, arr]) => n + (Array.isArray(arr) ? arr.filter((c) => !c.consumedAt).length : 0), 0);
     return json(req, {
       ok: true,
       session: {
@@ -1576,6 +1581,8 @@ async function handleFleetWorker(req, base, body) {
       openPositions,
       openPositionsCount: openPositions.length,
       // ── Strict per-session debug fields (no global leakage possible) ──
+      commandsForThisSession: commands,
+      ignoredCommandsForOtherSessionsCount,
       sessionId: session.sessionId,
       workerId: bodyWorkerId(req, body) || session.workerId || null,
       commandSessionId: sessionId,
@@ -1595,7 +1602,6 @@ async function handleFleetWorker(req, base, body) {
       if (ids.includes(c.id)) c.consumedAt = new Date().toISOString();
     }
     fleet.commandQueue[sessionId] = q.filter((c) => !c.consumedAt);
-    await saveFleet(fleet);
     return json(req, { ok: true });
   }
 
@@ -1611,7 +1617,6 @@ async function handleFleetWorker(req, base, body) {
     }
     if (!fleet.usedIdempotencyKeys[sessionId]) fleet.usedIdempotencyKeys[sessionId] = [];
     if (fleet.usedIdempotencyKeys[sessionId].includes(body.idempotencyKey)) {
-      await saveFleet(fleet);
       return json(req, { ok: false, error: 'Idempotency key already processed' }, 409);
     }
     fleet.usedIdempotencyKeys[sessionId].push(body.idempotencyKey);
@@ -1623,7 +1628,6 @@ async function handleFleetWorker(req, base, body) {
       body.status === 'failed' ? 'warn' : 'info',
       body.status === 'failed' ? `Worker order failed: ${body.error || 'unknown'}` : `Worker submitted testnet order ${body.orderId} for ${body.symbol}.`,
       { sessionId, ownerUserId: session.ownerUserId });
-    await saveFleet(fleet);
     return json(req, { ok: true });
   }
 
@@ -1648,7 +1652,6 @@ async function handleFleetWorker(req, base, body) {
       session = recoverSessionWithOpenPositions(fleet, sessionId, bodyWorkerId(req, body), { status: 'offline' }, [record], 'position-result');
     }
     if (!session) {
-      await saveFleet(fleet);
       return json(req, { ok: true, sessionMissing: true, recoveryMode: true });
     }
     if (record.status === 'open') {
@@ -1660,11 +1663,11 @@ async function handleFleetWorker(req, base, body) {
     const sev = record.status === 'WORKER_CLOSE_FAILED' ? 'warn' : 'info';
     fevent(fleet, record.status === 'closed' ? 'WORKER_POSITION_CLOSED' : record.status === 'WORKER_CLOSE_FAILED' ? 'WORKER_CLOSE_FAILED' : 'WORKER_POSITION_OPEN', sev,
       `${record.status} ${record.symbol} (session ${sessionId.slice(0, 12)})`, { sessionId, ownerUserId: session.ownerUserId });
-    await saveFleet(fleet);
     return json(req, { ok: true });
   }
 
   return json(req, { ok: false, error: 'Not Found' }, 404);
+  }); // end mutateFleet
 }
 
 // ── Browser-facing fleet routes (Origin + identity; owner/admin authz) ────────
@@ -1883,61 +1886,77 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     const sessionId = segments[1];
     const action = segments[2] || null;
     if (!sessionId) return json(req, { ok: false, error: 'sessionId required' }, 400);
-    const fleet = await loadFleet();
-    const session = fleet.botSessions[sessionId];
-    if (!session) return json(req, { ok: false, error: 'Session not found' }, 404);
-    if (!canControlFleetSession(identity, session, fleet)) return json(req, { ok: false, error: 'Forbidden' }, 403);
+    // Runs under mutateFleet: a queued STOP/EMERGENCY_CLOSE command is committed
+    // atomically and cannot be clobbered by a concurrent worker heartbeat/poll.
+    return await mutateFleet(async (fleet) => {
+      const session = fleet.botSessions[sessionId];
+      if (!session) return json(req, { ok: false, error: 'Session not found' }, 404);
+      if (!canControlFleetSession(identity, session, fleet)) return json(req, { ok: false, error: 'Forbidden' }, 403);
 
-    if (!action) {
-      if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
-      return json(req, { ok: true, session: publicSessionView(fleet, session) });
-    }
-    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+      if (!action) {
+        if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+        return json(req, { ok: true, session: publicSessionView(fleet, session) });
+      }
+      if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
 
-    const actor = identity.email || identity.userId;
-    if (action === 'stop') {
-      if (canClearNoWorkerNoPosition(session, fleet)) {
-        clearStaleSession(fleet, sessionId, identity, 'stop_requested_before_worker_online');
-        await saveFleet(fleet);
-        return json(req, { ok: true, cleared: true, session: publicSessionView(fleet, session) });
+      const actor = identity.email || identity.userId;
+      let commandType = null;
+      if (action === 'stop') {
+        if (canClearNoWorkerNoPosition(session, fleet)) {
+          clearStaleSession(fleet, sessionId, identity, 'stop_requested_before_worker_online');
+          return json(req, { ok: true, cleared: true, sessionId, commandQueued: false, session: publicSessionView(fleet, session) });
+        }
+        session.stopRequested = true;
+        session.status = workerIsOnline(sessionWorkerStatus(fleet, session)) ? 'stopping' : 'stop_requested';
+        session.closePositionsOnStop = true;
+        expireStaleIntent(fleet, sessionId);
+        if (fleet.executionIntents[sessionId] && fleet.executionIntents[sessionId].status === 'pending') {
+          fleet.executionIntents[sessionId].status = 'cancelled';
+        }
+        queueCommand(fleet, sessionId, 'STOP', actor);
+        commandType = 'STOP';
+        fevent(fleet, 'WORKER_SESSION_STOP_REQUESTED', 'info', `Stop requested for ${sessionId.slice(0, 12)} by ${actor}. Worker will close positions then exit.`, { sessionId, ownerUserId: session.ownerUserId });
+      } else if (action === 'pause') {
+        session.pauseRequested = true;
+        session.status = 'paused';
+        if (fleet.executionIntents[sessionId] && fleet.executionIntents[sessionId].status === 'pending') {
+          fleet.executionIntents[sessionId].status = 'cancelled';
+        }
+        queueCommand(fleet, sessionId, 'PAUSE', actor);
+        commandType = 'PAUSE';
+        fevent(fleet, 'ENTRIES_PAUSED', 'info', `Entries paused for ${sessionId.slice(0, 12)} by ${actor}.`, { sessionId, ownerUserId: session.ownerUserId });
+      } else if (action === 'resume') {
+        session.pauseRequested = false;
+        if (!session.stopRequested) session.status = 'running';
+        queueCommand(fleet, sessionId, 'RESUME', actor);
+        commandType = 'RESUME';
+        fevent(fleet, 'ENTRIES_RESUMED', 'info', `Entries resumed for ${sessionId.slice(0, 12)} by ${actor}.`, { sessionId, ownerUserId: session.ownerUserId });
+      } else if (action === 'emergency-close') {
+        queueCommand(fleet, sessionId, 'EMERGENCY_CLOSE', actor);
+        session.pauseRequested = true; // stop new entries while closing
+        commandType = 'EMERGENCY_CLOSE';
+        fevent(fleet, 'EMERGENCY_CLOSE_REQUESTED', 'warn', `Emergency close (testnet) requested for ${sessionId.slice(0, 12)} by ${actor}.`, { sessionId, ownerUserId: session.ownerUserId });
+      } else if (action === 'clear-stale') {
+        if (!canClearNoWorkerNoPosition(session, fleet)) {
+          return json(req, { ok: false, error: 'Session is not clearable. A worker is online or open positions exist.' }, 409);
+        }
+        clearStaleSession(fleet, sessionId, identity, 'manual_clear_stale_session');
+      } else {
+        return json(req, { ok: false, error: 'Unknown session action' }, 404);
       }
-      session.stopRequested = true;
-      session.status = workerIsOnline(sessionWorkerStatus(fleet, session)) ? 'stopping' : 'stop_requested';
-      session.closePositionsOnStop = true;
-      expireStaleIntent(fleet, sessionId);
-      if (fleet.executionIntents[sessionId] && fleet.executionIntents[sessionId].status === 'pending') {
-        fleet.executionIntents[sessionId].status = 'cancelled';
-      }
-      queueCommand(fleet, sessionId, 'STOP', actor);
-      fevent(fleet, 'WORKER_SESSION_STOP_REQUESTED', 'info', `Stop requested for ${sessionId.slice(0, 12)} by ${actor}. Worker will close positions then exit.`, { sessionId, ownerUserId: session.ownerUserId });
-    } else if (action === 'pause') {
-      session.pauseRequested = true;
-      session.status = 'paused';
-      if (fleet.executionIntents[sessionId] && fleet.executionIntents[sessionId].status === 'pending') {
-        fleet.executionIntents[sessionId].status = 'cancelled';
-      }
-      queueCommand(fleet, sessionId, 'PAUSE', actor);
-      fevent(fleet, 'ENTRIES_PAUSED', 'info', `Entries paused for ${sessionId.slice(0, 12)} by ${actor}.`, { sessionId, ownerUserId: session.ownerUserId });
-    } else if (action === 'resume') {
-      session.pauseRequested = false;
-      if (!session.stopRequested) session.status = 'running';
-      queueCommand(fleet, sessionId, 'RESUME', actor);
-      fevent(fleet, 'ENTRIES_RESUMED', 'info', `Entries resumed for ${sessionId.slice(0, 12)} by ${actor}.`, { sessionId, ownerUserId: session.ownerUserId });
-    } else if (action === 'emergency-close') {
-      queueCommand(fleet, sessionId, 'EMERGENCY_CLOSE', actor);
-      session.pauseRequested = true; // stop new entries while closing
-      fevent(fleet, 'EMERGENCY_CLOSE_REQUESTED', 'warn', `Emergency close (testnet) requested for ${sessionId.slice(0, 12)} by ${actor}.`, { sessionId, ownerUserId: session.ownerUserId });
-    } else if (action === 'clear-stale') {
-      if (!canClearNoWorkerNoPosition(session, fleet)) {
-        return json(req, { ok: false, error: 'Session is not clearable. A worker is online or open positions exist.' }, 409);
-      }
-      clearStaleSession(fleet, sessionId, identity, 'manual_clear_stale_session');
-    } else {
-      return json(req, { ok: false, error: 'Unknown session action' }, 404);
-    }
-    session.updatedAt = new Date().toISOString();
-    await saveFleet(fleet);
-    return json(req, { ok: true, session: publicSessionView(fleet, session) });
+      session.updatedAt = new Date().toISOString();
+      const queuedCommandsForSession = (fleet.commandQueue[sessionId] || []).filter((c) => !c.consumedAt);
+      return json(req, {
+        ok: true,
+        sessionId,
+        commandSessionId: sessionId,
+        commandType,
+        commandQueued: !!commandType,
+        queuedCommandsForSession,
+        openPositionsCount: sessionOpenPositions(fleet, sessionId).length,
+        session: publicSessionView(fleet, session),
+      });
+    });
   }
 
   // POST /api/bot/create-execution-intent  (session-scoped, config + regime gated)

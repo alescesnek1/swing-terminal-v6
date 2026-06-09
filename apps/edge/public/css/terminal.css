@@ -448,6 +448,10 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .fleet-error-panel{margin-bottom:8px;padding:10px;border:1px solid rgba(255,51,86,.45);border-radius:6px;background:rgba(255,51,86,.08);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .fleet-error-panel--danger{flex-direction:column;align-items:stretch;border-color:rgba(255,51,86,.7);background:rgba(255,51,86,.14)}
 .fleet-error-panel--danger .fleet-error-panel__title{color:#ff5b78}
+.fleet-close-panel{border-width:2px;box-shadow:0 0 0 1px rgba(255,51,86,.25)}
+.fleet-close-panel .fleet-error-panel__title{font-size:15px;letter-spacing:.06em}
+.fleet-close-primary{font-size:14px;font-weight:900;padding:11px 16px;width:100%;letter-spacing:.04em}
+.fleet-action-row--secondary{margin-top:6px;opacity:.9}
 .fleet-error-panel__title{font-size:12px;font-weight:900;color:#ff8fa2;letter-spacing:.08em}
 .fleet-error-panel__body{font-size:11px;color:var(--txt2);font-family:var(--mono);overflow-wrap:anywhere;flex:1;min-width:180px}
 .fleet-body{display:flex;gap:8px;flex-wrap:wrap}

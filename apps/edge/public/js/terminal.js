@@ -4806,6 +4806,12 @@ async function refreshFleet() {
     Fleet.data = _fleetMergeSnapshot(Fleet.data, payload);
     Fleet.lastGoodAt = Date.now();
     Fleet.refreshError = null;
+    // Clear the close-progress indicator once the position is closed and settled.
+    if (Fleet.emergency) {
+      const es = (Fleet.data.sessions || []).find((s) => s.sessionId === Fleet.emergency.sessionId);
+      const settled = !es || ((es.openPositions || []).length === 0 && (es.status === 'stopped' || es.status === 'expired' || !_fleetWorkerOnline(es)));
+      if (settled && (Date.now() - Fleet.emergency.requestedAt) > 12000) Fleet.emergency = null;
+    }
     const visibleSessions = (Fleet.data.sessions || []).filter((s) => s.status !== 'cleared');
     // Prefer to keep the operator on the open-position session; never silently jump.
     if (!Fleet.selectedId || !visibleSessions.some((s) => s.sessionId === Fleet.selectedId)) {
@@ -5060,17 +5066,24 @@ function stopBotSession() {
 // Graceful STOP targeting a SPECIFIC session (closes known positions, then exits).
 // Auto-(re)launches the worker for that exact session so the close can run even
 // if the worker is offline.
+function _fleetSessionFromData(id) {
+  return ((Fleet.data && Fleet.data.sessions) || []).find((s) => s.sessionId === id) || null;
+}
+
 function stopAndCloseSession(sessionId) {
   const id = sessionId || Fleet.selectedId;
   if (!id) { window.Toast?.error('No session', 'No session to stop.'); return; }
   if (!window.confirm('Stop bot and close the open position on session ' + id.slice(0, 12) + '? Worker will MARKET SELL then exit.')) return;
   Fleet.selectedId = id;
-  Fleet.retryLaunchUrl = _fleetLaunchUrl(id);
   Fleet.emergency = { sessionId: id, kind: 'stop', requestedAt: Date.now() };
-  _fleetFetch('POST', '/api/bot/session/' + encodeURIComponent(id) + '/stop', {}).then(() => {
-    try { window.Toast?.success('Stop requested', id.slice(0, 12)); } catch {}
-    // Ensure a worker is online for this exact session to perform the close.
-    try { window.location.href = Fleet.retryLaunchUrl; } catch {}
+  renderFleet(); // show CLOSE REQUESTED immediately (do not wait for the next poll)
+  const sess = _fleetSessionFromData(id);
+  const workerOffline = !(sess && sess.worker && sess.worker.online);
+  Fleet.retryLaunchUrl = _fleetLaunchUrl(id);
+  _fleetFetch('POST', '/api/bot/session/' + encodeURIComponent(id) + '/stop', {}).then((payload) => {
+    try { window.Toast?.success('Close requested', (payload.commandType || 'STOP') + ' queued · ' + id.slice(0, 12)); } catch {}
+    // Only (re)launch the worker if it is offline — never disrupt an online worker.
+    if (workerOffline) { try { window.location.href = Fleet.retryLaunchUrl; } catch {} }
     refreshFleet();
   }).catch((err) => window.Toast?.error('Stop failed', err.message));
 }
@@ -5134,13 +5147,16 @@ function emergencyCloseSession(sessionId) {
   if (!id) { window.Toast?.error('No session selected', 'Select a worker first.'); return; }
   if (!window.confirm('Emergency close ALL open testnet positions for session ' + id.slice(0, 12) + '? The worker stays alive.')) return;
   Fleet.selectedId = id;
-  Fleet.retryLaunchUrl = _fleetLaunchUrl(id);
   Fleet.emergency = { sessionId: id, kind: 'emergency', requestedAt: Date.now() };
-  _fleetFetch('POST', '/api/bot/session/' + encodeURIComponent(id) + '/emergency-close', {}).then(() => {
-    try { window.Toast?.success('Emergency close requested', id.slice(0, 12)); } catch {}
-    // Auto-launch/retry the worker terminal for this same session so it receives
-    // emergencyCloseRequested and closes the position with no manual steps.
-    try { window.location.href = Fleet.retryLaunchUrl; } catch {}
+  renderFleet(); // show CLOSE REQUESTED immediately
+  const sess = _fleetSessionFromData(id);
+  const workerOffline = !(sess && sess.worker && sess.worker.online);
+  Fleet.retryLaunchUrl = _fleetLaunchUrl(id);
+  _fleetFetch('POST', '/api/bot/session/' + encodeURIComponent(id) + '/emergency-close', {}).then((payload) => {
+    try { window.Toast?.success('Emergency close requested', (payload.commandType || 'EMERGENCY_CLOSE') + ' queued · ' + id.slice(0, 12)); } catch {}
+    // Only (re)launch the worker if it is offline — an online worker will pick up
+    // emergencyCloseRequested on its next poll with no disruption.
+    if (workerOffline) { try { window.location.href = Fleet.retryLaunchUrl; } catch {} }
     refreshFleet();
   }).catch((err) => window.Toast?.error('Emergency close failed', err.message));
 }
@@ -5549,19 +5565,22 @@ function renderFleet() {
   // on the EXACT open-position sessionId.
   if (openPosSession) {
     const pos0 = (openPosSession.openPositions && openPosSession.openPositions[0]) || {};
-    const posLine = _e((pos0.symbol || 'position') + ' qty ' + (pos0.executedQty || '—'));
+    const sym = (pos0.symbol || 'POSITION');
+    const posLine = _e(sym + ' qty ' + (pos0.executedQty || '—') + ' · order ' + (pos0.orderId || '—'));
     const workerSid = openPosWorkerOnline ? openPosSession.sessionId : ((mismatchWorker && sessions.find(_fleetWorkerOnline)) ? sessions.find(_fleetWorkerOnline).sessionId : null);
     const progress = _fleetCloseProgress(openPosSession);
-    html += '<div class="fleet-error-panel fleet-error-panel--connect">'
-      + '<div class="fleet-error-panel__title">' + (openPosWorkerOnline ? 'OPEN POSITION EXISTS' : 'WORKER OFFLINE &mdash; POSITION OPEN') + '</div>'
-      + '<div class="fleet-error-panel__body">' + posLine + ' &middot; status open. '
-      + 'START BOT and smoke orders are disabled until it is closed.</div>'
+    // ONE giant primary panel (spec A): close is the only primary action.
+    html += '<div class="fleet-error-panel fleet-error-panel--danger fleet-close-panel">'
+      + '<div class="fleet-error-panel__title">' + _e(sym) + ' OPEN — CLOSE REQUIRED</div>'
+      + '<div class="fleet-error-panel__body">' + posLine + ' &middot; status open. START BOT and smoke orders are disabled until it is closed.</div>'
       + (mismatchWorker ? '<div class="fleet-orphan-warning" style="color:#ff4a4a;border-color:#ff4a4a"><b>WORKER CONNECTED TO DIFFERENT SESSION — RECONNECT REQUIRED</b></div>' : '')
       + (progress ? '<div class="fleet-progress">' + _e(progress) + '</div>' : '')
       + '<div class="fleet-action-row">'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="reconnectWorkerToSession(\'' + _e(openPosSession.sessionId) + '\')">Reconnect Worker to Position Session</button>'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="stopAndCloseSession(\'' + _e(openPosSession.sessionId) + '\')">Stop Bot and Close Position</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop fleet-close-primary" onclick="stopAndCloseSession(\'' + _e(openPosSession.sessionId) + '\')">CLOSE ' + _e(sym) + ' TESTNET POSITION</button>'
+      + '</div>'
+      + '<div class="fleet-action-row fleet-action-row--secondary">'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _e(openPosSession.sessionId) + '\')">Emergency Close Testnet</button>'
+      + (openPosWorkerOnline ? '' : '<button type="button" class="paperbot-control-btn" onclick="reconnectWorkerToSession(\'' + _e(openPosSession.sessionId) + '\')">Reconnect Worker</button>')
       + '</div>'
       + '<div class="fleet-debug-rows">'
       + '<div class="fleet-hint fleet-hint--mono">open-position sessionId: <code onclick="_fleetCopy(\'' + _e(openPosSession.sessionId) + '\')" title="Click to copy" style="cursor:pointer">' + _e(openPosSession.sessionId) + '</code></div>'

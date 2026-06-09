@@ -143,6 +143,74 @@ test('I-6: clear-stale refuses an open-position session', async () => {
   await closePosition(openSid); // cleanup
 });
 
+// Owned session that holds an open position (the real production scenario).
+async function ownedSessionWithPosition(user, orderId) {
+  const r = await call(browserReq('POST', '/api/bot/start-session', user, {}));
+  assert.equal(r.status, 200);
+  const sid = r.json.sessionId;
+  await openPosition(sid, orderId);
+  return sid;
+}
+
+test('G-2: stop-session with an open position returns commandQueued=true and the worker sees stopRequested=true', async () => {
+  const u = freshUser();
+  const sid = await ownedSessionWithPosition(u, 'ord-g2');
+  const stop = await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(sid)}/stop`, u, {}));
+  assert.equal(stop.status, 200);
+  assert.equal(stop.json.commandQueued, true);
+  assert.equal(stop.json.commandType, 'STOP');
+  assert.equal(stop.json.commandSessionId, sid);
+  assert.ok((stop.json.queuedCommandsForSession || []).some((c) => c.type === 'STOP'));
+  // The very next worker-session poll for the SAME session sees it.
+  const ws = await call(workerReq('GET', `/api/bot/worker-session?sessionId=${sid}&workerId=wg2`));
+  assert.equal(ws.json.stopRequested, true);
+  assert.ok((ws.json.commandsForThisSession || []).some((c) => c.type === 'STOP'));
+  await closePosition(sid, 'ord-g2');
+});
+
+test('G-3: emergency-close returns commandQueued=true and the worker sees emergencyCloseRequested=true', async () => {
+  const u = freshUser();
+  const sid = await ownedSessionWithPosition(u, 'ord-g3');
+  const emc = await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(sid)}/emergency-close`, u, {}));
+  assert.equal(emc.status, 200);
+  assert.equal(emc.json.commandQueued, true);
+  assert.equal(emc.json.commandType, 'EMERGENCY_CLOSE');
+  const ws = await call(workerReq('GET', `/api/bot/worker-session?sessionId=${sid}&workerId=wg3`));
+  assert.equal(ws.json.emergencyCloseRequested, true);
+  assert.ok((ws.json.commandsForThisSession || []).some((c) => c.type === 'EMERGENCY_CLOSE'));
+  await closePosition(sid, 'ord-g3');
+});
+
+test('G-3b: a queued command STAYS until the worker acks it (survives repeated polls)', async () => {
+  const u = freshUser();
+  const sid = await ownedSessionWithPosition(u, 'ord-g3b');
+  await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(sid)}/emergency-close`, u, {}));
+  // Poll twice without acking — command must still be present both times.
+  const ws1 = await call(workerReq('GET', `/api/bot/worker-session?sessionId=${sid}&workerId=wg3b`));
+  const cmd = (ws1.json.commandsForThisSession || []).find((c) => c.type === 'EMERGENCY_CLOSE');
+  assert.ok(cmd, 'command present on first poll');
+  const ws2 = await call(workerReq('GET', `/api/bot/worker-session?sessionId=${sid}&workerId=wg3b`));
+  assert.ok((ws2.json.commandsForThisSession || []).some((c) => c.id === cmd.id), 'command still present on second poll');
+  // Now ack it → it disappears.
+  await call(workerReq('POST', '/api/bot/worker-command-ack', { sessionId: sid, workerId: 'wg3b', commandIds: [cmd.id] }));
+  const ws3 = await call(workerReq('GET', `/api/bot/worker-session?sessionId=${sid}&workerId=wg3b`));
+  assert.ok(!(ws3.json.commandsForThisSession || []).some((c) => c.id === cmd.id), 'command gone after ack');
+  await closePosition(sid, 'ord-g3b');
+});
+
+test('G-debug: worker-session reports ignoredCommandsForOtherSessionsCount (per-session isolation visible)', async () => {
+  const a = freshUser();
+  const b = freshUser();
+  const sidA = await ownedSessionWithPosition(a, 'ord-iga');
+  const sidB = await ownedSessionWithPosition(b, 'ord-igb');
+  await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(sidA)}/emergency-close`, a, {}));
+  const wsB = await call(workerReq('GET', `/api/bot/worker-session?sessionId=${sidB}&workerId=wigb`));
+  assert.equal((wsB.json.commandsForThisSession || []).length, 0);
+  assert.ok(wsB.json.ignoredCommandsForOtherSessionsCount >= 1); // A's command is visible-as-ignored, never delivered
+  await closePosition(sidA, 'ord-iga');
+  await closePosition(sidB, 'ord-igb');
+});
+
 test('I-2: start-session without any open position creates a fresh session', async () => {
   const u = freshUser();
   const { status, json } = await call(browserReq('POST', '/api/bot/start-session', u, {}));

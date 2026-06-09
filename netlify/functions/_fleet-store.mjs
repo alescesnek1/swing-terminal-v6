@@ -135,4 +135,77 @@ export async function saveFleet(fleet) {
   _mem.set(FLEET_KEY, JSON.stringify(fleet));
 }
 
+// In-process serialization for the memory backend (single process, no etag).
+let _memChain = Promise.resolve();
+const MUTATE_MAX_ATTEMPTS = 6;
+
+// mutateFleet: load → mutator(fleet) → write, with LOST-UPDATE PROTECTION.
+//
+// Why this exists: the whole fleet is one document. Every worker heartbeat/poll
+// and every browser action did load→mutate→save independently, so a command
+// queued by the browser could be clobbered by a concurrent worker write that had
+// loaded the document a moment earlier. With the durable Blobs store (separate
+// function invocations) this race is frequent — STOP/EMERGENCY_CLOSE commands
+// silently vanished before the worker ever polled them.
+//
+// - Blobs backend: optimistic concurrency via etag (getWithMetadata + setJSON
+//   { onlyIfMatch }), retried on conflict. Re-runs the mutator on fresh state.
+// - Memory backend: an in-process async mutex (single process, no etag needed).
+//
+// The mutator MUST be a pure function of `fleet` (it may be re-run); side effects
+// other than mutating `fleet` should be idempotent. It returns the value
+// mutateFleet resolves to.
+export async function mutateFleet(mutator) {
+  await resolveBackend();
+
+  // ── Durable Blobs: compare-and-swap with retry ──
+  if (_blobStore && typeof _blobStore.getWithMetadata === 'function' && typeof _blobStore.setJSON === 'function') {
+    for (let attempt = 0; attempt < MUTATE_MAX_ATTEMPTS; attempt++) {
+      let data = null; let etag = null;
+      try {
+        const r = await _blobStore.getWithMetadata(FLEET_KEY, { type: 'json' });
+        if (r) { data = r.data; etag = r.etag || null; }
+      } catch (err) {
+        downgradeToMemory(err && err.message ? err.message : 'blob read failed');
+        break; // fall through to memory path
+      }
+      const fleet = normalize(data);
+      const result = await mutator(fleet);
+      fleet.updatedAt = new Date().toISOString();
+      try {
+        const opts = etag ? { onlyIfMatch: etag } : { onlyIfNew: true };
+        const res = await _blobStore.setJSON(FLEET_KEY, fleet, opts);
+        // Netlify Blobs returns { modified: false } when the precondition failed.
+        if (res && res.modified === false) continue; // concurrent write — retry
+        _mem.set(FLEET_KEY, JSON.stringify(fleet));
+        return result;
+      } catch (err) {
+        // Some SDK versions throw on precondition failure — retry a few times.
+        if (attempt < MUTATE_MAX_ATTEMPTS - 1) continue;
+        downgradeToMemory(err && err.message ? err.message : 'blob write failed');
+        break;
+      }
+    }
+  }
+
+  // ── Memory backend: serialize via mutex so concurrent mutations don't lose ──
+  const run = _memChain.then(async () => {
+    const raw = _mem.get(FLEET_KEY);
+    const fleet = normalize(raw ? JSON.parse(raw) : null);
+    const result = await mutator(fleet);
+    fleet.updatedAt = new Date().toISOString();
+    _mem.set(FLEET_KEY, JSON.stringify(fleet));
+    return result;
+  });
+  _memChain = run.then(() => {}, () => {});
+  return run;
+}
+
+// Test-only seam: inject a fake blob store to exercise the CAS path deterministically.
+export function __setBlobStoreForTest(store) {
+  _blobStore = store;
+  _backendName = store ? 'blobs' : 'memory';
+  _storeError = null;
+}
+
 export { emptyFleet };
