@@ -1457,7 +1457,16 @@ async function handleFleetWorker(req, base, body) {
       return json(req, { ok: true, sessionKnown: false, stopRequested: true, closePositionsOnStop: true, pauseRequested: false });
     }
 
+    // Rebind observability: a *different* worker now owns this session
+    // (reconnect/reattach to an open-position session). Commands stay strictly
+    // per-session, so this never moves a command across sessions.
+    const prevWorkerId = session.workerId;
     session.workerId = workerId;
+    if (prevWorkerId && prevWorkerId !== workerId) {
+      fevent(fleet, 'WORKER_SESSION_WORKER_REBOUND', 'info',
+        `Session ${sessionId.slice(0, 12)} rebound from worker ${String(prevWorkerId).slice(0, 16)} to ${workerId.slice(0, 16)}.`,
+        { sessionId, ownerUserId: session.ownerUserId });
+    }
     const cs = fleet.workerStatuses[workerId].currentState;
     if (cs === 'stopped') session.status = 'stopped';
     else if (cs === 'stopping') session.status = 'stopping';
@@ -1486,8 +1495,18 @@ async function handleFleetWorker(req, base, body) {
       if (knownOpen.length > 0) {
         session = recoverSessionWithOpenPositions(fleet, sessionId, bodyWorkerId(req, body), { status: 'offline' }, knownOpen, 'worker-session');
       } else {
+        // Unknown session with NO open positions. Previously this returned
+        // pauseRequested:true, which made a freshly-launched CLEAN worker (a
+        // different sessionId) sit paused forever — the symptom the operator saw
+        // as "pause leaking globally". Never force a pause here: signal
+        // sessionMissing so the worker exits cleanly on its own timer.
         await saveFleet(fleet);
-        return json(req, { ok: true, session: null, sessionMissing: true, recoveryMode: true, stopRequested: false, pauseRequested: true });
+        return json(req, {
+          ok: true, session: null, sessionMissing: true, recoveryMode: true,
+          stopRequested: false, pauseRequested: false, emergencyCloseRequested: false,
+          openPositions: [], openPositionsCount: 0,
+          sessionId, workerId: bodyWorkerId(req, body), commandSessionId: sessionId,
+        });
       }
     }
     expireStaleIntent(fleet, sessionId);
@@ -1509,7 +1528,11 @@ async function handleFleetWorker(req, base, body) {
       intent = null;
     }
 
+    // Commands are scoped strictly to THIS sessionId — a command queued for
+    // session A is structurally invisible to a worker polling for session B.
     const commands = (fleet.commandQueue[sessionId] || []).filter((c) => !c.consumedAt);
+    const openPositions = sessionOpenPositions(fleet, sessionId);
+    const emergencyCloseRequested = commands.some((c) => c.type === 'EMERGENCY_CLOSE');
     await saveFleet(fleet);
     return json(req, {
       ok: true,
@@ -1527,7 +1550,16 @@ async function handleFleetWorker(req, base, body) {
       intent: intent && intent.status === 'claimed' ? intent : null,
       stopRequested: session.stopRequested === true,
       pauseRequested: session.pauseRequested === true,
+      emergencyCloseRequested,
       closePositionsOnStop: session.closePositionsOnStop !== false,
+      // ── Backend-driven recovery: lets a worker with empty local state hydrate
+      // and close a position the control plane knows about. ──
+      openPositions,
+      openPositionsCount: openPositions.length,
+      // ── Strict per-session debug fields (no global leakage possible) ──
+      sessionId: session.sessionId,
+      workerId: bodyWorkerId(req, body) || session.workerId || null,
+      commandSessionId: sessionId,
     });
   }
 
@@ -1707,6 +1739,32 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       if (s.ownerUserId === identity.userId && isSessionStaleNoWorker(s, fleet, now)) {
         clearStaleSession(fleet, s.sessionId, identity, 'auto_clear_before_start');
       }
+    }
+
+    // ── One active risk session rule ──
+    // If the caller already controls a session holding an open testnet position,
+    // START BOT must NOT mint a new clean session (which would orphan the open
+    // position). Return a reconnect instruction targeting that EXACT sessionId so
+    // the UI relaunches the worker on the same session.
+    const openPosSession = Object.values(fleet.botSessions || {}).find((s) => (
+      canControlFleetSession(identity, s, fleet) && sessionOpenPositions(fleet, s.sessionId).length > 0
+    ));
+    if (openPosSession) {
+      await saveFleet(fleet);
+      const launch = launchUrlForSession(req, openPosSession.sessionId);
+      fevent(fleet, 'WORKER_SESSION_START_BLOCKED_OPEN_POSITION', 'warn',
+        `START BOT blocked: open position on session ${openPosSession.sessionId.slice(0, 12)}. Reconnect required.`,
+        { sessionId: openPosSession.sessionId, ownerUserId: openPosSession.ownerUserId });
+      return json(req, {
+        ok: false,
+        conflict: 'open_position',
+        reconnect: true,
+        error: 'Open position exists. Reconnect worker to this session or Emergency Close.',
+        openPositionSessionId: openPosSession.sessionId,
+        sessionId: openPosSession.sessionId,
+        ...launch,
+        session: publicSessionView(fleet, openPosSession),
+      }, 409);
     }
 
     const recent = Object.values(fleet.botSessions || {}).find((s) => {

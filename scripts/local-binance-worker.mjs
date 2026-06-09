@@ -178,6 +178,41 @@ function markPositionClosed(orderId, closeOrderId) {
   if (pos) { pos.status = 'closed'; pos.closeOrderId = closeOrderId; pos.closedAt = new Date().toISOString(); saveState(); }
 }
 
+// --- Backend-driven recovery ---
+// When the control plane reports open positions for this session but local state
+// has none (e.g. a fresh worker reattached to an old open-position session, or
+// the local state file was lost), hydrate local state from the backend so the
+// worker refuses new BUY intents and can close the position on STOP/EMERGENCY.
+function hydrateOpenPositionsFromBackend(backendOpen) {
+  if (!Array.isArray(backendOpen) || backendOpen.length === 0) return false;
+  if (getOpenPositions().length > 0) return false; // local state always wins
+  let added = 0;
+  for (const p of backendOpen) {
+    if (!p || !p.symbol) continue;
+    const symbol = String(p.symbol).toUpperCase();
+    const orderId = p.orderId != null && String(p.orderId) ? String(p.orderId) : `backend_${symbol}`;
+    if (workerState.positions.some((q) => q && q.orderId === orderId)) continue;
+    workerState.positions.push({
+      symbol,
+      baseAsset: p.baseAsset || null,
+      executedQty: p.executedQty != null ? String(p.executedQty) : null,
+      orderId,
+      sessionId,
+      status: 'open',
+      openedAt: p.openedAt || p.receivedAt || new Date().toISOString(),
+      stepSize: p.stepSize || null, // closeAllPositions re-fetches LOT_SIZE when missing
+      source: 'backend-recovered',
+    });
+    added++;
+  }
+  if (added > 0) {
+    workerState.positions = workerState.positions.slice(-50);
+    saveState();
+    console.log(`[RECOVERY] Hydrated open position from backend (${added}) for session ${sessionId}. New BUY intents refused; STOP/EMERGENCY CLOSE will close it.`);
+  }
+  return added > 0;
+}
+
 // --- Utils ---
 function hmacSha256(qs, secret) { return crypto.createHmac('sha256', secret).update(qs).digest('hex'); }
 function stepPrecision(stepSize) {
@@ -513,6 +548,11 @@ async function tick() {
   if (stopping) return;
   await sendHeartbeat();
   const data = await fetchSession();
+  // Backend-driven recovery: hydrate before any session/null branching so an
+  // orphan open position the control plane knows about is adopted locally.
+  if (data && Array.isArray(data.openPositions) && data.openPositions.length > 0 && getOpenPositions().length === 0) {
+    hydrateOpenPositionsFromBackend(data.openPositions);
+  }
   if (!data || !data.session) {
     return handleMissingSession(data);
   }
@@ -521,6 +561,13 @@ async function tick() {
   const riskState = session.riskState || data.session.riskState || null;
 
   await processCommands(data.commands);
+
+  // Emergency close can also arrive as a session flag (in case the command was
+  // already acked/consumed). Honour it even while paused, before stop handling.
+  if (data.emergencyCloseRequested === true && getOpenPositions().length > 0) {
+    console.log('[EMERGENCY] emergencyCloseRequested set by backend; closing open testnet position(s) via MARKET SELL.');
+    await closeAllPositions('EMERGENCY');
+  }
 
   if (session.stopRequested === true || data.stopRequested === true) {
     return runStopSequence();
@@ -593,6 +640,24 @@ async function main() {
   tick().catch((err) => console.error('[ERROR] tick failed:', err.message));
 }
 
-main()
-  .then((code) => { if (code !== undefined) process.exitCode = code; })
-  .catch((err) => { console.error('[FATAL]', err); process.exitCode = 1; });
+// Only run the worker when executed directly (`node scripts/local-binance-worker.mjs`).
+// When imported by a test, skip main() so the pure functions can be exercised.
+const isMainModule = (() => {
+  try { return !!process.argv[1] && path.resolve(process.argv[1]) === __filename; } catch { return true; }
+})();
+
+if (isMainModule) {
+  main()
+    .then((code) => { if (code !== undefined) process.exitCode = code; })
+    .catch((err) => { console.error('[FATAL]', err); process.exitCode = 1; });
+}
+
+// Exported for unit tests (recovery + close paths). No effect on direct runs.
+export {
+  workerState,
+  getOpenPositions,
+  hydrateOpenPositionsFromBackend,
+  closeAllPositions,
+  recordOpenPosition,
+  isKeyUsed,
+};

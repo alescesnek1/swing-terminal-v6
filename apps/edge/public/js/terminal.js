@@ -4812,7 +4812,23 @@ function startBotSession() {
     _startFleetPoll();
     refreshFleet();
   }).catch((err) => {
-    Fleet.startError = err.payload || { error: err.message };
+    const p = err.payload || { error: err.message };
+    // One active risk session rule: backend refused to mint a new session because
+    // an open position exists. Reattach the UI to that exact session.
+    if (p && p.conflict === 'open_position') {
+      const id = p.openPositionSessionId || p.sessionId || null;
+      Fleet.selectedId = id || Fleet.selectedId;
+      Fleet.openPositionSessionId = id;
+      Fleet.retryLaunchUrl = p.launchUrl || _fleetLaunchUrl(id);
+      Fleet.launchNotice = 'Open position exists. Reconnect worker to this session or Emergency Close.';
+      Fleet.startError = null;
+      try { window.Toast?.error('Open position exists', 'Reconnect worker or Emergency Close.'); } catch {}
+      renderFleet();
+      if (btn) { btn.disabled = false; btn.textContent = 'START BOT'; }
+      refreshFleet();
+      return;
+    }
+    Fleet.startError = p;
     window.Toast?.error('Start bot failed', err.message);
     renderFleet();
     if (btn) { btn.disabled = false; btn.textContent = 'START BOT'; }
@@ -5019,10 +5035,56 @@ function clearStaleSessions() {
 }
 function pauseBotEntries() { _fleetSessionAction('pause', 'Pause entries'); }
 function resumeBotEntries() { _fleetSessionAction('resume', 'Resume entries'); }
-function emergencyCloseTestnet() {
-  if (!window.confirm('Emergency close ALL open testnet positions for this session? The worker stays alive.')) return;
-  _fleetSessionAction('emergency-close', 'Emergency close');
+
+// Build the swingworker:// launch URL for an EXACT sessionId. Reconnect never
+// mints a new session — it relaunches the local worker bound to this id.
+function _fleetCopy(text) {
+  if (!text) return;
+  const done = () => { try { window.Toast?.success('Copied', String(text).slice(0, 24)); } catch {} };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => _fallbackCopy(text, done));
+  } else {
+    _fallbackCopy(text, done);
+  }
 }
+
+function _fleetLaunchUrl(sessionId) {
+  if (!sessionId) return null;
+  const origin = (window.location && window.location.origin) || 'https://swing-terminal-v6.netlify.app';
+  return 'swingworker://start?session=' + encodeURIComponent(sessionId) + '&control=' + encodeURIComponent(origin);
+}
+
+// Reconnect a (possibly offline) worker to a specific open-position session.
+function reconnectWorkerToSession(sessionId) {
+  const id = sessionId || Fleet.openPositionSessionId || Fleet.selectedId;
+  if (!id) { window.Toast?.error('No session', 'No open-position session to reconnect.'); return; }
+  Fleet.selectedId = id;
+  Fleet.retryLaunchUrl = _fleetLaunchUrl(id);
+  Fleet.launchNotice = 'Reconnecting the local worker to the open-position session (no new session created).';
+  try { LiveFeed.push('Reconnecting worker to open-position session ' + id.slice(0, 12), 'info', { source: 'Bot Fleet' }); } catch {}
+  try { window.location.href = Fleet.retryLaunchUrl; } catch (e) { window.Toast?.error('Reconnect failed', e.message); }
+  if (typeof _watchWorkerConnect === 'function') _watchWorkerConnect(id);
+  renderFleet();
+}
+
+// Emergency-close a SPECIFIC session and auto-(re)launch its worker so the close
+// can run even if the worker was offline (spec D: no manual terminal needed).
+function emergencyCloseSession(sessionId) {
+  const id = sessionId || Fleet.selectedId;
+  if (!id) { window.Toast?.error('No session selected', 'Select a worker first.'); return; }
+  if (!window.confirm('Emergency close ALL open testnet positions for session ' + id.slice(0, 12) + '? The worker stays alive.')) return;
+  Fleet.selectedId = id;
+  Fleet.retryLaunchUrl = _fleetLaunchUrl(id);
+  _fleetFetch('POST', '/api/bot/session/' + encodeURIComponent(id) + '/emergency-close', {}).then(() => {
+    try { window.Toast?.success('Emergency close requested', id.slice(0, 12)); } catch {}
+    // Auto-launch/retry the worker terminal for this same session so it receives
+    // emergencyCloseRequested and closes the position with no manual steps.
+    try { window.location.href = Fleet.retryLaunchUrl; } catch {}
+    refreshFleet();
+  }).catch((err) => window.Toast?.error('Emergency close failed', err.message));
+}
+
+function emergencyCloseTestnet() { emergencyCloseSession(Fleet.selectedId); }
 
 // Queue a single BTCUSDT testnet MARKET BUY smoke order for the SELECTED session.
 // Uses the exact, full sessionId from fleet state (never stripped/parsed) and the
@@ -5316,6 +5378,17 @@ function renderFleet() {
   const anyWorkerOnline = sessions.some(_fleetWorkerOnline);
   if (anyWorkerOnline) Fleet.workerConnectFailed = false;
 
+  // ── One active risk session rule (UI side) ──
+  // If ANY session holds an open testnet position, START BOT is disabled, the
+  // smoke order is hidden globally, and the operator is steered to reconnect or
+  // emergency-close that exact session.
+  const openPosSession = sessions.find((s) => _fleetOpenPositionCount(s) > 0) || null;
+  Fleet.openPositionSessionId = openPosSession ? openPosSession.sessionId : null;
+  const anyOpenPosition = !!openPosSession;
+  const openPosWorkerOnline = openPosSession ? _fleetWorkerOnline(openPosSession) : false;
+  // A worker is online somewhere, but NOT on the open-position session.
+  const mismatchWorker = !!openPosSession && anyWorkerOnline && !openPosWorkerOnline;
+
   // Risk regime card
   const rg = regime ? regime.regime : 'UNKNOWN';
   const rgColor = REGIME_COLORS[rg] || '#8899aa';
@@ -5332,8 +5405,11 @@ function renderFleet() {
     + (!anyWorkerOnline ? '<div class="fleet-worker-offline">LOCAL WORKER OFFLINE</div>' : '')
     + '<div class="fleet-action-row">'
     + '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="openInstallWorker()">Install Worker on this computer</button>'
-    + '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT</button>'
-    + (staleSessions.length > 1 ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearStaleSessions()">CLEAR STALE SESSIONS</button>' : '')
+    + (openPosSession
+        ? '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" disabled title="Open position exists — reconnect or emergency close first">START BOT</button>'
+          + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="reconnectWorkerToSession(\'' + _e(openPosSession.sessionId) + '\')">Reconnect Worker to Position Session</button>'
+        : '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT</button>')
+    + (staleSessions.length > 1 && !openPosSession ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearStaleSessions()">CLEAR STALE SESSIONS</button>' : '')
     + (Fleet.retryLaunchUrl ? '<button type="button" class="paperbot-control-btn" onclick="retryOpenWorkerTerminal()">Retry Open Worker Terminal</button>' : '')
     + '</div>'
     + '<div id="fleet-conn" class="fleet-conn">' + (data.backend === 'blobs' ? 'durable store · ' : 'in-memory store · ') + (data.isAdmin ? 'admin' : 'user') + ' · ' + _e(data.identity && data.identity.email || '') + '</div>'
@@ -5342,6 +5418,23 @@ function renderFleet() {
     + '<div class="fleet-hint fleet-hint--mono">' + _e(_fleetManualCommandHint(sel && sel.sessionId)) + '</div>'
     + '</div>'
     + '</div>';
+
+  // Global open-position banner: shown whenever any session holds a position,
+  // regardless of which row is selected. Steers to reconnect / emergency close
+  // on the EXACT open-position sessionId.
+  if (openPosSession) {
+    html += '<div class="fleet-error-panel fleet-error-panel--connect">'
+      + '<div class="fleet-error-panel__title">' + (openPosWorkerOnline ? 'OPEN POSITION EXISTS' : 'WORKER OFFLINE &mdash; POSITION OPEN') + '</div>'
+      + '<div class="fleet-error-panel__body">Open position exists. Reconnect worker to this session or Emergency Close. '
+      + 'START BOT and smoke orders are disabled until it is closed.</div>'
+      + (mismatchWorker ? '<div class="fleet-orphan-warning" style="color:#ff4a4a;border-color:#ff4a4a"><b>Worker is connected to a different session. Reconnect to the open-position session.</b></div>' : '')
+      + '<div class="fleet-action-row">'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="reconnectWorkerToSession(\'' + _e(openPosSession.sessionId) + '\')">Reconnect Worker to Position Session</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _e(openPosSession.sessionId) + '\')">Emergency Close Testnet</button>'
+      + '</div>'
+      + '<div class="fleet-hint fleet-hint--mono">open-position sessionId: ' + _e(openPosSession.sessionId) + '</div>'
+      + '</div>';
+  }
 
   const workerConnectOpenPosition = sel && !_fleetWorkerOnline(sel) && _fleetOpenPositionCount(sel) > 0;
   if (Fleet.workerConnectFailed) {
@@ -5424,8 +5517,8 @@ function renderFleet() {
         + '<b>WORKER OFFLINE &mdash; POSITION OPEN</b> The position is still held on Binance Spot Testnet. '
         + 'Bring the worker back online so it can close the position, or use Emergency Close Testnet.'
         + '<div class="fleet-action-row">'
-        + (Fleet.retryLaunchUrl ? '<button type="button" class="paperbot-control-btn" onclick="retryOpenWorkerTerminal()">Retry Open Worker Terminal</button>' : '')
-        + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseTestnet()">Emergency Close Testnet</button>'
+        + '<button type="button" class="paperbot-control-btn" onclick="reconnectWorkerToSession(\'' + _e(sel.sessionId) + '\')">Reconnect Worker to Position Session</button>'
+        + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _e(sel.sessionId) + '\')">Emergency Close Testnet</button>'
         + '</div>'
         + '</div>';
     }
@@ -5438,6 +5531,16 @@ function renderFleet() {
       + '<div><span>Realized PnL</span><b>' + (sel.realizedPnl >= 0 ? '+' : '') + (Number(sel.realizedPnl) || 0).toFixed(2) + '</b></div>'
       + '<div><span>Open positions</span><b>' + (sel.openPositions ? sel.openPositions.length : 0) + '</b></div>'
       + '<div><span>Mode</span><b>TESTNET</b></div>'
+      + '</div>';
+
+    // Copyable debug rows (spec F): exact sessionId + the worker's bound session.
+    const workerSessionId = (sel.worker && sel.worker.workerId) ? sel.sessionId : null; // worker reports against this session when online
+    html += '<div class="fleet-debug-rows">'
+      + '<div class="fleet-hint fleet-hint--mono">sessionId: <code onclick="_fleetCopy(\'' + _e(sel.sessionId) + '\')" title="Click to copy" style="cursor:pointer">' + _e(sel.sessionId) + '</code></div>'
+      + (online && sel.worker ? '<div class="fleet-hint fleet-hint--mono">worker: ' + _e(sel.worker.workerId || '—') + ' · session ' + _e(workerSessionId || sel.sessionId) + '</div>' : '')
+      + (mismatchWorker && openPosSession && sel.sessionId === openPosSession.sessionId
+          ? '<div class="fleet-orphan-warning" style="color:#ff4a4a;border-color:#ff4a4a"><b>Worker is connected to a different session. Reconnect to the open-position session.</b></div>'
+          : '')
       + '</div>';
 
     const canStop = !(sel.status === 'stopped' || sel.status === 'expired');
@@ -5458,6 +5561,7 @@ function renderFleet() {
       && (sel.status === 'running' || online)
       && sel.mode !== 'production'
       && smokeOpenCount === 0
+      && !anyOpenPosition // global guard: hidden while ANY session holds a position
       && canStop
       && !sel.stopRequested
       && !sel.pauseRequested;
