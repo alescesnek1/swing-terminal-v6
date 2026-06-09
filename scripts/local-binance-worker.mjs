@@ -16,8 +16,12 @@ const LOG_FILE = path.join(LOG_DIR, 'local-binance-worker.log');
 const ERR_LOG_FILE = path.join(LOG_DIR, 'local-binance-worker.err.log');
 try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch { /* best effort */ }
 try { fs.closeSync(fs.openSync(LOG_FILE,
-  _resetStoppingForTest, 'a')); fs.closeSync(fs.openSync(ERR_LOG_FILE,
-  _resetStoppingForTest, 'a')); } catch { /* best effort */ }
+  _resetStoppingForTest,
+  sendHeartbeat,
+  tick, 'a')); fs.closeSync(fs.openSync(ERR_LOG_FILE,
+  _resetStoppingForTest,
+  sendHeartbeat,
+  tick, 'a')); } catch { /* best effort */ }
 function _logTs() { return new Date().toISOString(); }
 function _appendLog(file, line) { try { fs.appendFileSync(file, line + '\n'); } catch { /* never crash on logging */ } }
 function _fmtArgs(args) {
@@ -28,12 +32,20 @@ function _fmtArgs(args) {
 }
 const _origConsole = { log: console.log.bind(console), warn: console.warn.bind(console), error: console.error.bind(console) };
 console.log = (...a) => { const m = _fmtArgs(a); _origConsole.log(m); _appendLog(LOG_FILE,
-  _resetStoppingForTest, `[${_logTs()}] ${m}`); };
+  _resetStoppingForTest,
+  sendHeartbeat,
+  tick, `[${_logTs()}] ${m}`); };
 console.warn = (...a) => { const m = _fmtArgs(a); _origConsole.warn(m); _appendLog(LOG_FILE,
-  _resetStoppingForTest, `[${_logTs()}] ${m}`); };
+  _resetStoppingForTest,
+  sendHeartbeat,
+  tick, `[${_logTs()}] ${m}`); };
 console.error = (...a) => { const m = _fmtArgs(a); _origConsole.error(m); _appendLog(LOG_FILE,
-  _resetStoppingForTest, `[${_logTs()}] ${m}`); _appendLog(ERR_LOG_FILE,
-  _resetStoppingForTest, `[${_logTs()}] ${m}`); };
+  _resetStoppingForTest,
+  sendHeartbeat,
+  tick, `[${_logTs()}] ${m}`); _appendLog(ERR_LOG_FILE,
+  _resetStoppingForTest,
+  sendHeartbeat,
+  tick, `[${_logTs()}] ${m}`); };
 // Create the log file immediately so observability exists from the first instant.
 console.log(`[BOOT] Local Binance Worker booting (pid ${process.pid}). Log: ${LOG_FILE}`);
 
@@ -436,9 +448,15 @@ async function sendHeartbeat() {
       heartbeatDiagnosticLogged = true;
     }
     console.log(`[HEARTBEAT] sent state=${currentState} ok=${res.ok} openPositions=${getOpenPositions().length}`);
-    if (!res.ok) { console.warn(`[WARN] Heartbeat HTTP ${res.status}`); return null; }
-    return payload;
-  } catch (err) { console.warn(`[WARN] Heartbeat error: ${err.message}`); return null; }
+    if (!res.ok) {
+      console.warn(`[WARN] Heartbeat HTTP ${res.status}`);
+      return { ok: false, status: res.status, is5xx: res.status >= 500, retriable: true };
+    }
+    return { ok: true, payload };
+  } catch (err) {
+    console.warn(`[WARN] Heartbeat error: ${err.message}`);
+    return { ok: false, status: 500, is5xx: true, retriable: true, error: err.message };
+  }
 }
 
 async function fetchSession() {
@@ -1028,9 +1046,32 @@ async function handleMissingSession(data) {
 // --- Main loop ---
 async function tick() {
   if (stopping) return;
-  await sendHeartbeat();
-  await flushPendingReports();
-  const data = await fetchSession();
+  
+  let heartbeatRes;
+  try {
+    heartbeatRes = await sendHeartbeat();
+  } catch (err) {
+    console.warn(`[WARN] Exception in sendHeartbeat: ${err.message}`);
+    heartbeatRes = { ok: false, is5xx: true };
+  }
+
+  if (heartbeatRes && heartbeatRes.is5xx && getOpenPositions().length > 0) {
+    console.warn(`[CONTROL][WARN] heartbeat failed HTTP ${heartbeatRes.status}; continuing because openPositions=${getOpenPositions().length}`);
+  }
+
+  try {
+    await flushPendingReports();
+  } catch (err) {
+    console.warn(`[WARN] Exception in flushPendingReports: ${err.message}`);
+  }
+
+  let data;
+  try {
+    data = await fetchSession();
+  } catch (err) {
+    console.warn(`[WARN] Exception in fetchSession: ${err.message}`);
+    data = { ok: false, session: null, is5xx: true, statusCode: 500 };
+  }
   
   // Backend-driven recovery: hydrate before any session/null branching so an
   // orphan open position the control plane knows about is adopted locally.
@@ -1203,10 +1244,36 @@ const isMainModule = (() => {
   try { return !!process.argv[1] && path.resolve(process.argv[1]) === __filename; } catch { return true; }
 })();
 
+function setupGlobalCrashGuard() {
+  const handler = (err, type) => {
+    const open = getOpenPositions().length;
+    if (open > 0) {
+      console.error(`[CRITICAL] ${type} caught: ${err ? err.message : 'unknown'}. Staying alive in degraded recovery mode due to open positions=${open}.`);
+      console.error(err);
+      // DO NOT EXIT!
+    } else {
+      console.error(`[FATAL] ${type} caught: ${err ? err.message : 'unknown'}. No open positions, exiting code 1.`);
+      console.error(err);
+      process.exit(1);
+    }
+  };
+  process.on('uncaughtException', (err) => handler(err, 'uncaughtException'));
+  process.on('unhandledRejection', (err) => handler(err, 'unhandledRejection'));
+}
+
 if (isMainModule) {
+  setupGlobalCrashGuard();
   main()
     .then((code) => { if (code !== undefined) process.exitCode = code; })
-    .catch((err) => { console.error('[FATAL]', err); process.exitCode = 1; });
+    .catch((err) => { 
+      const open = getOpenPositions().length;
+      if (open > 0) {
+        console.error(`[CRITICAL] main() failed: ${err.message}. Staying alive in degraded recovery mode due to openPositions=${open}.`);
+      } else {
+        console.error('[FATAL]', err); 
+        process.exitCode = 1; 
+      }
+    });
 }
 
 // Exported for unit tests (recovery + close paths). No effect on direct runs.
@@ -1234,4 +1301,6 @@ export {
   LIVE_PREFLIGHT_FILE,
   LOG_FILE,
   _resetStoppingForTest,
+  sendHeartbeat,
+  tick,
 };

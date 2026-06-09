@@ -23,6 +23,7 @@ const worker = await import('../scripts/local-binance-worker.mjs');
 const {
   workerState, getOpenPositions, hydrateOpenPositionsFromBackend, closeAllPositions,
   executeIntent, handleMissingSession, runStopSequence, STATE_FILE, LOG_FILE, _resetStoppingForTest,
+  sendHeartbeat, tick,
 } = worker;
 
 function reset() { 
@@ -265,4 +266,57 @@ test('worker-new-2: handleMissingSession with 5xx keeps worker alive and does no
   await handleMissingSession({ is5xx: true, statusCode: 502 });
   assert.notEqual(process.exitCode, 0, 'Worker must not exit on transient 5xx');
   process.exitCode = prevExit;
+});
+
+test('worker-new-3: sendHeartbeat catches 502 and returns detailed object without throwing', async () => {
+  reset();
+  const origFetch = global.fetch;
+  global.fetch = async (url) => {
+    if (String(url).includes('/worker-heartbeat')) {
+      return { ok: false, status: 502, json: async () => ({ msg: 'bad gateway' }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  try {
+    const res = await sendHeartbeat();
+    assert.equal(res.ok, false);
+    assert.equal(res.status, 502);
+    assert.equal(res.is5xx, true);
+    assert.equal(res.retriable, true);
+  } finally {
+    global.fetch = origFetch;
+  }
+});
+
+test('worker-new-4: tick() survives heartbeat 502 after BUY and continues loop', async () => {
+  reset();
+  hydrateOpenPositionsFromBackend([{ symbol: 'BTCUSDT', executedQty: '0.00010000', orderId: 'held-5', status: 'open' }]);
+  assert.equal(getOpenPositions().length, 1);
+  
+  const origFetch = global.fetch;
+  let heartbeatCalls = 0;
+  let sessionCalls = 0;
+  global.fetch = async (url) => {
+    if (String(url).includes('/worker-heartbeat')) {
+      heartbeatCalls++;
+      return { ok: false, status: 502, json: async () => ({ msg: 'bad gateway' }) };
+    }
+    if (String(url).includes('/worker-session')) {
+      sessionCalls++;
+      return { ok: true, status: 200, json: async () => ({ ok: true, session: { stopRequested: false } }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  
+  try {
+    const prevExit = process.exitCode;
+    process.exitCode = undefined;
+    await tick();
+    assert.notEqual(process.exitCode, 1, 'Tick must not set fatal exit code 1');
+    assert.equal(heartbeatCalls, 1, 'Heartbeat was called');
+    assert.equal(sessionCalls, 1, 'Fetch session was still called despite heartbeat 502');
+    process.exitCode = prevExit;
+  } finally {
+    global.fetch = origFetch;
+  }
 });
