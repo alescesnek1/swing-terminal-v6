@@ -15,13 +15,7 @@ const LOG_DIR = path.join(REPO_ROOT, 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'local-binance-worker.log');
 const ERR_LOG_FILE = path.join(LOG_DIR, 'local-binance-worker.err.log');
 try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch { /* best effort */ }
-try { fs.closeSync(fs.openSync(LOG_FILE,
-  _resetStoppingForTest,
-  sendHeartbeat,
-  tick, 'a')); fs.closeSync(fs.openSync(ERR_LOG_FILE,
-  _resetStoppingForTest,
-  sendHeartbeat,
-  tick, 'a')); } catch { /* best effort */ }
+try { fs.closeSync(fs.openSync(LOG_FILE, 'a')); fs.closeSync(fs.openSync(ERR_LOG_FILE, 'a')); } catch { /* best effort */ }
 function _logTs() { return new Date().toISOString(); }
 function _appendLog(file, line) { try { fs.appendFileSync(file, line + '\n'); } catch { /* never crash on logging */ } }
 function _fmtArgs(args) {
@@ -31,21 +25,9 @@ function _fmtArgs(args) {
   }).join(' ');
 }
 const _origConsole = { log: console.log.bind(console), warn: console.warn.bind(console), error: console.error.bind(console) };
-console.log = (...a) => { const m = _fmtArgs(a); _origConsole.log(m); _appendLog(LOG_FILE,
-  _resetStoppingForTest,
-  sendHeartbeat,
-  tick, `[${_logTs()}] ${m}`); };
-console.warn = (...a) => { const m = _fmtArgs(a); _origConsole.warn(m); _appendLog(LOG_FILE,
-  _resetStoppingForTest,
-  sendHeartbeat,
-  tick, `[${_logTs()}] ${m}`); };
-console.error = (...a) => { const m = _fmtArgs(a); _origConsole.error(m); _appendLog(LOG_FILE,
-  _resetStoppingForTest,
-  sendHeartbeat,
-  tick, `[${_logTs()}] ${m}`); _appendLog(ERR_LOG_FILE,
-  _resetStoppingForTest,
-  sendHeartbeat,
-  tick, `[${_logTs()}] ${m}`); };
+console.log = (...a) => { const m = _fmtArgs(a); _origConsole.log(m); _appendLog(LOG_FILE, `[${_logTs()}] ${m}`); };
+console.warn = (...a) => { const m = _fmtArgs(a); _origConsole.warn(m); _appendLog(LOG_FILE, `[${_logTs()}] ${m}`); };
+console.error = (...a) => { const m = _fmtArgs(a); _origConsole.error(m); _appendLog(LOG_FILE, `[${_logTs()}] ${m}`); _appendLog(ERR_LOG_FILE, `[${_logTs()}] ${m}`); };
 // Create the log file immediately so observability exists from the first instant.
 console.log(`[BOOT] Local Binance Worker booting (pid ${process.pid}). Log: ${LOG_FILE}`);
 

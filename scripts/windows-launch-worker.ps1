@@ -170,26 +170,33 @@ try {
     Write-LauncherLog "[LAUNCHER] hasBinanceSecret: `$([bool]`$env:BINANCE_API_SECRET)"
 
     `$ErrorActionPreference = 'Continue'
-    npm run bot:worker -- --session `$SessionId 2>&1 | Tee-Object -FilePath `$OutLog -Append
-    `$exitCode = `$LASTEXITCODE
-    `$ErrorActionPreference = 'Stop'
 } catch {
     `$msg = (`$_ | Out-String)
     Add-Content -LiteralPath `$ErrLog -Value `$msg -Encoding utf8
     Write-LauncherLog `$msg
     `$exitCode = 1
 }
+
+if (`$exitCode -eq 0) {
+    npm run bot:worker -- --session `$SessionId 2>&1 | Tee-Object -FilePath `$OutLog -Append
+    `$exitCode = `$LASTEXITCODE
+}
+
 Write-LauncherLog "[LAUNCHER] Worker exited with code `$exitCode"
-# Terminal UX: a clean success (exit 0) should not feel stuck. Print a plain
-# instruction and auto-close, unless WORKER_HOLD_TERMINAL_ON_EXIT=true. Any
-# error (non-zero) always holds the window so diagnostics stay visible.
+
+if (`$exitCode -ne 0) {
+    Write-Host "[LAUNCHER][ERROR] Worker exited before heartbeat." -ForegroundColor Red
+    Write-Host "[LAUNCHER] Review logs:" -ForegroundColor Yellow
+    Write-Host `$OutLog -ForegroundColor Yellow
+    Write-Host `$ErrLog -ForegroundColor Yellow
+}
+
 `$hold = (`$env:WORKER_HOLD_TERMINAL_ON_EXIT -eq 'true')
 if (`$exitCode -eq 0 -and -not `$hold) {
     Write-Host ''
     Write-Host 'Trade closed successfully. You can close this window.' -ForegroundColor Green
     Start-Sleep -Seconds 6
 } else {
-    if (`$exitCode -ne 0) { Write-Host '' ; Write-Host ('Worker exited with error code ' + `$exitCode + '. Review the log above.') -ForegroundColor Yellow }
     Read-Host 'Press Enter to close'
 }
 exit `$exitCode
