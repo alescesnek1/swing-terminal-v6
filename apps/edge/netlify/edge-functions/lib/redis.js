@@ -10,7 +10,7 @@
 // background ingest worker no longer exists.
 // ─────────────────────────────────────────────────────────────
 
-import { Redis } from 'https://esm.sh/@upstash/redis';
+import { Redis } from 'https://esm.sh/@upstash/redis@1.37.0/denonext/redis.mjs';
 
 // ── Constants ──
 const REDIS_KEYS = {
