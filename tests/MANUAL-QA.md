@@ -40,9 +40,20 @@ process kills, no state-file edits are required at any step.**
 - [ ] "Clear stale" offered while an open position exists.
 - [ ] Two different sessions shown as active with no mismatch warning.
 
-## Durability
-- [ ] When the fleet store is the in-memory fallback, a red **CONTROL STATE NOT DURABLE — DO NOT TRADE**
-      banner is shown and the connection row reads `in-memory store`.
+## Durability (spec A/E)
+- [ ] When the store is `memory_fallback` (not allowed), a red
+      **CONTROL STATE NOT DURABLE — ONLY CLOSE EXISTING POSITIONS ALLOWED** banner shows, with the
+      `storeError` reason, and the connection row reads `in-memory store (memory_fallback)`.
+- [ ] START BOT and CREATE TESTNET SMOKE ORDER are disabled while non-durable; close/reconnect remain available.
+- [ ] Backend returns `409 { code: 'not_durable' }` for start-session / create-*-intent in this mode
+      (verified by automated test `G-1`).
+- [ ] Fix: enable Netlify Blobs on the site (or set `NETLIFY_SITE_ID` + `NETLIFY_API_TOKEN`); the fleet
+      response then reports `storeMode: durable_blobs`, `durable: true`, `newEntriesAllowed: true`.
+
+## Automated end-to-end proof
+- [ ] `npm run e2e` drives START → ONLINE → SMOKE BUY → OPEN → EMERGENCY CLOSE → SELL → CLOSED →
+      START-available against the real worker process + real backend handler + mock Binance, and prints
+      the worker BUY/SELL log lines and fleet before/after.
 
 ## Closing the CURRENT orphan BTCUSDT (order 2358967) via UI only
 1. Open Bot Feed. The open-position banner appears for the session holding BTCUSDT.

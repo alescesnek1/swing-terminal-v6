@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 process.env.BOT_WORKER_TOKEN = 'test-worker-token';
 process.env.BINANCE_ENV = 'testnet';
 process.env.BOT_ALLOW_TESTNET_ORDERS = 'true';
+process.env.BOT_ALLOW_MEMORY_STORE = 'true'; // permit the in-memory store for tests (prod uses durable blobs)
 process.env.AUTH_DECODE_ONLY = 'true'; // decode-only identity for browser routes (test only)
 delete process.env.BOT_LIVE_TRADING_ENABLED;
 delete process.env.BOT_ALLOW_REAL_ORDERS;
@@ -181,7 +182,7 @@ test('I-10: fleet response never hides an open-position session and reports dura
   await closePosition(openSid, 'ord-f'); // cleanup
 });
 
-test('I-7: after the position is closed, start-session is allowed again', async () => {
+test('I-7/G-6: after the position is closed, openPositionSessionIds empties and start-session is allowed again', async () => {
   const openSid = `session_open_${Date.now()}_d`;
   const user = freshUser();
   await openPosition(openSid, 'ord-d');
@@ -190,9 +191,41 @@ test('I-7: after the position is closed, start-session is allowed again', async 
   assert.equal(blocked.status, 409);
   // Close it.
   await closePosition(openSid, 'ord-d');
+  const fleetAfter = await call(browserReq('GET', '/api/bot/fleet', user));
+  assert.ok(!(fleetAfter.json.openPositionSessionIds || []).includes(openSid));
   // Now allowed.
   const ok = await call(browserReq('POST', '/api/bot/start-session', user, {}));
   assert.equal(ok.status, 200);
   assert.equal(ok.json.ok, true);
   assert.ok(typeof ok.json.sessionId === 'string');
+});
+
+test('G-1: a non-durable store blocks START + smoke but still allows closing an existing position', async () => {
+  const prev = process.env.BOT_ALLOW_MEMORY_STORE;
+  delete process.env.BOT_ALLOW_MEMORY_STORE; // simulate production memory_fallback (not allowed)
+  const openSid = `session_open_${Date.now()}_g`;
+  try {
+    const u = freshUser();
+    // START blocked with the explicit not_durable contract (no open position present).
+    const start = await call(browserReq('POST', '/api/bot/start-session', u, {}));
+    assert.equal(start.status, 409);
+    assert.equal(start.json.code, 'not_durable');
+    // Now create an open position; smoke must still be blocked by durability.
+    await openPosition(openSid, 'ord-g');
+    const smoke = await call(browserReq('POST', '/api/bot/create-smoke-execution-intent', u, { sessionId: openSid }));
+    assert.equal(smoke.status, 409);
+    assert.equal(smoke.json.code, 'not_durable');
+    // Closing the existing position is STILL allowed (no durability gate on close).
+    const emc = await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(openSid)}/emergency-close`, u, {}));
+    assert.equal(emc.status, 200);
+    const stop = await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(openSid)}/stop`, u, {}));
+    assert.equal(stop.status, 200);
+    // Fleet read still works and reports the non-durable mode.
+    const fleet = await call(browserReq('GET', '/api/bot/fleet', u));
+    assert.equal(fleet.json.newEntriesAllowed, false);
+    assert.equal(fleet.json.storeMode, 'memory_fallback');
+  } finally {
+    if (prev === undefined) process.env.BOT_ALLOW_MEMORY_STORE = 'true'; else process.env.BOT_ALLOW_MEMORY_STORE = prev;
+  }
+  await closePosition(openSid, 'ord-g'); // cleanup
 });

@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { getIdentity, isAdmin, canControlSession } from './_auth.mjs';
-import { loadFleet, saveFleet, fleetBackend } from './_fleet-store.mjs';
+import { loadFleet, saveFleet, fleetBackend, fleetStoreInfo } from './_fleet-store.mjs';
 import { computeMarketRegime } from './_market-regime.mjs';
 
 const DEFAULT_STATE = {
@@ -1152,6 +1152,25 @@ function workerIsOnline(ws) {
   return Number.isFinite(last) && (Date.now() - last) < WORKER_ONLINE_MS && ws.status !== 'offline';
 }
 
+// Durability gate: when the fleet store is the in-memory fallback, NEW entries
+// (start a session, queue a BUY/smoke) are unsafe — sessions can be lost between
+// invocations. Closing an existing position is always allowed. Local/dev and the
+// test suite set BOT_ALLOW_MEMORY_STORE=true to permit memory operation.
+function isDurableEnough() {
+  return fleetBackend() === 'blobs' || process.env.BOT_ALLOW_MEMORY_STORE === 'true';
+}
+function notDurableResponse(req) {
+  const info = fleetStoreInfo();
+  return json(req, {
+    ok: false,
+    code: 'not_durable',
+    error: 'CONTROL STATE NOT DURABLE — ONLY CLOSE EXISTING POSITIONS ALLOWED',
+    storeMode: info.storeMode,
+    durable: info.durable,
+    storeError: info.storeError,
+  }, 409);
+}
+
 function sessionWorkerStatus(fleet, session) {
   if (!session) return null;
   if (session.workerId && fleet.workerStatuses && fleet.workerStatuses[session.workerId]) {
@@ -1696,14 +1715,19 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     const sessions = sessionsVisibleTo(fleet, identity).map((s) => publicSessionView(fleet, s));
     const myEvents = (fleet.events || []).filter((e) => !e.ownerUserId || e.ownerUserId === identity.userId || isAdmin(identity)).slice(0, 50);
     const backend = fleetBackend();
+    const storeInfo = fleetStoreInfo();
     return json(req, {
       ok: true,
       backend,
       // durable=true only when the Netlify Blobs store is active. memory_fallback
       // means sessions can be lost between function invocations — surfaced loudly
       // in the UI ("CONTROL STATE NOT DURABLE — DO NOT TRADE").
-      durable: backend === 'blobs',
-      storeMode: backend === 'blobs' ? 'durable_blobs' : 'memory_fallback',
+      durable: storeInfo.durable,
+      storeMode: storeInfo.storeMode,
+      storeError: storeInfo.storeError,
+      // New entries are blocked unless the store is durable (or explicitly allowed
+      // for local/test). Closing existing positions is always permitted.
+      newEntriesAllowed: isDurableEnough(),
       isAdmin: isAdmin(identity),
       identity: { userId: identity.userId, email: identity.email, orgId: identity.orgId, verified: identity.verified, authMode: identity.authMode },
       sessions,
@@ -1775,6 +1799,9 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
         session: publicSessionView(fleet, openPosSession),
       }, 409);
     }
+
+    // Durability gate: do not mint a new session on a non-durable store.
+    if (!isDurableEnough()) return notDurableResponse(req);
 
     const recent = Object.values(fleet.botSessions || {}).find((s) => {
       if (!s || s.ownerUserId !== identity.userId || s.status !== 'launch_requested') return false;
@@ -1930,6 +1957,8 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     }
 
     const fleet = await loadFleet();
+    // Durability gate: never queue a new BUY/smoke intent on a non-durable store.
+    if (!isDurableEnough()) return notDurableResponse(req);
     // Exact, full-id lookup using the same store as worker-heartbeat / worker-session.
     const session = fleet.botSessions[sessionId];
     if (!session) {

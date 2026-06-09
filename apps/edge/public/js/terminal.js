@@ -4862,6 +4862,14 @@ function startBotSession() {
       refreshFleet();
       return;
     }
+    if (p && p.code === 'not_durable') {
+      Fleet.startError = null;
+      try { window.Toast?.error('Control state not durable', 'Only closing existing positions is allowed.'); } catch {}
+      renderFleet();
+      if (btn) { btn.disabled = false; btn.textContent = 'START BOT'; }
+      refreshFleet();
+      return;
+    }
     Fleet.startError = p;
     window.Toast?.error('Start bot failed', err.message);
     renderFleet();
@@ -5483,6 +5491,8 @@ function renderFleet() {
   // A worker is online somewhere, but NOT on the open-position session.
   const mismatchWorker = !!openPosSession && anyWorkerOnline && !openPosWorkerOnline;
   const durable = data.backend === 'blobs';
+  // Backend authority on whether new sessions/orders are permitted (durability gate).
+  const newEntriesAllowed = data.newEntriesAllowed !== false;
 
   // Risk regime card
   const rg = regime ? regime.regime : 'UNKNOWN';
@@ -5499,27 +5509,33 @@ function renderFleet() {
     + '<div class="fleet-actions-top">'
     + (!anyWorkerOnline ? '<div class="fleet-worker-offline">LOCAL WORKER OFFLINE</div>' : '')
     + '<div class="fleet-action-row">'
-    + '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="openInstallWorker()">Install Worker on this computer</button>'
-    + (openPosSession
-        ? '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" disabled title="Open position exists — reconnect or emergency close first">START BOT</button>'
+    // Install Worker is hidden while an open position exists (close-only mode).
+    + (anyOpenPosition ? '' : '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="openInstallWorker()">Install Worker on this computer</button>')
+    + (anyOpenPosition
+        // Open position → START is disabled with a reason; reconnect is primary.
+        ? '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" disabled title="Disabled: close BTCUSDT position first">START BOT (disabled: close position first)</button>'
           + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="reconnectWorkerToSession(\'' + _e(openPosSession.sessionId) + '\')">Reconnect Worker to Position Session</button>'
-        : '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT</button>')
-    + (staleSessions.length > 1 && !openPosSession ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearStaleSessions()">CLEAR STALE SESSIONS</button>' : '')
+        : !newEntriesAllowed
+          // Non-durable store → START disabled (close-only mode).
+          ? '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" disabled title="Disabled: control state not durable">START BOT (disabled: store not durable)</button>'
+          : '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT</button>')
+    + (staleSessions.length > 1 && !anyOpenPosition ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearStaleSessions()">CLEAR STALE SESSIONS</button>' : '')
     + (Fleet.retryLaunchUrl ? '<button type="button" class="paperbot-control-btn" onclick="retryOpenWorkerTerminal()">Retry Open Worker Terminal</button>' : '')
     + '</div>'
-    + '<div id="fleet-conn" class="fleet-conn">' + (durable ? 'durable store · ' : 'in-memory store · ') + (data.isAdmin ? 'admin' : 'user') + ' · ' + _e(data.identity && data.identity.email || '') + '</div>'
+    + '<div id="fleet-conn" class="fleet-conn">' + (durable ? 'durable store (durable_blobs) · ' : 'in-memory store (memory_fallback) · ') + (data.isAdmin ? 'admin' : 'user') + ' · ' + _e(data.identity && data.identity.email || '') + '</div>'
     + (Fleet.launchNotice ? '<div class="fleet-notice">' + _e(Fleet.launchNotice) + '</div>' : '')
-    + '<div class="fleet-hint">First time on this computer? Click <b>Install Worker</b>. After that, the entire testnet lifecycle is button-driven — no terminal needed.</div>'
+    + (anyOpenPosition ? '' : '<div class="fleet-hint">First time on this computer? Click <b>Install Worker</b>. After that, the entire testnet lifecycle is button-driven — no terminal needed.</div>')
     + '</div>'
     + '</div>';
 
-  // ── Durability warning (E): memory_fallback means sessions can be lost between
-  // serverless invocations. Make it impossible to miss. ──
-  if (!durable) {
+  // ── Durability warning (E): when the store is not durable AND new entries are
+  // blocked, say exactly that. Closing existing positions stays allowed. ──
+  if (!newEntriesAllowed) {
     html += '<div class="fleet-error-panel fleet-error-panel--danger">'
-      + '<div class="fleet-error-panel__title">CONTROL STATE NOT DURABLE — DO NOT TRADE</div>'
-      + '<div class="fleet-error-panel__body">Fleet store is <b>memory_fallback</b> (Netlify Blobs unavailable). '
-      + 'Sessions and open positions can be lost between requests. Configure @netlify/blobs before trading.</div>'
+      + '<div class="fleet-error-panel__title">CONTROL STATE NOT DURABLE — ONLY CLOSE EXISTING POSITIONS ALLOWED</div>'
+      + '<div class="fleet-error-panel__body">Fleet store is <b>' + _e(data.storeMode || 'memory_fallback') + '</b>'
+      + (data.storeError ? ' (' + _e(data.storeError) + ')' : '') + '. '
+      + 'START BOT and smoke orders are blocked. Enable Netlify Blobs (or set NETLIFY_SITE_ID + NETLIFY_API_TOKEN) before starting new sessions.</div>'
       + '</div>';
   }
   // Transient-merge notice (D): an open-position session was preserved across an
@@ -5678,6 +5694,7 @@ function renderFleet() {
       && sel.mode !== 'production'
       && smokeOpenCount === 0
       && !anyOpenPosition // global guard: hidden while ANY session holds a position
+      && newEntriesAllowed // durability guard: hidden when store not durable
       && canStop
       && !sel.stopRequested
       && !sel.pauseRequested;
@@ -5689,14 +5706,27 @@ function renderFleet() {
         + '</div>';
     } else if (smokeOpenCount > 0) {
       html += '<div class="fleet-smoke__note">Smoke order hidden: close the open position first (open positions: ' + smokeOpenCount + ').</div>';
+    } else if (anyOpenPosition || !newEntriesAllowed) {
+      // intentionally no smoke control in close-only / non-durable mode
     }
+    // Smoke result card: once a position is actually open, do NOT keep showing the
+    // intent as if still actionable — show the resulting open order instead (C5).
     if (Fleet.smokeResult && Fleet.smokeResult.sessionId === sel.sessionId) {
       const r = Fleet.smokeResult;
-      html += '<div class="fleet-smoke-result">'
-        + '<div class="fleet-smoke-result__title">' + (r.existing ? 'SMOKE INTENT ALREADY PENDING' : 'SMOKE INTENT CREATED') + '</div>'
-        + '<div class="fleet-smoke-result__body">' + _e(r.message) + ' — ' + _e(r.symbol)
-        + (r.intentId ? ' · ' + _e(String(r.intentId).slice(0, 18)) : '') + '</div>'
-        + '</div>';
+      const openFromSmoke = (sel.openPositions && sel.openPositions[0]) || null;
+      if (smokeOpenCount > 0 && openFromSmoke) {
+        html += '<div class="fleet-smoke-result">'
+          + '<div class="fleet-smoke-result__title">POSITION OPENED BY SMOKE TEST</div>'
+          + '<div class="fleet-smoke-result__body">Position opened by smoke test order ' + _e(openFromSmoke.orderId || '—')
+          + ' — ' + _e(openFromSmoke.symbol || r.symbol) + ' qty ' + _e(openFromSmoke.executedQty || '—') + '</div>'
+          + '</div>';
+      } else {
+        html += '<div class="fleet-smoke-result">'
+          + '<div class="fleet-smoke-result__title">' + (r.existing ? 'SMOKE INTENT ALREADY PENDING' : 'SMOKE INTENT CREATED') + '</div>'
+          + '<div class="fleet-smoke-result__body">' + _e(r.message) + ' — ' + _e(r.symbol)
+          + (r.intentId ? ' · ' + _e(String(r.intentId).slice(0, 18)) : '') + '</div>'
+          + '</div>';
+      }
     }
     if (Fleet.smokeError && Fleet.smokeError.selectedSessionId === sel.sessionId) {
       const er = Fleet.smokeError;
