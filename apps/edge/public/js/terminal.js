@@ -4746,7 +4746,7 @@ function stopBotPlaceholder() {
 // /api/bot/start-session, /api/bot/session/:id/:action, /api/bot/config.
 // No Binance secrets ever touch the browser or the swingworker:// URL.
 // ══════════════════════════════════════════════════════════════════════════
-const Fleet = { data: null, selectedId: null, pollTimer: null, configLoaded: false, startError: null, launchNotice: null, retryLaunchUrl: null };
+const Fleet = { data: null, selectedId: null, pollTimer: null, configLoaded: false, startError: null, launchNotice: null, retryLaunchUrl: null, botConfirm: null };
 
 const REGIME_COLORS = {
   RISK_ON: '#00ff80', NEUTRAL: '#8899aa', RISK_OFF: '#ffaa00', CRASH: '#ff4a4a',
@@ -4774,6 +4774,88 @@ function _startFleetPoll() {
 function _stopFleetPoll() {
   if (Fleet.pollTimer) clearInterval(Fleet.pollTimer);
   Fleet.pollTimer = null;
+}
+
+function _botConfirmList(items) {
+  return (Array.isArray(items) ? items : []).filter(Boolean).map((x) => String(x));
+}
+
+function _renderBotConfirmModal() {
+  let modal = document.getElementById('bot-confirm-modal');
+  const cfg = Fleet.botConfirm;
+  if (!cfg) { if (modal) modal.remove(); return; }
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'bot-confirm-modal';
+    modal.className = 'bot-confirm-backdrop';
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) closeBotConfirmModal();
+    });
+    document.body.appendChild(modal);
+  }
+  const sev = cfg.severity || 'warning';
+  const effects = _botConfirmList(cfg.effects);
+  const warnings = _botConfirmList(cfg.warnings);
+  modal.innerHTML = '<div class="bot-confirm bot-confirm--' + _e(sev) + '" role="dialog" aria-modal="true" aria-labelledby="bot-confirm-title">'
+    + '<div class="bot-confirm__head">'
+    + '<div id="bot-confirm-title" class="bot-confirm__title">' + _e(cfg.title || 'Confirm Action') + '</div>'
+    + '<button type="button" class="bot-confirm__x" onclick="closeBotConfirmModal()" aria-label="Cancel"' + (cfg.busy ? ' disabled' : '') + '>x</button>'
+    + '</div>'
+    + '<div class="bot-confirm__body">'
+    + (cfg.summary ? '<p class="bot-confirm__summary">' + _e(cfg.summary) + '</p>' : '')
+    + (effects.length ? '<div class="bot-confirm__section"><div class="bot-confirm__label">Effects</div><ul>' + effects.map((x) => '<li>' + _e(x) + '</li>').join('') + '</ul></div>' : '')
+    + (warnings.length ? '<div class="bot-confirm__section bot-confirm__section--warning"><div class="bot-confirm__label">Warnings</div><ul>' + warnings.map((x) => '<li>' + _e(x) + '</li>').join('') + '</ul></div>' : '')
+    + (cfg.error ? '<div class="bot-confirm__error">' + _e(cfg.error) + '</div>' : '')
+    + '</div>'
+    + '<div class="bot-confirm__actions">'
+    + '<button type="button" class="paperbot-control-btn" onclick="closeBotConfirmModal()"' + (cfg.busy ? ' disabled' : '') + '>' + _e(cfg.cancelLabel || 'Cancel') + '</button>'
+    + '<button id="bot-confirm-continue" type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="confirmBotConfirmModal()"' + (cfg.busy ? ' disabled' : '') + '>'
+    + _e(cfg.busy ? 'Working...' : (cfg.confirmLabel || 'Continue')) + '</button>'
+    + '</div>'
+    + '</div>';
+}
+
+function openBotConfirmModal(opts) {
+  Fleet.botConfirm = {
+    title: opts && opts.title,
+    severity: opts && opts.severity,
+    summary: opts && opts.summary,
+    effects: _botConfirmList(opts && opts.effects),
+    warnings: _botConfirmList(opts && opts.warnings),
+    confirmLabel: opts && opts.confirmLabel,
+    cancelLabel: opts && opts.cancelLabel,
+    onConfirm: opts && opts.onConfirm,
+    busy: false,
+    error: null,
+  };
+  _renderBotConfirmModal();
+}
+
+function closeBotConfirmModal() {
+  if (Fleet.botConfirm && Fleet.botConfirm.busy) return;
+  Fleet.botConfirm = null;
+  _renderBotConfirmModal();
+}
+
+function confirmBotConfirmModal() {
+  const cfg = Fleet.botConfirm;
+  if (!cfg || cfg.busy || typeof cfg.onConfirm !== 'function') return;
+  cfg.busy = true;
+  cfg.error = null;
+  _renderBotConfirmModal();
+  Promise.resolve()
+    .then(() => cfg.onConfirm())
+    .then(() => {
+      Fleet.botConfirm = null;
+      _renderBotConfirmModal();
+    })
+    .catch((err) => {
+      if (Fleet.botConfirm) {
+        Fleet.botConfirm.busy = false;
+        Fleet.botConfirm.error = err && err.message ? err.message : 'Request failed.';
+        _renderBotConfirmModal();
+      }
+    });
 }
 
 // Merge a freshly-polled fleet payload over the last known snapshot. A transient
@@ -4905,42 +4987,72 @@ function startLiveSpotSession() {
 }
 
 function emergencyStopAllLiveSpot() {
-  if (!window.confirm('Emergency stop ALL LIVE SPOT sessions? This blocks new entries and asks workers to close live Spot positions.')) return;
-  _fleetFetch('POST', '/api/bot/live-emergency-stop', {}).then(() => {
-    try { window.Toast?.error('Live emergency stop active', 'All live Spot sessions are locked and close commands were queued.'); } catch {}
-    refreshFleet();
-  }).catch((err) => {
-    try { window.Toast?.error('Emergency stop failed', err.message); } catch {}
+  openBotConfirmModal({
+    title: 'Emergency Stop All Live Spot?',
+    severity: 'danger',
+    summary: 'This will block new live entries and queue close/stop commands for live Spot sessions.',
+    effects: [
+      'Global kill switch becomes active.',
+      'New live entries are blocked.',
+      'Live workers are instructed to close open Spot positions.',
+      'Testnet entries are also blocked while global kill switch is active.',
+      'No futures/margin/leverage action is possible.',
+      'If a worker is offline, UI should show reconnect required.',
+    ],
+    confirmLabel: 'Continue - Emergency Stop Live Spot',
+    cancelLabel: 'Cancel',
+    onConfirm: () => _fleetFetch('POST', '/api/bot/live-emergency-stop', {}).then(() => {
+      try { window.Toast?.error('Live emergency stop active', 'All live Spot sessions are locked and close commands were queued.'); } catch {}
+      refreshFleet();
+    }),
   });
 }
 
-function _fleetGlobalKillInputChanged() {
-  const input = document.getElementById('fleet-clear-gks-input');
-  const btn = document.getElementById('fleet-clear-gks-btn');
-  if (!input || !btn) return;
-  const noOpenPositions = !(Fleet.data && (Fleet.data.sessions || []).some((s) => _fleetOpenPositionCount(s) > 0));
-  btn.disabled = !(noOpenPositions && input.value === 'CLEAR GLOBAL KILL SWITCH');
-}
-
 function clearGlobalKillSwitch() {
-  const input = document.getElementById('fleet-clear-gks-input');
-  const confirmation = input ? input.value : '';
-  _fleetFetch('POST', '/api/bot/global-kill-switch/clear', { confirmation }).then(() => {
-    try { window.Toast?.success('Global kill switch cleared', 'Resume entries on the session when ready.'); } catch {}
-    refreshFleet();
-  }).catch((err) => {
-    try { window.Toast?.error('Clear kill switch failed', err.message); } catch {}
-    renderFleet();
+  openBotConfirmModal({
+    title: 'Clear Global Kill Switch?',
+    severity: 'warning',
+    summary: 'This will allow new testnet/live entry intents again, but only after session entries are resumed and all normal risk gates pass.',
+    effects: [
+      'Global kill switch will be set to inactive.',
+      'Existing open positions will NOT be closed.',
+      'No new order will be created by this action.',
+      'Stop/close safety remains available.',
+      'Entries may still remain paused until you click Resume Entries.',
+      'Live trading remains locked unless live preflight and live gates pass.',
+    ],
+    warnings: [
+      'Only clear this if there are no active emergency conditions.',
+      'If open positions exist, backend will reject this action.',
+    ],
+    confirmLabel: 'Continue - Clear Kill Switch',
+    cancelLabel: 'Cancel',
+    onConfirm: () => _fleetFetch('POST', '/api/bot/global-kill-switch/clear', { confirmation: 'CLEAR GLOBAL KILL SWITCH' }).then(() => {
+      try { window.Toast?.success('Global kill switch cleared', 'Resume entries on the session when ready.'); } catch {}
+      refreshFleet();
+    }),
   });
 }
 
 function activateGlobalKillSwitch() {
-  if (!window.confirm('Activate GLOBAL KILL SWITCH for all live/testnet sessions? This blocks new entries and queues close/stop commands.')) return;
-  _fleetFetch('POST', '/api/bot/global-kill-switch/activate', {}).then(() => {
-    try { window.Toast?.error('Global kill switch active', 'New entries are blocked; close-only commands remain allowed.'); } catch {}
-    refreshFleet();
-  }).catch((err) => {
-    try { window.Toast?.error('Activate kill switch failed', err.message); } catch {}
+  openBotConfirmModal({
+    title: 'Activate Global Kill Switch?',
+    severity: 'danger',
+    summary: 'This immediately blocks all new entry intents. Existing positions can still be closed.',
+    effects: [
+      'New testnet smoke entries are blocked.',
+      'New live entries are blocked.',
+      'Workers may continue only close/stop/emergency-close actions.',
+      'UI will show GLOBAL KILL SWITCH ACTIVE.',
+      'This does not by itself place any order.',
+      'To close existing positions, use Stop Bot / Emergency Close.',
+    ],
+    confirmLabel: 'Continue - Activate Kill Switch',
+    cancelLabel: 'Cancel',
+    onConfirm: () => _fleetFetch('POST', '/api/bot/global-kill-switch/activate', {}).then(() => {
+      try { window.Toast?.error('Global kill switch active', 'New entries are blocked; close-only commands remain allowed.'); } catch {}
+      refreshFleet();
+    }),
   });
 }
 
@@ -5108,13 +5220,16 @@ function _watchWorkerConnect(sessionId) {
   }, 15000);
 }
 
-function _fleetSessionAction(action, label) {
+function _fleetSessionAction(action, label, opts) {
   const id = Fleet.selectedId;
   if (!id) { window.Toast?.error('No session selected', 'Select a worker first.'); return; }
-  _fleetFetch('POST', `/api/bot/session/${encodeURIComponent(id)}/${action}`, {}).then(() => {
+  return _fleetFetch('POST', `/api/bot/session/${encodeURIComponent(id)}/${action}`, {}).then(() => {
     try { window.Toast?.success(label + ' sent', 'Session ' + id.slice(0, 12)); } catch {}
     refreshFleet();
-  }).catch((err) => window.Toast?.error(label + ' failed', err.message));
+  }).catch((err) => {
+    window.Toast?.error(label + ' failed', err.message);
+    if (opts && opts.throwOnError) throw err;
+  });
 }
 
 function stopBotSession() {
@@ -5168,7 +5283,29 @@ function clearStaleSessions() {
   }).catch((err) => window.Toast?.error('Clear stale failed', err.message));
 }
 function pauseBotEntries() { _fleetSessionAction('pause', 'Pause entries'); }
-function resumeBotEntries() { _fleetSessionAction('resume', 'Resume entries'); }
+function resumeBotEntries() {
+  const data = Fleet.data || {};
+  const sel = _fleetSessionFromData(Fleet.selectedId);
+  const live = data.liveReadiness || {};
+  const globalKillActive = data.globalKillSwitchActive === true || live.globalKillSwitchActive === true || (sel && (sel.globalKillSwitchActive === true || sel.entryBlockedReason === 'global_kill_switch'));
+  if (globalKillActive) {
+    try { window.Toast?.error('Cannot resume entries', 'Cannot resume entries while global kill switch is active. Clear global kill switch first.'); } catch {}
+    return;
+  }
+  openBotConfirmModal({
+    title: 'Resume Entries?',
+    severity: 'info',
+    effects: [
+      'This session can accept new entry intents again.',
+      'No order is created by this action.',
+      'Normal risk caps still apply.',
+      'If global kill switch is active, backend will reject.',
+    ],
+    confirmLabel: 'Continue - Resume Entries',
+    cancelLabel: 'Cancel',
+    onConfirm: () => _fleetSessionAction('resume', 'Resume entries', { throwOnError: true }),
+  });
+}
 
 // Build the swingworker:// launch URL for an EXACT sessionId. Reconnect never
 // mints a new session — it relaunches the local worker bound to this id.
@@ -5687,15 +5824,24 @@ function renderFleet() {
   const live = data.liveReadiness || {};
   const liveCaps = live.caps || {};
   const liveState = live.state || 'TESTNET MODE';
+  const globalKillActive = data.globalKillSwitchActive === true || live.globalKillSwitchActive === true;
   const liveRunning = sessions.some((s) => s.mode === 'live_spot' && _fleetWorkerOnline(s));
   const liveOpen = sessions.some((s) => s.mode === 'live_spot' && _fleetOpenPositionCount(s) > 0);
   const liveStopping = sessions.some((s) => s.mode === 'live_spot' && (s.stopRequested || s.status === 'stopping' || s.status === 'stop_requested'));
   const liveClosed = sessions.some((s) => s.mode === 'live_spot' && (s.status === 'stopped' || s.status === 'expired') && _fleetOpenPositionCount(s) === 0);
-  const liveDisplayState = live.globalKillSwitchActive ? 'LIVE PAUSED'
+  const liveDisplayState = globalKillActive ? 'LIVE PAUSED'
     : liveStopping ? 'LIVE STOPPING / CLOSING'
     : liveRunning && liveOpen ? 'LIVE RUNNING - REAL MONEY'
     : liveClosed ? 'LIVE CLOSED'
     : liveState;
+  const adminLiveControls = data.isAdmin ? '<div class="fleet-live-readiness__confirm">'
+    + '<input id="fleet-live-confirm-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type: I UNDERSTAND THIS USES REAL MONEY">'
+    + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="startLiveSpotSession()"' + (live.canStartLive ? '' : ' disabled') + '>START LIVE SPOT</button>'
+    + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyStopAllLiveSpot()">EMERGENCY STOP ALL LIVE SPOT</button>'
+    + (globalKillActive
+        ? '<button id="fleet-clear-gks-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="clearGlobalKillSwitch()">CLEAR GLOBAL KILL SWITCH</button>'
+        : '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="activateGlobalKillSwitch()">ACTIVATE GLOBAL KILL SWITCH</button>')
+    + '</div>' : '';
 
   // Risk regime card
   const rg = regime ? regime.regime : 'UNKNOWN';
@@ -5745,17 +5891,8 @@ function renderFleet() {
     + '<div><span>Max daily trades</span><b>' + _e(liveCaps.maxDailyTrades || 3) + '</b></div>'
     + '<div><span>Allowed symbols</span><b>' + _e((liveCaps.allowedSymbols || ['BTCUSDT']).join(', ')) + '</b></div>'
     + '</div>'
-    + (live.globalKillSwitchActive ? '<div class="fleet-live-readiness__kill">GLOBAL KILL SWITCH ACTIVE</div>' : '')
-    + (data.isAdmin ? '<div class="fleet-live-readiness__confirm">'
-      + '<input id="fleet-live-confirm-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type: I UNDERSTAND THIS USES REAL MONEY">'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="startLiveSpotSession()"' + (live.canStartLive ? '' : ' disabled') + '>START LIVE SPOT</button>'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyStopAllLiveSpot()">EMERGENCY STOP ALL LIVE SPOT</button>'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="activateGlobalKillSwitch()">ACTIVATE GLOBAL KILL SWITCH</button>'
-      + '</div>' : '')
-    + (data.isAdmin && live.globalKillSwitchActive ? '<div class="fleet-live-readiness__confirm">'
-      + '<input id="fleet-clear-gks-input" type="text" autocomplete="off" spellcheck="false" oninput="_fleetGlobalKillInputChanged()" placeholder="Type: CLEAR GLOBAL KILL SWITCH">'
-      + '<button id="fleet-clear-gks-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="clearGlobalKillSwitch()" disabled>CLEAR GLOBAL KILL SWITCH</button>'
-      + '</div>' : '')
+    + (globalKillActive ? '<div class="fleet-live-readiness__kill">GLOBAL KILL SWITCH ACTIVE</div><div class="fleet-smoke__note">Entries are blocked because global kill switch is active.</div>' : '')
+    + adminLiveControls
     + '</div>';
 
   if (!newEntriesAllowed) {
