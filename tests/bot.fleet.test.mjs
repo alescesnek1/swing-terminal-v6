@@ -5,6 +5,7 @@
 // network, no Binance, no secrets. Run: `npm test`.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 
 // Env must be set BEFORE importing the handler-adjacent modules.
 process.env.BOT_WORKER_TOKEN = 'test-worker-token';
@@ -12,8 +13,11 @@ process.env.BINANCE_ENV = 'testnet';
 process.env.BOT_ALLOW_TESTNET_ORDERS = 'true';
 process.env.BOT_ALLOW_MEMORY_STORE = 'true'; // permit the in-memory store for tests (prod uses durable blobs)
 process.env.AUTH_DECODE_ONLY = 'true'; // decode-only identity for browser routes (test only)
+process.env.SUPABASE_JWT_SECRET = 'unit-test-secret';
+process.env.BOT_ADMIN_EMAILS = 'admin@example.com';
 delete process.env.BOT_LIVE_TRADING_ENABLED;
 delete process.env.BOT_ALLOW_REAL_ORDERS;
+delete process.env.BOT_GLOBAL_KILL_SWITCH;
 
 const { default: handler } = await import('../netlify/functions/bot.mjs');
 
@@ -28,10 +32,20 @@ function b64url(obj) {
 function jwtFor(sub, email) {
   return `${b64url({ alg: 'none', typ: 'JWT' })}.${b64url({ sub, email })}.sig`;
 }
+function signedJwtFor(email) {
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const payload = { sub: `admin-${email}`, email, aud: 'authenticated', exp: Math.floor(Date.now() / 1000) + 3600 };
+  const signingInput = `${b64url(header)}.${b64url(payload)}`;
+  const sig = crypto.createHmac('sha256', process.env.SUPABASE_JWT_SECRET).update(signingInput).digest('base64url');
+  return `${signingInput}.${sig}`;
+}
 function freshUser() {
   _uid += 1;
   const sub = `user-${Date.now()}-${_uid}`;
   return { sub, email: `${sub}@example.com`, token: jwtFor(sub, `${sub}@example.com`) };
+}
+function adminUser() {
+  return { sub: 'admin-admin@example.com', email: 'admin@example.com', token: signedJwtFor('admin@example.com') };
 }
 
 function workerReq(method, path, body) {
@@ -388,4 +402,139 @@ test('G-1: a non-durable store blocks START + smoke but still allows closing an 
     if (prev === undefined) process.env.BOT_ALLOW_MEMORY_STORE = 'true'; else process.env.BOT_ALLOW_MEMORY_STORE = prev;
   }
   await closePosition(openSid, 'ord-g'); // cleanup
+});
+
+test('PAUSE-1: create-smoke-execution-intent is rejected when session entries are paused', async () => {
+  const u = freshUser();
+  const r = await call(browserReq('POST', '/api/bot/start-session', u, {}));
+  assert.equal(r.status, 200);
+  const sid = r.json.sessionId;
+  await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(sid)}/pause`, u, {}));
+
+  const smoke = await call(browserReq('POST', '/api/bot/create-smoke-execution-intent', u, { sessionId: sid }));
+  assert.equal(smoke.status, 409);
+  assert.equal(smoke.json.code, 'ENTRIES_PAUSED');
+  assert.equal(smoke.json.entryBlockedReason, 'session_paused');
+  assert.equal(smoke.json.canAcceptEntryIntent, false);
+});
+
+test('PAUSE-2: create-smoke-execution-intent is rejected when global kill switch is active', async () => {
+  const prev = process.env.BOT_GLOBAL_KILL_SWITCH;
+  process.env.BOT_GLOBAL_KILL_SWITCH = 'true';
+  try {
+    const u = freshUser();
+    const r = await call(browserReq('POST', '/api/bot/start-session', u, {}));
+    assert.equal(r.status, 200);
+    const smoke = await call(browserReq('POST', '/api/bot/create-smoke-execution-intent', u, { sessionId: r.json.sessionId }));
+    assert.equal(smoke.status, 409);
+    assert.equal(smoke.json.code, 'GLOBAL_KILL_SWITCH_ACTIVE');
+    assert.equal(smoke.json.entryBlockedReason, 'global_kill_switch');
+  } finally {
+    if (prev === undefined) delete process.env.BOT_GLOBAL_KILL_SWITCH;
+    else process.env.BOT_GLOBAL_KILL_SWITCH = prev;
+  }
+});
+
+test('PAUSE-3: stop and emergency-close remain allowed when global kill switch is active', async () => {
+  const prev = process.env.BOT_GLOBAL_KILL_SWITCH;
+  process.env.BOT_GLOBAL_KILL_SWITCH = 'true';
+  try {
+    const u = freshUser();
+    const sid = await ownedSessionWithPosition(u, 'ord-paused-close');
+    const emc = await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(sid)}/emergency-close`, u, {}));
+    assert.equal(emc.status, 200);
+    assert.equal(emc.json.commandType, 'EMERGENCY_CLOSE');
+    const stop = await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(sid)}/stop`, u, {}));
+    assert.equal(stop.status, 200);
+    assert.equal(stop.json.commandType, 'STOP');
+    await closePosition(sid, 'ord-paused-close');
+  } finally {
+    if (prev === undefined) delete process.env.BOT_GLOBAL_KILL_SWITCH;
+    else process.env.BOT_GLOBAL_KILL_SWITCH = prev;
+  }
+});
+
+test('PAUSE-4: resume entries fails while global kill switch is active', async () => {
+  const prev = process.env.BOT_GLOBAL_KILL_SWITCH;
+  process.env.BOT_GLOBAL_KILL_SWITCH = 'true';
+  try {
+    const u = freshUser();
+    const r = await call(browserReq('POST', '/api/bot/start-session', u, {}));
+    assert.equal(r.status, 200);
+    const resume = await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(r.json.sessionId)}/resume`, u, {}));
+    assert.equal(resume.status, 409);
+    assert.equal(resume.json.code, 'GLOBAL_KILL_SWITCH_ACTIVE');
+    assert.match(resume.json.message, /Clear global kill switch first/);
+  } finally {
+    if (prev === undefined) delete process.env.BOT_GLOBAL_KILL_SWITCH;
+    else process.env.BOT_GLOBAL_KILL_SWITCH = prev;
+  }
+});
+
+test('PAUSE-5: worker-session reports pause reason and does not claim intents while paused', async () => {
+  const u = freshUser();
+  const r = await call(browserReq('POST', '/api/bot/start-session', u, {}));
+  assert.equal(r.status, 200);
+  const sid = r.json.sessionId;
+  await call(workerReq('POST', '/api/bot/worker-heartbeat', { sessionId: sid, workerId: 'w-paused-intent', status: 'online', currentState: 'running', openPositions: [] }));
+  const smoke = await call(browserReq('POST', '/api/bot/create-smoke-execution-intent', u, { sessionId: sid }));
+  assert.equal(smoke.status, 200);
+  await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(sid)}/pause`, u, {}));
+
+  const paused = await call(workerReq('GET', `/api/bot/worker-session?sessionId=${sid}&workerId=w-paused-intent`));
+  assert.equal(paused.status, 200);
+  assert.equal(paused.json.pauseRequested, true);
+  assert.equal(paused.json.globalKillSwitchActive, false);
+  assert.equal(paused.json.entryBlockedReason, 'session_paused');
+  assert.equal(paused.json.canAcceptEntryIntent, false);
+  assert.equal(paused.json.intent, null);
+
+  const resumed = await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(sid)}/resume`, u, {}));
+  assert.equal(resumed.status, 200);
+  const next = await call(workerReq('GET', `/api/bot/worker-session?sessionId=${sid}&workerId=w-paused-intent`));
+  assert.equal(next.json.pauseRequested, false);
+  assert.equal(next.json.entryBlockedReason, null);
+  assert.equal(next.json.canAcceptEntryIntent, true);
+  assert.equal(next.json.intent, null);
+
+  const freshSmoke = await call(browserReq('POST', '/api/bot/create-smoke-execution-intent', u, { sessionId: sid }));
+  assert.equal(freshSmoke.status, 200);
+  const claimed = await call(workerReq('GET', `/api/bot/worker-session?sessionId=${sid}&workerId=w-paused-intent`));
+  assert.equal(claimed.json.canAcceptEntryIntent, true);
+  assert.equal(claimed.json.intent.id, freshSmoke.json.intent.id);
+});
+
+test('PAUSE-6: clear global kill switch requires admin, no open positions, and emits audit event', async () => {
+  const admin = adminUser();
+  const nonAdmin = freshUser();
+  const sid = await ownedSessionWithPosition(admin, 'ord-gks');
+
+  const activate = await call(browserReq('POST', '/api/bot/global-kill-switch/activate', admin, {}));
+  assert.equal(activate.status, 200);
+  assert.equal(activate.json.globalKillSwitchActive, true);
+
+  const nonAdminClear = await call(browserReq('POST', '/api/bot/global-kill-switch/clear', nonAdmin, { confirmation: 'CLEAR GLOBAL KILL SWITCH' }));
+  assert.equal(nonAdminClear.status, 403);
+
+  const blockedOpen = await call(browserReq('POST', '/api/bot/global-kill-switch/clear', admin, { confirmation: 'CLEAR GLOBAL KILL SWITCH' }));
+  assert.equal(blockedOpen.status, 409);
+  assert.equal(blockedOpen.json.code, 'OPEN_POSITIONS_EXIST');
+
+  await closePosition(sid, 'ord-gks');
+  const cleared = await call(browserReq('POST', '/api/bot/global-kill-switch/clear', admin, { confirmation: 'CLEAR GLOBAL KILL SWITCH' }));
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.json.globalKillSwitchActive, false);
+  assert.equal(cleared.json.auditEvent.type, 'GLOBAL_KILL_SWITCH_CLEARED');
+  assert.equal(cleared.json.auditEvent.by, 'admin@example.com');
+  assert.ok(cleared.json.auditEvent.timestamp);
+
+  const fresh = await call(browserReq('POST', '/api/bot/start-session', admin, {}));
+  assert.equal(fresh.status, 200);
+  const freshSid = fresh.json.sessionId;
+  await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(freshSid)}/pause`, admin, {}));
+  const resumed = await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(freshSid)}/resume`, admin, {}));
+  assert.equal(resumed.status, 200);
+  const ws = await call(workerReq('GET', `/api/bot/worker-session?sessionId=${freshSid}&workerId=w-after-clear`));
+  assert.equal(ws.json.pauseRequested, false);
+  assert.equal(ws.json.canAcceptEntryIntent, true);
 });

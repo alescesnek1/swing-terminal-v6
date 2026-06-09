@@ -1072,6 +1072,9 @@ const INTENT_TTL_MS = 120 * 1000;
 const SESSION_TTL_MS = 60 * 60 * 1000;
 const MAX_SESSIONS_PER_USER = 3;
 const TESTNET_MAX_TRADE_USD = 10;
+const LIVE_SPOT_ACK_TEXT = 'I_UNDERSTAND_REAL_MONEY_RISK';
+const LIVE_CONFIRM_PHRASE = 'I UNDERSTAND THIS USES REAL MONEY';
+const LIVE_PREFLIGHT_MAX_AGE_MS = 60 * 60 * 1000;
 const FLEET_COMMAND_TYPES = new Set(['STOP', 'PAUSE', 'RESUME', 'EMERGENCY_CLOSE']);
 const STALE_SESSION_STATUSES = new Set(['launch_requested', 'launching', 'stopping', 'stop_requested', 'launch_failed']);
 const STALE_LAUNCH_STATUSES = new Set(['launch_requested', 'launching', 'launch_failed']);
@@ -1097,6 +1100,87 @@ const DEFAULT_BOT_CONFIG = {
   allowLive: false,
 };
 
+function liveRiskCaps() {
+  const maxSymbols = envNumber('LIVE_MAX_SYMBOLS', 1);
+  const symbols = String(process.env.LIVE_ALLOWED_SYMBOLS || 'BTCUSDT')
+    .split(',')
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean)
+    .slice(0, maxSymbols);
+  return {
+    maxPositionUsd: envNumber('LIVE_MAX_POSITION_USD', 10),
+    maxDailyLossUsd: envNumber('LIVE_MAX_DAILY_LOSS_USD', 5),
+    maxDailyTrades: envNumber('LIVE_MAX_DAILY_TRADES', 3),
+    maxOpenPositions: envNumber('LIVE_MAX_OPEN_POSITIONS', 1),
+    maxSymbols,
+    allowedSymbols: symbols.length ? symbols : ['BTCUSDT'],
+    allowMarketBuy: process.env.LIVE_ALLOW_MARKET_BUY !== 'false',
+    allowMarketSell: process.env.LIVE_ALLOW_MARKET_SELL !== 'false',
+    allowLimitOrders: process.env.LIVE_ALLOW_LIMIT_ORDERS === 'true',
+  };
+}
+
+function liveEnvStatus() {
+  return {
+    workerMode: process.env.WORKER_MODE === 'live_spot',
+    binanceEnv: process.env.BINANCE_ENV === 'live_spot',
+    liveTradingEnabled: process.env.BOT_LIVE_TRADING_ENABLED === 'true',
+    allowRealOrders: process.env.BOT_ALLOW_REAL_ORDERS === 'true',
+    liveSpotAck: process.env.LIVE_SPOT_ACK === LIVE_SPOT_ACK_TEXT,
+    localWorkerLiveConfirm: process.env.LOCAL_WORKER_LIVE_CONFIRM === 'true',
+    globalKillSwitch: process.env.BOT_GLOBAL_KILL_SWITCH === 'true',
+  };
+}
+
+function livePreflightFresh(fleet) {
+  const pf = fleet && fleet.livePreflight;
+  if (!pf || pf.ok !== true || !pf.checkedAt) return false;
+  const at = new Date(pf.checkedAt).getTime();
+  return Number.isFinite(at) && Date.now() - at <= LIVE_PREFLIGHT_MAX_AGE_MS;
+}
+
+function liveReadiness(fleet, identity) {
+  const storeInfo = fleetStoreInfo();
+  const env = liveEnvStatus();
+  const preflightFresh = livePreflightFresh(fleet);
+  const caps = liveRiskCaps();
+  const envReady = env.workerMode && env.binanceEnv && env.liveTradingEnabled && env.allowRealOrders && env.liveSpotAck && env.localWorkerLiveConfirm;
+  let state = 'TESTNET MODE';
+  if (env.globalKillSwitch || fleet.globalKillSwitch) state = 'LIVE PAUSED';
+  else if (!env.liveTradingEnabled || !env.allowRealOrders || !env.liveSpotAck) state = 'LIVE LOCKED';
+  else if (!preflightFresh) state = 'LIVE PREFLIGHT REQUIRED';
+  else if (envReady && storeInfo.durable) state = 'LIVE READY - MICRO CAPS';
+  return {
+    state,
+    caps,
+    env,
+    durable: storeInfo.durable,
+    preflightFresh,
+    preflight: fleet.livePreflight || null,
+    globalKillSwitchActive: env.globalKillSwitch || fleet.globalKillSwitch === true,
+    canStartLive: state === 'LIVE READY - MICRO CAPS' && isAdmin(identity) && identity.verified === true,
+  };
+}
+
+function liveAudit(fleet, identity, action, extra = {}) {
+  const actor = identity && (identity.email || identity.userId) ? (identity.email || identity.userId) : 'worker';
+  const ev = {
+    who: actor,
+    sessionId: extra.sessionId || null,
+    mode: 'live_spot',
+    action,
+    symbol: extra.symbol || null,
+    qty: extra.qty != null ? extra.qty : null,
+    positionUsd: extra.positionUsd != null ? extra.positionUsd : null,
+    orderId: extra.orderId || null,
+    result: extra.result || null,
+    timestamp: new Date().toISOString(),
+    workerId: extra.workerId || null,
+  };
+  fleet.liveAuditEvents = [ev, ...(fleet.liveAuditEvents || [])].slice(0, 200);
+  return ev;
+}
+
 // Coerce a possibly-string value to a finite number. Missing/blank -> fallback.
 // Present-but-not-finite (NaN/Infinity/garbage) -> push an error and use fallback.
 function coerceNum(raw, fallback, label, errors, integer) {
@@ -1120,8 +1204,8 @@ function validateBotConfig(input) {
     stopLossPct: coerceNum(src.stopLossPct, DEFAULT_BOT_CONFIG.stopLossPct, 'stopLossPct', errors),
     takeProfitPct: coerceNum(src.takeProfitPct, DEFAULT_BOT_CONFIG.takeProfitPct, 'takeProfitPct', errors),
     pauseOnMarketCrash: src.pauseOnMarketCrash !== false,
-    allowTestnet: true, // forced for testnet phase
-    allowLive: false,   // hard-locked
+    allowTestnet: true,
+    allowLive: src.allowLive === true,
   };
   if (!(c.minTradeUsd >= 1)) errors.push('minTradeUsd must be >= 1');
   if (!(c.maxTradeUsd >= 1)) errors.push('maxTradeUsd must be >= 1');
@@ -1130,6 +1214,7 @@ function validateBotConfig(input) {
   if (!(c.maxDailyLossUsd >= 0)) errors.push('maxDailyLossUsd must be >= 0');
   if (!(c.maxDailyTrades >= 1)) errors.push('maxDailyTrades must be >= 1');
   if (!(c.maxOpenPositions >= 1 && c.maxOpenPositions <= 5)) errors.push('maxOpenPositions must be between 1 and 5');
+  if (c.allowLive && c.maxTradeUsd > liveRiskCaps().maxPositionUsd) errors.push(`maxTradeUsd must be <= LIVE_MAX_POSITION_USD (${liveRiskCaps().maxPositionUsd}) when allowLive is true`);
   if (!(c.stopLossPct > 0 && c.stopLossPct <= 50)) errors.push('stopLossPct must be > 0 (<= 50)');
   if (!(c.takeProfitPct > 0 && c.takeProfitPct <= 100)) errors.push('takeProfitPct must be > 0 (<= 100)');
   return { ok: errors.length === 0, errors, config: c };
@@ -1174,6 +1259,50 @@ function notDurableResponse(req) {
     durable: info.durable,
     storeError: info.storeError,
   }, 409);
+}
+
+function fleetGlobalKillSwitchActive(fleet) {
+  return process.env.BOT_GLOBAL_KILL_SWITCH === 'true' || fleet.globalKillSwitch === true;
+}
+
+function entryBlockState(fleet, session) {
+  const globalKillSwitchActive = fleetGlobalKillSwitchActive(fleet);
+  const sessionPaused = session && session.pauseRequested === true;
+  const sessionStopping = session && session.stopRequested === true;
+  const entryBlockedReason = globalKillSwitchActive ? 'global_kill_switch' : sessionPaused ? 'session_paused' : null;
+  return {
+    globalKillSwitchActive,
+    entryBlockedReason,
+    canAcceptEntryIntent: !globalKillSwitchActive && !sessionPaused && !sessionStopping,
+  };
+}
+
+function entryBlockedResponse(req, block) {
+  if (block && block.entryBlockedReason === 'global_kill_switch') {
+    const message = 'Global kill switch active. Only close/stop commands are allowed.';
+    return json(req, {
+      ok: false,
+      code: 'GLOBAL_KILL_SWITCH_ACTIVE',
+      error: message,
+      message,
+      globalKillSwitchActive: true,
+      entryBlockedReason: 'global_kill_switch',
+      canAcceptEntryIntent: false,
+    }, 409);
+  }
+  if (block && block.entryBlockedReason === 'session_paused') {
+    const message = 'Entries are paused. Resume entries before creating a smoke order.';
+    return json(req, {
+      ok: false,
+      code: 'ENTRIES_PAUSED',
+      error: message,
+      message,
+      globalKillSwitchActive: false,
+      entryBlockedReason: 'session_paused',
+      canAcceptEntryIntent: false,
+    }, 409);
+  }
+  return null;
 }
 
 function sessionWorkerStatus(fleet, session) {
@@ -1237,6 +1366,12 @@ function mapClosedTrade(p) {
     entryOrderId: p.entryOrderId || p.orderId || null,
     closeOrderId: p.closeOrderId || null,
     feesAvailable: p.feesAvailable === true,
+    fees: Array.isArray(p.fees) ? p.fees : [],
+    feeAsset: p.feeAsset || null,
+    feeAmount: _num(p.feeAmount),
+    netPnl: _num(p.netPnl),
+    pnlIsNet: p.pnlIsNet === true,
+    mode: p.mode === 'live_spot' ? 'live_spot' : 'testnet',
   };
 }
 
@@ -1267,9 +1402,10 @@ function normalizeOpenPositionsSummary(input, sessionId) {
       closeOrderId: null,
       status: 'open',
       sessionId,
+      mode: body.mode === 'live_spot' ? 'live_spot' : 'testnet',
       error: null,
       testnet: true,
-      realProductionOrder: false,
+      realProductionOrder: body.mode === 'live_spot',
       receivedAt: new Date().toISOString(),
     });
   }
@@ -1310,7 +1446,7 @@ function recoverSessionWithOpenPositions(fleet, sessionId, workerId, body, openP
     ownerEmail: 'Recovered local worker',
     orgId: 'default',
     workerId: workerId || null,
-    mode: 'testnet',
+    mode: body && body.mode === 'live_spot' ? 'live_spot' : 'testnet',
     status: workerOnline ? 'running_recovered' : 'worker_offline_position_open',
     createdAt: nowIso,
     updatedAt: nowIso,
@@ -1400,6 +1536,7 @@ function publicSessionView(fleet, session) {
   const positions = fleet.positionResults[session.sessionId] || [];
   const openPositions = sessionOpenPositions(fleet, session.sessionId);
   const closedTrades = sessionClosedTrades(fleet, session.sessionId);
+  const entryBlock = entryBlockState(fleet, session);
   // Realized PnL is derived from settled trades (final lifecycle) plus any PnL the
   // worker attached to execution results; closed-trade PnL is the source of truth.
   const realizedPnl = closedTrades.reduce((acc, t) => acc + (Number(t.realizedPnl) || 0), 0)
@@ -1411,19 +1548,23 @@ function publicSessionView(fleet, session) {
     ownerEmail: session.ownerEmail,
     orgId: session.orgId,
     workerId: session.workerId || null,
-    mode: 'testnet',
+    mode: session.mode === 'live_spot' ? 'live_spot' : 'testnet',
     status: session.status,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     stopRequested: session.stopRequested === true,
-    pauseRequested: session.pauseRequested === true,
+    pauseRequested: session.pauseRequested === true || entryBlock.globalKillSwitchActive,
+    globalKillSwitchActive: entryBlock.globalKillSwitchActive,
+    entryBlockedReason: entryBlock.entryBlockedReason,
+    canAcceptEntryIntent: entryBlock.canAcceptEntryIntent,
     closePositionsOnStop: session.closePositionsOnStop !== false,
     clearedAt: session.clearedAt || null,
     clearedReason: session.clearedReason || null,
     isStaleNoWorker: isSessionStaleNoWorker(session, fleet, now),
     riskState: session.riskState || null,
     config: completeBotConfig(session.config),
-    realOrderSubmitted: false,
+    liveModeConfirmed: session.liveModeConfirmed === true,
+    realOrderSubmitted: session.mode === 'live_spot',
     worker: ws ? {
       workerId: ws.workerId,
       platform: ws.platform,
@@ -1486,6 +1627,31 @@ function bodyWorkerId(req, body) {
 
 // ── Worker-facing fleet routes (X-BOT-WORKER-TOKEN + sessionId required) ──────
 async function handleFleetWorker(req, base, body) {
+  if (base === 'live-preflight-result') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    return await mutateFleet(async (fleet) => {
+      const sanitized = {
+        ok: body.ok === true,
+        checkedAt: typeof body.checkedAt === 'string' ? body.checkedAt.slice(0, 40) : new Date().toISOString(),
+        mode: 'live_spot',
+        canTradeSpot: body.canTradeSpot === true,
+        accountType: typeof body.accountType === 'string' ? body.accountType.slice(0, 40) : null,
+        permissions: Array.isArray(body.permissions) ? body.permissions.map((x) => String(x).slice(0, 40)).slice(0, 12) : [],
+        balances: body.balances && typeof body.balances === 'object' ? Object.fromEntries(Object.entries(body.balances).slice(0, 8).map(([k, v]) => [String(k).slice(0, 12), String(v).slice(0, 40)])) : {},
+        riskCaps: liveRiskCaps(),
+        spotOnlyPolicy: body.spotOnlyPolicy === true,
+        workerId: typeof body.workerId === 'string' ? body.workerId.slice(0, 80) : null,
+        hostname: typeof body.hostname === 'string' ? body.hostname.slice(0, 120) : null,
+        result: body.ok === true ? 'PASS' : 'FAIL',
+        reason: typeof body.reason === 'string' ? body.reason.slice(0, 240) : null,
+      };
+      fleet.livePreflight = sanitized;
+      liveAudit(fleet, null, 'LIVE_PREFLIGHT_' + sanitized.result, { workerId: sanitized.workerId, result: sanitized.reason || sanitized.result });
+      fevent(fleet, 'LIVE_PREFLIGHT_' + sanitized.result, sanitized.ok ? 'info' : 'warn',
+        `Live Spot preflight ${sanitized.result}.`, { mode: 'live_spot' });
+      return json(req, { ok: true, livePreflight: sanitized });
+    });
+  }
   const sessionId = bodySessionId(req, body);
   if (!sessionId) {
     return json(req, { ok: false, error: 'sessionId is required for worker endpoints' }, 400);
@@ -1552,13 +1718,18 @@ async function handleFleetWorker(req, base, body) {
     }
     session.updatedAt = nowIso;
     const hbCommands = (fleet.commandQueue[sessionId] || []).filter((c) => !c.consumedAt);
+    const entryBlock = entryBlockState(fleet, session);
+    const killSwitchActive = entryBlock.globalKillSwitchActive;
     return json(req, {
       ok: true,
       sessionKnown: true,
       stopRequested: session.stopRequested === true,
-      pauseRequested: session.pauseRequested === true,
+      pauseRequested: session.pauseRequested === true || killSwitchActive,
       emergencyCloseRequested: hbCommands.some((c) => c.type === 'EMERGENCY_CLOSE'),
       closePositionsOnStop: session.closePositionsOnStop !== false,
+      globalKillSwitchActive: killSwitchActive,
+      entryBlockedReason: entryBlock.entryBlockedReason,
+      canAcceptEntryIntent: entryBlock.canAcceptEntryIntent,
     });
   }
 
@@ -1578,6 +1749,9 @@ async function handleFleetWorker(req, base, body) {
         return json(req, {
           ok: true, session: null, sessionMissing: true, recoveryMode: true,
           stopRequested: false, pauseRequested: false, emergencyCloseRequested: false,
+          globalKillSwitchActive: fleetGlobalKillSwitchActive(fleet),
+          entryBlockedReason: null,
+          canAcceptEntryIntent: false,
           openPositions: [], openPositionsCount: 0,
           commandsForThisSession: [], ignoredCommandsForOtherSessionsCount: 0,
           sessionId, workerId: bodyWorkerId(req, body), commandSessionId: sessionId,
@@ -1586,9 +1760,11 @@ async function handleFleetWorker(req, base, body) {
     }
     expireStaleIntent(fleet, sessionId);
     let intent = fleet.executionIntents[sessionId] || null;
+    const entryBlock = entryBlockState(fleet, session);
+    const killSwitchActive = entryBlock.globalKillSwitchActive;
     // Claim a pending intent for this session only. Never opens entries while paused/stopping.
     if (intent && intent.status === 'pending') {
-      if (session.stopRequested || session.pauseRequested) {
+      if (session.stopRequested || session.pauseRequested || killSwitchActive) {
         intent = null; // do not hand out entries while paused/stopping
       } else if (new Date(intent.expiresAt).getTime() < Date.now()) {
         fleet.executionIntents[sessionId].status = 'expired';
@@ -1599,7 +1775,7 @@ async function handleFleetWorker(req, base, body) {
       }
     } else if (intent && intent.status !== 'claimed') {
       intent = null;
-    } else if (intent && intent.status === 'claimed' && (session.stopRequested || session.pauseRequested)) {
+    } else if (intent && intent.status === 'claimed' && (session.stopRequested || session.pauseRequested || killSwitchActive)) {
       intent = null;
     }
 
@@ -1616,17 +1792,26 @@ async function handleFleetWorker(req, base, body) {
       session: {
         sessionId: session.sessionId,
         status: session.status,
-        mode: 'testnet',
+        mode: session.mode === 'live_spot' ? 'live_spot' : 'testnet',
         stopRequested: session.stopRequested === true,
-        pauseRequested: session.pauseRequested === true,
+        pauseRequested: session.pauseRequested === true || killSwitchActive,
+        globalKillSwitchActive: killSwitchActive,
+        entryBlockedReason: entryBlock.entryBlockedReason,
+        canAcceptEntryIntent: entryBlock.canAcceptEntryIntent,
         closePositionsOnStop: session.closePositionsOnStop !== false,
         riskState: session.riskState || null,
+        liveModeConfirmed: session.liveModeConfirmed === true,
       },
       config: completeBotConfig(session.config),
+      durable: fleetStoreInfo().durable,
+      globalKillSwitchActive: killSwitchActive,
+      entryBlockedReason: entryBlock.entryBlockedReason,
+      canAcceptEntryIntent: entryBlock.canAcceptEntryIntent,
+      livePreflightFresh: livePreflightFresh(fleet),
       commands,
       intent: intent && intent.status === 'claimed' ? intent : null,
       stopRequested: session.stopRequested === true,
-      pauseRequested: session.pauseRequested === true,
+      pauseRequested: session.pauseRequested === true || killSwitchActive,
       emergencyCloseRequested,
       closePositionsOnStop: session.closePositionsOnStop !== false,
       // ── Backend-driven recovery: lets a worker with empty local state hydrate
@@ -1662,7 +1847,12 @@ async function handleFleetWorker(req, base, body) {
   if (base === 'execution-result') {
     if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
     if (!body.id || !body.idempotencyKey || !body.status) return json(req, { ok: false, error: 'Invalid payload' }, 400);
-    if (body.testnet !== true || body.realProductionOrder !== false) return json(req, { ok: false, error: 'Invalid safety payload' }, 400);
+    const sessionMode = session && session.mode === 'live_spot' ? 'live_spot' : 'testnet';
+    if (sessionMode === 'live_spot') {
+      if (body.mode !== 'live_spot' || body.realProductionOrder !== true || body.testnet === true) return json(req, { ok: false, error: 'Invalid live safety payload' }, 400);
+    } else if (body.testnet !== true || body.realProductionOrder !== false) {
+      return json(req, { ok: false, error: 'Invalid safety payload' }, 400);
+    }
 
     const intent = fleet.executionIntents[sessionId];
     if (intent && body.id === intent.id) {
@@ -1677,9 +1867,15 @@ async function handleFleetWorker(req, base, body) {
 
     if (!fleet.executionResults[sessionId]) fleet.executionResults[sessionId] = [];
     fleet.executionResults[sessionId] = [{ ...body, sessionId, receivedAt: new Date().toISOString() }, ...fleet.executionResults[sessionId]].slice(0, 20);
-    fevent(fleet, body.status === 'failed' ? 'TESTNET_ORDER_FAILED' : 'TESTNET_ORDER_SUBMITTED',
+    if (sessionMode === 'live_spot') {
+      liveAudit(fleet, null, body.status === 'failed' ? 'LIVE_ORDER_FAILED' : 'LIVE_ORDER_SUBMITTED', {
+        sessionId, symbol: body.symbol, qty: body.executedQty, positionUsd: intent && intent.positionUsd,
+        orderId: body.orderId, result: body.error || body.status, workerId: body.workerId,
+      });
+    }
+    fevent(fleet, body.status === 'failed' ? (sessionMode === 'live_spot' ? 'LIVE_ORDER_FAILED' : 'TESTNET_ORDER_FAILED') : (sessionMode === 'live_spot' ? 'LIVE_ORDER_SUBMITTED' : 'TESTNET_ORDER_SUBMITTED'),
       body.status === 'failed' ? 'warn' : 'info',
-      body.status === 'failed' ? `Worker order failed: ${body.error || 'unknown'}` : `Worker submitted testnet order ${body.orderId} for ${body.symbol}.`,
+      body.status === 'failed' ? `Worker order failed: ${body.error || 'unknown'}` : `Worker submitted ${sessionMode} order ${body.orderId} for ${body.symbol}.`,
       { sessionId, ownerUserId: session.ownerUserId });
     return json(req, { ok: true });
   }
@@ -1710,8 +1906,14 @@ async function handleFleetWorker(req, base, body) {
       realizedPnl: numField(body.realizedPnl),
       realizedPnlPct: numField(body.realizedPnlPct),
       feesAvailable: body.feesAvailable === true,
-      testnet: true,
-      realProductionOrder: false,
+      fees: Array.isArray(body.fees) ? body.fees.slice(0, 8).map((f) => ({ asset: String(f.asset || '').slice(0, 12), amount: numField(f.amount) })) : [],
+      feeAsset: typeof body.feeAsset === 'string' ? body.feeAsset.slice(0, 12) : null,
+      feeAmount: numField(body.feeAmount),
+      netPnl: numField(body.netPnl),
+      pnlIsNet: body.pnlIsNet === true,
+      mode: body.mode === 'live_spot' ? 'live_spot' : 'testnet',
+      testnet: body.mode !== 'live_spot',
+      realProductionOrder: body.realProductionOrder === true,
       receivedAt: new Date().toISOString(),
     };
     if (!session && OPEN_POSITION_STATUSES.has(record.status)) {
@@ -1732,6 +1934,12 @@ async function handleFleetWorker(req, base, body) {
       : 'WORKER_POSITION_OPEN';
     fevent(fleet, eventType, sev,
       `${record.status} ${record.symbol} (session ${sessionId.slice(0, 12)})`, { sessionId, ownerUserId: session.ownerUserId });
+    if (record.mode === 'live_spot') {
+      liveAudit(fleet, null, CLOSED_POSITION_STATUSES.has(record.status) ? 'LIVE_POSITION_CLOSED' : eventType, {
+        sessionId, symbol: record.symbol, qty: record.executedQty, orderId: record.closeOrderId || record.orderId,
+        result: record.error || record.status, workerId: body.workerId,
+      });
+    }
     return json(req, { ok: true });
   }
 
@@ -1803,6 +2011,9 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       isAdmin: isAdmin(identity),
       identity: { userId: identity.userId, email: identity.email, orgId: identity.orgId, verified: identity.verified, authMode: identity.authMode },
       sessions,
+      liveReadiness: liveReadiness(fleet, identity),
+      liveAuditEvents: (fleet.liveAuditEvents || []).filter((e) => isAdmin(identity) || e.who === identity.email || e.who === identity.userId).slice(0, 50),
+      globalKillSwitchActive: process.env.BOT_GLOBAL_KILL_SWITCH === 'true' || fleet.globalKillSwitch === true,
       // Echo the open-position session ids so the client can preserve them across
       // a transient/empty poll (monotonic open-position state).
       openPositionSessionIds: sessions.filter((s) => Array.isArray(s.openPositions) && s.openPositions.length > 0).map((s) => s.sessionId),
@@ -1829,6 +2040,135 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       return json(req, { ok: true, config: v.config });
     }
     return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+  }
+
+  // POST /api/bot/start-live-session (admin-only, explicit confirmation)
+  if (base === 'start-live-session') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    if (!isAdmin(identity) || identity.verified !== true) return json(req, { ok: false, error: 'Admin verification required for live Spot.' }, 403);
+    if (!body || body.confirmationPhrase !== LIVE_CONFIRM_PHRASE || body.liveModeConfirmed !== true) {
+      return json(req, { ok: false, error: 'Exact live confirmation phrase required.' }, 403);
+    }
+    const fleet = await loadFleet();
+    const readiness = liveReadiness(fleet, identity);
+    const config = getUserConfig(fleet, identity.userId);
+    if (readiness.globalKillSwitchActive) return json(req, { ok: false, error: 'GLOBAL KILL SWITCH ACTIVE' }, 409);
+    if (!readiness.canStartLive) return json(req, { ok: false, error: readiness.state, liveReadiness: readiness }, 409);
+    if (config.allowLive !== true) return json(req, { ok: false, error: 'User config allowLive=true is required.' }, 403);
+    if (!fleetStoreInfo().durable) return notDurableResponse(req);
+    const liveOpen = Object.values(fleet.botSessions || {}).find((s) => s.mode === 'live_spot' && sessionOpenPositions(fleet, s.sessionId).length > 0);
+    if (liveOpen) return json(req, { ok: false, conflict: 'open_live_position', error: 'Live Spot open position exists. Close it before starting another live session.', session: publicSessionView(fleet, liveOpen) }, 409);
+
+    const sessionId = `live_session_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+    const nowIso = new Date().toISOString();
+    const session = {
+      sessionId,
+      ownerUserId: identity.userId,
+      ownerEmail: identity.email,
+      orgId: identity.orgId || 'default',
+      workerId: null,
+      mode: 'live_spot',
+      status: 'launch_requested',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
+      stopRequested: false,
+      pauseRequested: false,
+      closePositionsOnStop: true,
+      riskState: fleet.lastRegime || null,
+      config: { ...config, maxTradeUsd: Math.min(config.maxTradeUsd, readiness.caps.maxPositionUsd), maxOpenPositions: Math.min(config.maxOpenPositions, readiness.caps.maxOpenPositions), allowLive: true },
+      liveModeConfirmed: true,
+      liveConfirmationAt: nowIso,
+      realOrderSubmitted: false,
+    };
+    fleet.botSessions[sessionId] = session;
+    liveAudit(fleet, identity, 'LIVE_SESSION_START_REQUESTED', { sessionId, result: 'launch_requested' });
+    fevent(fleet, 'LIVE_SESSION_START_REQUESTED', 'warn', `Live Spot session ${sessionId.slice(0, 16)} requested by ${identity.email || identity.userId}.`, { sessionId, ownerUserId: identity.userId, mode: 'live_spot' });
+    await saveFleet(fleet);
+    const launch = launchUrlForSession(req, sessionId);
+    return json(req, { ok: true, sessionId, ...launch, session: publicSessionView(fleet, session), liveReadiness: readiness });
+  }
+
+  // POST /api/bot/live-emergency-stop (admin-only global live kill switch)
+  if (base === 'live-emergency-stop') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    if (!isAdmin(identity) || identity.verified !== true) return json(req, { ok: false, error: 'Admin verification required.' }, 403);
+    return await mutateFleet(async (fleet) => {
+      fleet.globalKillSwitch = true;
+      const actor = identity.email || identity.userId;
+      fleet.globalKillCommand = { active: true, action: 'live-emergency-stop', by: actor, at: new Date().toISOString() };
+      const liveSessions = Object.values(fleet.botSessions || {}).filter((s) => s.mode === 'live_spot' && !CLEARED_ACTIVE_EXCLUDED_STATUSES.has(s.status));
+      for (const session of liveSessions) {
+        session.pauseRequested = true;
+        session.stopRequested = true;
+        session.status = workerIsOnline(sessionWorkerStatus(fleet, session)) ? 'stopping' : 'stop_requested';
+        session.closePositionsOnStop = true;
+        queueCommand(fleet, session.sessionId, 'EMERGENCY_CLOSE', actor);
+        queueCommand(fleet, session.sessionId, 'STOP', actor);
+        liveAudit(fleet, identity, 'EMERGENCY_STOP_ALL_LIVE_SPOT', { sessionId: session.sessionId, result: 'queued' });
+      }
+      fevent(fleet, 'GLOBAL_KILL_SWITCH_ACTIVE', 'warn', `Emergency stop all live Spot requested by ${actor}.`, { mode: 'live_spot' });
+      return json(req, { ok: true, globalKillSwitchActive: true, liveSessions: liveSessions.map((s) => publicSessionView(fleet, s)) });
+    });
+  }
+
+  // POST /api/bot/global-kill-switch/clear | /activate
+  if (base === 'global-kill-switch') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    if (!isAdmin(identity) || identity.verified !== true) return json(req, { ok: false, error: 'Admin verification required.' }, 403);
+    const action = segments[1] || '';
+    if (action === 'clear') {
+      if (!body || body.confirmation !== 'CLEAR GLOBAL KILL SWITCH') {
+        return json(req, { ok: false, error: 'Exact confirmation required.', code: 'CONFIRMATION_REQUIRED' }, 403);
+      }
+      return await mutateFleet(async (fleet) => {
+        const openPositions = Object.values(fleet.botSessions || {})
+          .flatMap((s) => sessionOpenPositions(fleet, s.sessionId).map((p) => ({ ...p, sessionId: s.sessionId })));
+        if (openPositions.length > 0) {
+          return json(req, {
+            ok: false,
+            code: 'OPEN_POSITIONS_EXIST',
+            error: 'Cannot clear global kill switch while open positions exist.',
+            openPositionsCount: openPositions.length,
+          }, 409);
+        }
+        const actor = identity.email || identity.userId;
+        fleet.globalKillSwitch = false;
+        fleet.globalKillCommand = null;
+        liveAudit(fleet, identity, 'GLOBAL_KILL_SWITCH_CLEARED', { result: 'cleared' });
+        const ev = fevent(fleet, 'GLOBAL_KILL_SWITCH_CLEARED', 'warn', `Global kill switch cleared by ${actor}.`, { by: actor });
+        return json(req, {
+          ok: true,
+          globalKillSwitchActive: fleetGlobalKillSwitchActive(fleet),
+          auditEvent: { type: ev.type, by: actor, timestamp: ev.ts },
+        });
+      });
+    }
+    if (action === 'activate') {
+      return await mutateFleet(async (fleet) => {
+        const actor = identity.email || identity.userId;
+        fleet.globalKillSwitch = true;
+        fleet.globalKillCommand = { active: true, action: 'activate', by: actor, at: new Date().toISOString() };
+        const affectedSessions = [];
+        for (const session of Object.values(fleet.botSessions || {})) {
+          if (!session || CLEARED_ACTIVE_EXCLUDED_STATUSES.has(session.status)) continue;
+          session.pauseRequested = true;
+          session.stopRequested = true;
+          session.closePositionsOnStop = true;
+          session.status = workerIsOnline(sessionWorkerStatus(fleet, session)) ? 'stopping' : 'stop_requested';
+          if (fleet.executionIntents[session.sessionId] && ['pending', 'claimed'].includes(fleet.executionIntents[session.sessionId].status)) {
+            fleet.executionIntents[session.sessionId].status = 'cancelled';
+          }
+          queueCommand(fleet, session.sessionId, 'EMERGENCY_CLOSE', actor);
+          queueCommand(fleet, session.sessionId, 'STOP', actor);
+          liveAudit(fleet, identity, 'GLOBAL_KILL_SWITCH_ACTIVATED', { sessionId: session.sessionId, result: 'queued' });
+          affectedSessions.push(publicSessionView(fleet, session));
+        }
+        fevent(fleet, 'GLOBAL_KILL_SWITCH_ACTIVE', 'warn', `Global kill switch activated by ${actor}.`, { by: actor });
+        return json(req, { ok: true, globalKillSwitchActive: true, sessions: affectedSessions });
+      });
+    }
+    return json(req, { ok: false, error: 'Unknown global kill switch action' }, 404);
   }
 
   // POST /api/bot/start-session
@@ -1995,6 +2335,17 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
         commandType = 'PAUSE';
         fevent(fleet, 'ENTRIES_PAUSED', 'info', `Entries paused for ${sessionId.slice(0, 12)} by ${actor}.`, { sessionId, ownerUserId: session.ownerUserId });
       } else if (action === 'resume') {
+        if (fleetGlobalKillSwitchActive(fleet)) {
+          return json(req, {
+            ok: false,
+            code: 'GLOBAL_KILL_SWITCH_ACTIVE',
+            error: 'Cannot resume entries while global kill switch is active. Clear global kill switch first.',
+            message: 'Cannot resume entries while global kill switch is active. Clear global kill switch first.',
+            globalKillSwitchActive: true,
+            entryBlockedReason: 'global_kill_switch',
+            canAcceptEntryIntent: false,
+          }, 409);
+        }
         session.pauseRequested = false;
         if (!session.stopRequested) session.status = 'running';
         queueCommand(fleet, sessionId, 'RESUME', actor);
@@ -2026,6 +2377,78 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
         session: publicSessionView(fleet, session),
       });
     });
+  }
+
+  // POST /api/bot/create-live-execution-intent (admin-only, live session only)
+  if (base === 'create-live-execution-intent') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    if (!isAdmin(identity) || identity.verified !== true) return json(req, { ok: false, error: 'Admin verification required for live Spot.' }, 403);
+    const sessionId = (body && (body.sessionId || body.targetSessionId || body.botSessionId)) || '';
+    const symbol = String((body && body.symbol) || 'BTCUSDT').toUpperCase();
+    const requestedUsd = Number(body && body.positionUsd);
+    if (!sessionId) return json(req, { ok: false, error: 'sessionId is required' }, 400);
+    const fleet = await loadFleet();
+    const readiness = liveReadiness(fleet, identity);
+    const caps = readiness.caps;
+    const session = fleet.botSessions[sessionId];
+    if (!session || session.mode !== 'live_spot') return json(req, { ok: false, error: 'Live Spot session not found.' }, 404);
+    if (!canControlFleetSession(identity, session, fleet)) return json(req, { ok: false, error: 'Forbidden' }, 403);
+    const entryBlock = entryBlockState(fleet, session);
+    const blocked = entryBlockedResponse(req, entryBlock);
+    if (blocked) return blocked;
+    const config = completeBotConfig(session.config || getUserConfig(fleet, identity.userId));
+    const maxUsd = Math.min(config.maxTradeUsd, caps.maxPositionUsd);
+    const positionUsd = Number.isFinite(requestedUsd) && requestedUsd > 0 ? requestedUsd : maxUsd;
+    const closed = sessionClosedTrades(fleet, sessionId);
+    const todayStart = new Date(); todayStart.setUTCHours(0, 0, 0, 0);
+    const todayTrades = closed.filter((t) => new Date(t.timeClosed || 0).getTime() >= todayStart.getTime());
+    const todayLoss = todayTrades.reduce((n, t) => n + Math.max(0, -(Number(t.realizedPnl) || 0)), 0);
+    const checks = [
+      { ok: readiness.state === 'LIVE READY - MICRO CAPS', reason: readiness.state },
+      { ok: fleetStoreInfo().durable, reason: 'durable store is required' },
+      { ok: config.allowLive === true, reason: 'user config allowLive=true is required' },
+      { ok: session.liveModeConfirmed === true, reason: 'session liveModeConfirmed=true is required' },
+      { ok: caps.allowedSymbols.includes(symbol), reason: 'symbol is not allowlisted' },
+      { ok: positionUsd > 0 && positionUsd <= maxUsd, reason: `positionUsd exceeds live cap ${maxUsd}` },
+      { ok: sessionOpenPositions(fleet, sessionId).length < caps.maxOpenPositions, reason: `max open live positions (${caps.maxOpenPositions}) reached` },
+      { ok: todayLoss < caps.maxDailyLossUsd, reason: `daily realized loss cap reached (${todayLoss}/${caps.maxDailyLossUsd})` },
+      { ok: todayTrades.length < caps.maxDailyTrades, reason: `daily trade cap reached (${todayTrades.length}/${caps.maxDailyTrades})` },
+      { ok: !(fleet.lastRegime && fleet.lastRegime.regime === 'CRASH' && config.pauseOnMarketCrash), reason: 'entries blocked by market regime (CRASH)' },
+    ];
+    const failed = checks.find((x) => !x.ok);
+    if (failed) return json(req, { ok: false, error: failed.reason, liveReadiness: readiness }, 409);
+    const sessWorker = sessionWorkerStatus(fleet, session);
+    if (!workerIsOnline(sessWorker)) return json(req, { ok: false, error: 'Worker not online for live session.' }, 409);
+    expireStaleIntent(fleet, sessionId);
+    const existing = fleet.executionIntents[sessionId];
+    if (existing && (existing.status === 'pending' || existing.status === 'claimed')) {
+      return json(req, { ok: true, existing: true, intent: existing, session: publicSessionView(fleet, session) });
+    }
+    const intentId = `live_intent_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const idempotencyKey = `live_${sessionId}_${symbol}_${Date.now()}`;
+    const intent = {
+      id: intentId,
+      idempotencyKey,
+      sessionId,
+      mode: 'live_spot',
+      symbol,
+      side: 'BUY',
+      type: 'MARKET',
+      positionUsd,
+      quoteAsset: symbol.endsWith('USDC') ? 'USDC' : 'USDT',
+      configSnapshot: { maxTradeUsd: maxUsd, maxOpenPositions: caps.maxOpenPositions, maxDailyLossUsd: caps.maxDailyLossUsd, maxDailyTrades: caps.maxDailyTrades, allowedSymbols: caps.allowedSymbols },
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + INTENT_TTL_MS).toISOString(),
+      status: 'pending',
+      realOrderSubmitted: false,
+      testnet: false,
+      realProductionOrder: true,
+    };
+    fleet.executionIntents[sessionId] = intent;
+    liveAudit(fleet, identity, 'LIVE_EXECUTION_INTENT_CREATED', { sessionId, symbol, positionUsd, result: 'pending' });
+    fevent(fleet, 'LIVE_EXECUTION_INTENT_CREATED', 'warn', `Live Spot intent ${intentId.slice(0, 16)} created for ${symbol}.`, { sessionId, ownerUserId: session.ownerUserId, mode: 'live_spot' });
+    await saveFleet(fleet);
+    return json(req, { ok: true, intent, session: publicSessionView(fleet, session), liveReadiness: readiness });
   }
 
   // POST /api/bot/create-execution-intent  (session-scoped, config + regime gated)
@@ -2066,7 +2489,9 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     }
     if (!canControlFleetSession(identity, session, fleet)) return json(req, { ok: false, error: 'Forbidden' }, 403);
     if (session.stopRequested) return json(req, { ok: false, error: 'Session is stopping.' }, 409);
-    if (session.pauseRequested) return json(req, { ok: false, error: 'Session entries are paused.' }, 409);
+    const entryBlock = entryBlockState(fleet, session);
+    const blocked = entryBlockedResponse(req, entryBlock);
+    if (blocked) return blocked;
 
     // Require an online/running local worker bound to THIS session before queuing
     // an intent — otherwise no one will ever pick it up.
@@ -2392,8 +2817,8 @@ async function handleWorkerPair(req) {
   });
 }
 
-const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack']);
-const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-worker-pairing-code']);
+const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result']);
+const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'start-live-session', 'live-emergency-stop', 'global-kill-switch', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-live-execution-intent', 'create-worker-pairing-code']);
 
 function isWorkerRoute(route) {
   return route === 'execution-intent';

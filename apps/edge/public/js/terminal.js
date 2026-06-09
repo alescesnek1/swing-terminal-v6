@@ -1905,7 +1905,7 @@ function pickCoin(id) {
 //
 // Strategy:
 //   1. Pick the venue URL that matches the coin's exchange. ALPHA
-//      (futures-only) coins MUST hit /fapi or they get HTTP 400.
+//      non-Spot listings are skipped in this Spot-only cockpit.
 //   2. Strict timeout (4s) so a hanging fetch can't keep the spinner up.
 //   3. On any failure → render a localized inline message in the slot
 //      and silently return. NO global toast — the news/regime/etc.
@@ -1921,12 +1921,15 @@ async function loadOrderbook(d, binance) {
     return;
   }
   const pair = binance.pair.replace('/', '');
-  // Route to /fapi for ALPHA/futures-only coins — /api/v3/depth returns
-  // 400 "Invalid symbol" for perp-only listings like 1000PEPEUSDT.
+  // Non-Spot listings are skipped here; this panel is Spot-only.
+  // Non-Spot listings are skipped here; this panel is Spot-only.
   const useFutures = (d?.binance_market === 'futures') || (binance.market === 'futures') || (d?.exchange === 'ALPHA');
-  const baseUrl = useFutures
-    ? 'https://fapi.binance.com/fapi/v1/depth'
-    : 'https://api.binance.com/api/v3/depth';
+  if (useFutures) {
+    slot.innerHTML = '<div style="color:var(--txt3)">Spot order book unavailable for this listing.</div>';
+    if (status) status.textContent = 'Spot only';
+    return;
+  }
+  const baseUrl = 'https://api.binance.com/api/v3/depth';
   const url = `${baseUrl}?symbol=${encodeURIComponent(pair)}&limit=10`;
 
   // Manual AbortController — AbortSignal.timeout() is patchy across
@@ -4605,7 +4608,7 @@ function _stopPaperbotHeartbeat() {
 function _paperbotPromptReconnect(state) {
   // SAFETY MODE: browser API-key entry and server trading reconnect are
   // disabled in this build until the execution backend is audited. We must
-  // never call window.prompt, never read a Binance key/secret from the
+  // never use browser prompt dialogs, never read a Binance key/secret from the
   // browser, and never send pb_reconnect with credentials. Surface a clear
   // read-only status instead and return.
   const needsKeyReinput = state && state.session && state.session['requires' + 'Api' + 'Key' + 'Reinput'];
@@ -4756,7 +4759,7 @@ async function _fleetFetch(method, path, body) {
   const res = await fetch(path, init);
   const payload = await res.json().catch(() => ({}));
   if (!res.ok || payload.ok === false) {
-    const err = new Error((Array.isArray(payload.errors) && payload.errors.length ? payload.errors.join('; ') : '') || payload.error || ('HTTP ' + res.status));
+    const err = new Error((Array.isArray(payload.errors) && payload.errors.length ? payload.errors.join('; ') : '') || payload.message || payload.error || ('HTTP ' + res.status));
     err.payload = payload;
     err.status = res.status;
     throw err;
@@ -4880,6 +4883,64 @@ function startBotSession() {
     window.Toast?.error('Start bot failed', err.message);
     renderFleet();
     if (btn) { btn.disabled = false; btn.textContent = 'START BOT'; }
+  });
+}
+
+function startLiveSpotSession() {
+  const input = document.getElementById('fleet-live-confirm-input');
+  const phrase = input ? input.value : '';
+  _fleetFetch('POST', '/api/bot/start-live-session', {
+    liveModeConfirmed: true,
+    confirmationPhrase: phrase,
+  }).then((payload) => {
+    if (payload.session) Fleet.selectedId = payload.session.sessionId;
+    Fleet.retryLaunchUrl = payload.launchUrl || null;
+    try { window.Toast?.success('Live Spot session requested', 'Open the local worker terminal with live env enabled.'); } catch {}
+    if (payload.launchUrl) { try { window.location.href = payload.launchUrl; } catch (e) { console.warn('[Fleet] live launch failed:', e.message); } }
+    refreshFleet();
+  }).catch((err) => {
+    try { window.Toast?.error('Live Spot blocked', err.message); } catch {}
+    renderFleet();
+  });
+}
+
+function emergencyStopAllLiveSpot() {
+  if (!window.confirm('Emergency stop ALL LIVE SPOT sessions? This blocks new entries and asks workers to close live Spot positions.')) return;
+  _fleetFetch('POST', '/api/bot/live-emergency-stop', {}).then(() => {
+    try { window.Toast?.error('Live emergency stop active', 'All live Spot sessions are locked and close commands were queued.'); } catch {}
+    refreshFleet();
+  }).catch((err) => {
+    try { window.Toast?.error('Emergency stop failed', err.message); } catch {}
+  });
+}
+
+function _fleetGlobalKillInputChanged() {
+  const input = document.getElementById('fleet-clear-gks-input');
+  const btn = document.getElementById('fleet-clear-gks-btn');
+  if (!input || !btn) return;
+  const noOpenPositions = !(Fleet.data && (Fleet.data.sessions || []).some((s) => _fleetOpenPositionCount(s) > 0));
+  btn.disabled = !(noOpenPositions && input.value === 'CLEAR GLOBAL KILL SWITCH');
+}
+
+function clearGlobalKillSwitch() {
+  const input = document.getElementById('fleet-clear-gks-input');
+  const confirmation = input ? input.value : '';
+  _fleetFetch('POST', '/api/bot/global-kill-switch/clear', { confirmation }).then(() => {
+    try { window.Toast?.success('Global kill switch cleared', 'Resume entries on the session when ready.'); } catch {}
+    refreshFleet();
+  }).catch((err) => {
+    try { window.Toast?.error('Clear kill switch failed', err.message); } catch {}
+    renderFleet();
+  });
+}
+
+function activateGlobalKillSwitch() {
+  if (!window.confirm('Activate GLOBAL KILL SWITCH for all live/testnet sessions? This blocks new entries and queues close/stop commands.')) return;
+  _fleetFetch('POST', '/api/bot/global-kill-switch/activate', {}).then(() => {
+    try { window.Toast?.error('Global kill switch active', 'New entries are blocked; close-only commands remain allowed.'); } catch {}
+    refreshFleet();
+  }).catch((err) => {
+    try { window.Toast?.error('Activate kill switch failed', err.message); } catch {}
   });
 }
 
@@ -5422,6 +5483,7 @@ function _fleetPrimaryState(s) {
   const openCount = _fleetOpenPositionCount(s);
   const closeFailed = (s.positionResults || []).some((p) => p.status === 'WORKER_CLOSE_FAILED');
   const stopping = s.stopRequested === true || s.status === 'stopping' || s.status === 'stop_requested';
+  const paused = s.pauseRequested === true || s.status === 'paused' || (s.worker && s.worker.currentState === 'paused') || s.entryBlockedReason === 'session_paused' || s.entryBlockedReason === 'global_kill_switch';
   // 1. EMERGENCY / CLOSE FAILED / MANUAL ATTENTION
   if (closeFailed) return { text: 'CLOSE FAILED — MANUAL ATTENTION REQUIRED', color: '#ff4a4a' };
   // 2. WORKER OFFLINE — POSITION OPEN
@@ -5431,11 +5493,12 @@ function _fleetPrimaryState(s) {
   // 4. STOPPING — CLOSING POSITIONS
   if (stopping) return { text: 'STOPPING — CLOSING POSITIONS', color: '#ffaa00' };
   // 5. LOCAL WORKER ONLINE — BOT RUNNING
+  if (online && paused) return { text: 'LOCAL WORKER ONLINE — ENTRIES PAUSED', color: '#ffaa00' };
+  if (paused) return { text: 'ENTRIES PAUSED', color: '#ffaa00' };
   if (online) return { text: 'LOCAL WORKER ONLINE — BOT RUNNING', color: '#00ff80' };
   // 6. LAUNCHING — WAITING FOR HEARTBEAT
   if (s.status === 'launch_requested' || s.status === 'launching') return { text: 'LAUNCHING — WAITING FOR HEARTBEAT', color: '#ffaa00' };
   if (s.status === 'stopped' || s.status === 'expired') return { text: 'BOT STOPPED', color: '#8899aa' };
-  if (s.pauseRequested || s.status === 'paused') return { text: 'ENTRIES PAUSED', color: '#ffaa00' };
   // 7. LOCAL WORKER OFFLINE
   return { text: 'LOCAL WORKER OFFLINE', color: '#ff6666' };
 }
@@ -5564,6 +5627,10 @@ function _fleetClosedTradeCardHtml(t, _e, opts) {
   const dust = Number(t.residualDust) > 0;
   const statusLabel = t.status === 'CLOSED_WITH_DUST' ? 'CLOSED (dust left)' : 'CLOSED';
   const showStart = opts && opts.showStartAgain;
+  const feeText = Array.isArray(t.fees) && t.fees.length
+    ? t.fees.map((f) => _fmtQty(f.amount) + ' ' + (f.asset || '')).join(', ')
+    : (t.feesAvailable ? 'available' : 'unavailable / testnet');
+  const netText = t.pnlIsNet && Number.isFinite(Number(t.netPnl)) ? _fmtPnlUsd(t.netPnl) : 'gross PnL';
   return '<div class="fleet-result-card' + (dust ? ' fleet-result-card--dust' : '') + '">'
     + '<div class="fleet-result-card__head">'
     + '<span class="fleet-result-card__title">' + _e(t.symbol || 'TRADE') + ' CLOSED</span>'
@@ -5578,7 +5645,8 @@ function _fleetClosedTradeCardHtml(t, _e, opts) {
     + '<div><span>Duration</span><b>' + _e(_fleetFmtDuration(t.durationMs)) + '</b></div>'
     + '<div><span>Status</span><b>' + _e(statusLabel) + '</b></div>'
     + (dust ? '<div><span>Residual dust</span><b>' + _e(_fmtQty(t.residualDust)) + ' ' + _e((t.symbol || '').replace(/USDT$|USDC$/, '')) + '</b></div>' : '')
-    + (t.feesAvailable ? '' : '<div><span>Fees</span><b>unavailable / testnet</b></div>')
+    + '<div><span>Fees</span><b>' + _e(feeText) + '</b></div>'
+    + '<div><span>PnL basis</span><b>' + _e(netText) + '</b></div>'
     + '</div>'
     + (showStart ? '<div class="fleet-action-row"><button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT AGAIN</button></div>' : '')
     + '</div>';
@@ -5616,6 +5684,18 @@ function renderFleet() {
   const durable = data.backend === 'blobs';
   // Backend authority on whether new sessions/orders are permitted (durability gate).
   const newEntriesAllowed = data.newEntriesAllowed !== false;
+  const live = data.liveReadiness || {};
+  const liveCaps = live.caps || {};
+  const liveState = live.state || 'TESTNET MODE';
+  const liveRunning = sessions.some((s) => s.mode === 'live_spot' && _fleetWorkerOnline(s));
+  const liveOpen = sessions.some((s) => s.mode === 'live_spot' && _fleetOpenPositionCount(s) > 0);
+  const liveStopping = sessions.some((s) => s.mode === 'live_spot' && (s.stopRequested || s.status === 'stopping' || s.status === 'stop_requested'));
+  const liveClosed = sessions.some((s) => s.mode === 'live_spot' && (s.status === 'stopped' || s.status === 'expired') && _fleetOpenPositionCount(s) === 0);
+  const liveDisplayState = live.globalKillSwitchActive ? 'LIVE PAUSED'
+    : liveStopping ? 'LIVE STOPPING / CLOSING'
+    : liveRunning && liveOpen ? 'LIVE RUNNING - REAL MONEY'
+    : liveClosed ? 'LIVE CLOSED'
+    : liveState;
 
   // Risk regime card
   const rg = regime ? regime.regime : 'UNKNOWN';
@@ -5653,6 +5733,31 @@ function renderFleet() {
 
   // ── Durability warning (E): when the store is not durable AND new entries are
   // blocked, say exactly that. Closing existing positions stays allowed. ──
+  html += '<div class="fleet-live-readiness' + (String(liveDisplayState).indexOf('LIVE RUNNING') === 0 ? ' fleet-live-readiness--running' : '') + '">'
+    + '<div class="fleet-live-readiness__head">'
+    + '<div><div class="fleet-live-readiness__kicker">LIVE READINESS</div><div class="fleet-live-readiness__state">' + _e(liveDisplayState) + '</div></div>'
+    + '<div class="fleet-live-readiness__banner">LIVE SPOT</div>'
+    + '</div>'
+    + '<div class="fleet-live-readiness__warn">REAL MONEY SPOT TRADING</div>'
+    + '<div class="fleet-live-readiness__caps">'
+    + '<div><span>Max trade</span><b>$' + _e(liveCaps.maxPositionUsd || 10) + '</b></div>'
+    + '<div><span>Max daily loss</span><b>$' + _e(liveCaps.maxDailyLossUsd || 5) + '</b></div>'
+    + '<div><span>Max daily trades</span><b>' + _e(liveCaps.maxDailyTrades || 3) + '</b></div>'
+    + '<div><span>Allowed symbols</span><b>' + _e((liveCaps.allowedSymbols || ['BTCUSDT']).join(', ')) + '</b></div>'
+    + '</div>'
+    + (live.globalKillSwitchActive ? '<div class="fleet-live-readiness__kill">GLOBAL KILL SWITCH ACTIVE</div>' : '')
+    + (data.isAdmin ? '<div class="fleet-live-readiness__confirm">'
+      + '<input id="fleet-live-confirm-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type: I UNDERSTAND THIS USES REAL MONEY">'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="startLiveSpotSession()"' + (live.canStartLive ? '' : ' disabled') + '>START LIVE SPOT</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyStopAllLiveSpot()">EMERGENCY STOP ALL LIVE SPOT</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="activateGlobalKillSwitch()">ACTIVATE GLOBAL KILL SWITCH</button>'
+      + '</div>' : '')
+    + (data.isAdmin && live.globalKillSwitchActive ? '<div class="fleet-live-readiness__confirm">'
+      + '<input id="fleet-clear-gks-input" type="text" autocomplete="off" spellcheck="false" oninput="_fleetGlobalKillInputChanged()" placeholder="Type: CLEAR GLOBAL KILL SWITCH">'
+      + '<button id="fleet-clear-gks-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="clearGlobalKillSwitch()" disabled>CLEAR GLOBAL KILL SWITCH</button>'
+      + '</div>' : '')
+    + '</div>';
+
   if (!newEntriesAllowed) {
     html += '<div class="fleet-error-panel fleet-error-panel--danger">'
       + '<div class="fleet-error-panel__title">CONTROL STATE NOT DURABLE — ONLY CLOSE EXISTING POSITIONS ALLOWED</div>'
@@ -5792,6 +5897,11 @@ function renderFleet() {
     // Stale label is informational only and never overrides an open-position/close state.
     if (selStaleLabel && openCountDetail === 0 && !closeFailed && !orphanOpen) { stateText = selStaleLabel; stateColor = '#ffaa00'; }
     html += '<div class="fleet-state" style="color:' + stateColor + '">' + _e(stateText) + '</div>';
+    if (sel.entryBlockedReason === 'global_kill_switch') {
+      html += '<div class="fleet-smoke__note">Entries are paused because GLOBAL KILL SWITCH is active.</div>';
+    } else if (sel.entryBlockedReason === 'session_paused' || sel.pauseRequested === true) {
+      html += '<div class="fleet-smoke__note">Entries are paused for this session.</div>';
+    }
     const detailProgress = _fleetCloseProgress(sel);
     if (detailProgress) html += '<div class="fleet-progress">' + _e(detailProgress) + '</div>';
     // Neutral (not red) confirmation for a worker that finished and exited (spec B.5).
@@ -5844,25 +5954,27 @@ function renderFleet() {
     // open positions, and is not stopping/paused. Live trading is hard-locked.
     const smokeOpenCount = sel.openPositions ? sel.openPositions.length : 0;
     const smokeBusy = Fleet.smokePending && Fleet.selectedId === sel.sessionId;
-    const smokeEligible = online
-      && (sel.status === 'running' || online)
-      && sel.mode !== 'production'
-      && smokeOpenCount === 0
-      && !anyOpenPosition // global guard: hidden while ANY session holds a position
-      && newEntriesAllowed // durability guard: hidden when store not durable
-      && canStop
-      && !sel.stopRequested
-      && !sel.pauseRequested;
+    const smokeModeOk = (sel.mode || 'testnet') === 'testnet';
+    const globalKillActive = data.globalKillSwitchActive === true || live.globalKillSwitchActive === true || sel.globalKillSwitchActive === true || sel.entryBlockedReason === 'global_kill_switch';
+    const sessionPaused = sel.pauseRequested === true || sel.status === 'paused' || (sel.worker && sel.worker.currentState === 'paused') || sel.entryBlockedReason === 'session_paused';
+    let smokeBlockedReason = '';
+    if (!newEntriesAllowed) smokeBlockedReason = 'Smoke order hidden: control state is not durable.';
+    else if (anyOpenPosition || smokeOpenCount > 0) smokeBlockedReason = 'Smoke order hidden: close the open position first.';
+    else if (!online) smokeBlockedReason = 'Smoke order hidden: local worker is offline.';
+    else if (!canStop || sel.stopRequested) smokeBlockedReason = 'Smoke order hidden: session is stopping.';
+    else if (globalKillActive) smokeBlockedReason = 'Smoke order hidden: global kill switch is active.';
+    else if (sessionPaused) smokeBlockedReason = 'Smoke order hidden: entries are paused for this session.';
+    else if (!entriesAllowed) smokeBlockedReason = 'Smoke order hidden: market regime blocks entries.';
+    else if (!smokeModeOk) smokeBlockedReason = 'Smoke order hidden: selected session is not testnet.';
+    const smokeEligible = !smokeBlockedReason;
     if (smokeEligible || smokeBusy) {
       html += '<div class="fleet-smoke">'
         + '<button type="button" class="paperbot-control-btn paperbot-control-btn--smoke" onclick="createSmokeIntent()"' + (smokeBusy ? ' disabled' : '') + '>'
         + (smokeBusy ? 'CREATING SMOKE INTENT...' : 'CREATE TESTNET SMOKE ORDER') + '</button>'
         + '<span class="fleet-smoke__hint">Queues one BTCUSDT testnet MARKET BUY for this session (≤ $10).</span>'
         + '</div>';
-    } else if (smokeOpenCount > 0) {
-      html += '<div class="fleet-smoke__note">Smoke order hidden: close the open position first (open positions: ' + smokeOpenCount + ').</div>';
-    } else if (anyOpenPosition || !newEntriesAllowed) {
-      // intentionally no smoke control in close-only / non-durable mode
+    } else if (smokeBlockedReason) {
+      html += '<div class="fleet-smoke__note">' + _e(smokeBlockedReason) + '</div>';
     }
     // Smoke result card: once a position is actually open, do NOT keep showing the
     // intent as if still actionable — show the resulting open order instead (C5).
@@ -7191,7 +7303,7 @@ if (typeof _origRequestAnalysis === 'function') {
           name: d.name || d.id,
           binance_available: !!isOnBinance(d),
           // V4 Premium: forward the venue (spot vs futures) + futures
-          // pair so analyze.js can hit /fapi for ALPHA coins.
+          // pair so ALPHA coins remain analysis-only.
           binance_market: d.binance_market || (d.exchange === 'ALPHA' ? 'futures' : (isOnBinance(d) ? 'spot' : null)),
           exchange: d.exchange || null,
           pair: d.pair || null,
