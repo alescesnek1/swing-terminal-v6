@@ -1,13 +1,13 @@
-// Worker recovery + close-path unit tests.
+﻿// Worker recovery + close-path unit tests.
 //
 // Imports the worker module with the run-guard disabled (main() only runs when the
 // file is the entry point), exercising the pure recovery/close functions. Binance
-// is fully stubbed via global.fetch — no network, no real testnet, no secrets.
+// is fully stubbed via global.fetch â€” no network, no real testnet, no secrets.
 // Run: `npm test`.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-// Required worker env — set BEFORE import so the module's hard gates pass.
+// Required worker env â€” set BEFORE import so the module's hard gates pass.
 process.env.WORKER_MODE = 'testnet';
 process.env.BINANCE_ENV = 'testnet';
 process.env.BOT_CONTROL_URL = 'http://127.0.0.1:9';
@@ -93,7 +93,7 @@ test('worker-3/4: emergency close sells a hydrated BTCUSDT via MARKET SELL and m
       sells.push({ symbol: params.get('symbol'), side: params.get('side'), type: params.get('type') });
       return { ok: true, status: 200, json: async () => ({ orderId: 'close-1', status: 'FILLED', executedQty: '0.00015000' }) };
     }
-    // control-plane reports (position-result) — accept everything.
+    // control-plane reports (position-result) â€” accept everything.
     return { ok: true, status: 200, json: async () => ({ ok: true }) };
   };
   try {
@@ -320,3 +320,88 @@ test('worker-new-4: tick() survives heartbeat 502 after BUY and continues loop',
     global.fetch = origFetch;
   }
 });
+
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+
+const workerFile = fileURLToPath(new URL('../scripts/local-binance-worker.mjs', import.meta.url));
+
+test('static: no console.warn outside of definitions', () => {
+  const content = fs.readFileSync(workerFile, 'utf8');
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes('console.warn') && i !== 32 && i !== 37) {
+      assert.fail(`console.warn found on line ${i + 1}`);
+    }
+  }
+});
+
+test('static: console.error only in allowed lines', () => {
+  const content = fs.readFileSync(workerFile, 'utf8');
+  const lines = content.split('\n');
+  const allowed = new Set([32, 41, 141, 142, 144, 148, 152, 1250, 1251, 1254, 1255, 1270, 1272]);
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes('console.error') && !allowed.has(i)) {
+      assert.fail(`console.error found on unauthorized line ${i + 1}`);
+    }
+  }
+});
+
+test('static: no naked setInterval(sendHeartbeat)', () => {
+  const content = fs.readFileSync(workerFile, 'utf8');
+  assert.equal(content.includes('setInterval(sendHeartbeat'), false);
+});
+
+test('worker-new-5: subprocess handles 502 and stderr gracefully', async () => {
+  let heartbeatCount = 0;
+  let stopped = false;
+  let closed = false;
+  
+  const server = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/bot/worker-session') {
+      if (heartbeatCount > 2) {
+        stopped = true;
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true, session: { stopRequested: true } }));
+      } else {
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true, session: { stopRequested: false } }));
+      }
+    } else if (req.url === '/api/bot/worker-heartbeat') {
+      heartbeatCount++;
+      res.writeHead(502);
+      res.end(JSON.stringify({ msg: 'bad gateway' }));
+    } else if (req.url.includes('/v3/exchangeInfo')) { res.writeHead(200); res.end(JSON.stringify({ symbols: [{ baseAsset: 'BTC', filters: [{ filterType: 'LOT_SIZE', stepSize: '0.00001' }, { filterType: 'MIN_NOTIONAL', minNotional: '10' }] }] })); } else if (req.url.includes('/v3/order')) { res.writeHead(200); res.end(JSON.stringify({ orderId: 'mock-1', executedQty: '0.0001', status: 'FILLED', fills: [{ price: '50000', qty: '0.0001' }] })); } else if (req.url === '/api/bot/position-result') {
+      let body = '';
+      req.on('data', c => body += c);
+      req.on('end', () => {
+        if (JSON.parse(body).status === 'closed') closed = true;
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true }));
+      });
+    } else {
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true }));
+    }
+  });
+
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+
+  const env = { ...process.env, BOT_CONTROL_URL: `http://127.0.0.1:${port}`, WORKER_SESSION_ID: `sess_sub_${Date.now()}`, BINANCE_TESTNET_BASE_OVERRIDE: `http://127.0.0.1:${port}/api` };
+  
+  const child = spawn('node', [workerFile], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', d => stderr += d);
+  
+  const exitCode = await new Promise(resolve => child.on('close', resolve));
+  server.close();
+  
+  assert.equal(exitCode, 0, 'Worker must exit cleanly (0) after STOP, not crash on 502 stderr');
+  assert.equal(closed, true, 'Worker must have closed the position');
+  assert.equal(stderr.includes('[WARN] Heartbeat HTTP 502'), false, 'stderr must not contain recoverable warnings');
+});
+

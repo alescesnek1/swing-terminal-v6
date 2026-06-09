@@ -169,8 +169,10 @@ try {
     Write-LauncherLog "[LAUNCHER] hasBinanceKey: `$([bool]`$env:BINANCE_API_KEY)"
     Write-LauncherLog "[LAUNCHER] hasBinanceSecret: `$([bool]`$env:BINANCE_API_SECRET)"
 
+    `$ErrorActionPreference = 'Continue'
     npm run bot:worker -- --session `$SessionId 2>&1 | Tee-Object -FilePath `$OutLog -Append
     `$exitCode = `$LASTEXITCODE
+    `$ErrorActionPreference = 'Stop'
 } catch {
     `$msg = (`$_ | Out-String)
     Add-Content -LiteralPath `$ErrLog -Value `$msg -Encoding utf8

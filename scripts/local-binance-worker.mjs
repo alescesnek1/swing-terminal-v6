@@ -84,7 +84,7 @@ const dotEnvWorkerLoad = loadDotEnvWorkerIfNeeded();
 if (dotEnvWorkerLoad.loaded) {
   console.log(`[ENV] Loaded .env.worker for missing worker env (${dotEnvWorkerLoad.keysApplied} keys applied).`);
 } else if (dotEnvWorkerLoad.reason === 'missing_file') {
-  console.warn(`[ENV] .env.worker not found at ${dotEnvWorkerLoad.path}; using process environment only.`);
+  console.log(`[ENV] .env.worker not found at ${dotEnvWorkerLoad.path}; using process environment only.`);
 }
 
 // --- Configuration ---
@@ -188,18 +188,18 @@ try {
         fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
         fs.writeFileSync(STATE_FILE, JSON.stringify(workerState, null, 2));
       } catch (e) {
-        console.error('[WARN] Failed to write migrated state file', e.message);
+        console.log('[WARN] Failed to write migrated state file', e.message);
       }
     }
   }
 } catch (err) {
-  console.error('[WARN] Failed to load local state, starting fresh.', err.message);
+  console.log('[WARN] Failed to load local state, starting fresh.', err.message);
 }
 function saveState() {
   try {
     fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
     fs.writeFileSync(STATE_FILE, JSON.stringify(workerState, null, 2));
-  } catch (err) { console.error('[ERROR] Failed to save worker state.', err.message); }
+  } catch (err) { console.log('[ERROR] Failed to save worker state.', err.message); }
 }
 // Materialize the per-session state file up front so it always exists on disk
 // (observability), independent of whether any order is ever placed.
@@ -449,12 +449,12 @@ async function sendHeartbeat() {
     }
     console.log(`[HEARTBEAT] sent state=${currentState} ok=${res.ok} openPositions=${getOpenPositions().length}`);
     if (!res.ok) {
-      console.warn(`[WARN] Heartbeat HTTP ${res.status}`);
+      console.log(`[WARN] Heartbeat HTTP ${res.status}`);
       return { ok: false, status: res.status, is5xx: res.status >= 500, retriable: true };
     }
     return { ok: true, payload };
   } catch (err) {
-    console.warn(`[WARN] Heartbeat error: ${err.message}`);
+    console.log(`[WARN] Heartbeat error: ${err.message}`);
     return { ok: false, status: 500, is5xx: true, retriable: true, error: err.message };
   }
 }
@@ -471,20 +471,20 @@ async function fetchSession() {
     console.log(`[POLL] worker-session HTTP ${res.status} hasIntent=${!!(payload && payload.intent)} stopRequested=${!!(payload && payload.stopRequested)} pauseRequested=${!!(payload && payload.pauseRequested)}`);
     if (res.status === 404) {
       if (!recovery404Logged) {
-        console.warn('[RECOVERY] worker-session 404; session missing from control plane.');
+        console.log('[RECOVERY] worker-session 404; session missing from control plane.');
         recovery404Logged = true;
       } else {
-        console.warn('[WARN] worker-session HTTP 404');
+        console.log('[WARN] worker-session HTTP 404');
       }
       return { ok: false, session: null, sessionMissing: true, recoveryMode: true, stopRequested: false, statusCode: 404, raw: payload, is5xx: false };
     }
     if (!res.ok) { 
-      console.warn(`[WARN] worker-session HTTP ${res.status}`); 
+      console.log(`[WARN] worker-session HTTP ${res.status}`); 
       return { ok: false, session: null, statusCode: res.status, raw: payload, is5xx: res.status >= 500 }; 
     }
     if (payload && payload.sessionMissing) {
       if (!recovery404Logged) {
-        console.warn('[RECOVERY] worker-session 404; session missing from control plane.');
+        console.log('[RECOVERY] worker-session 404; session missing from control plane.');
         recovery404Logged = true;
       }
       return { ...payload, session: null, is5xx: false };
@@ -493,7 +493,7 @@ async function fetchSession() {
     missingSessionSince = 0;
     return { ...payload, is5xx: false };
   } catch (err) { 
-    console.warn(`[WARN] Session poll error: ${err.message}`); 
+    console.log(`[WARN] Session poll error: ${err.message}`); 
     return { ok: false, session: null, statusCode: 500, raw: null, is5xx: true }; 
   }
 }
@@ -506,7 +506,7 @@ async function ackCommands(ids) {
       headers: { 'Content-Type': 'application/json', 'X-BOT-WORKER-TOKEN': workerToken },
       body: JSON.stringify({ sessionId, workerId, commandIds: ids }),
     });
-  } catch (err) { console.warn(`[WARN] command ack error: ${err.message}`); }
+  } catch (err) { console.log(`[WARN] command ack error: ${err.message}`); }
 }
 
 async function flushPendingReports() {
@@ -523,16 +523,16 @@ async function flushPendingReports() {
       });
       if (!res.ok) {
         if (res.status >= 500) {
-          console.warn(`[WARN] Pending report retry 5xx for ${req.endpoint}. Keeping in queue.`);
+          console.log(`[WARN] Pending report retry 5xx for ${req.endpoint}. Keeping in queue.`);
           stillPending.push(req);
         } else {
-          console.warn(`[WARN] Pending report retry HTTP ${res.status} for ${req.endpoint}. Dropping.`);
+          console.log(`[WARN] Pending report retry HTTP ${res.status} for ${req.endpoint}. Dropping.`);
         }
       } else {
         console.log(`[INFO] Successfully flushed pending report to ${req.endpoint}.`);
       }
     } catch (err) {
-      console.warn(`[WARN] Pending report retry network error: ${err.message}. Keeping in queue.`);
+      console.log(`[WARN] Pending report retry network error: ${err.message}. Keeping in queue.`);
       stillPending.push(req);
     }
   }
@@ -556,11 +556,11 @@ async function reportResult(body) {
       body: JSON.stringify({ sessionId, workerId, ...body }),
     });
     if (!res.ok && res.status >= 500) {
-      console.warn(`[WARN] reportResult HTTP ${res.status}, queuing for retry.`);
+      console.log(`[WARN] reportResult HTTP ${res.status}, queuing for retry.`);
       await queueReport('execution-result', body);
     }
   } catch (err) { 
-    console.error(`[ERROR] reportResult: ${err.message}. Queuing for retry.`);
+    console.log(`[ERROR] reportResult: ${err.message}. Queuing for retry.`);
     await queueReport('execution-result', body);
   }
 }
@@ -574,11 +574,11 @@ async function reportPosition(body) {
       body: JSON.stringify({ sessionId, workerId, ...payload }),
     });
     if (!res.ok && res.status >= 500) {
-      console.warn(`[WARN] reportPosition HTTP ${res.status}, queuing for retry.`);
+      console.log(`[WARN] reportPosition HTTP ${res.status}, queuing for retry.`);
       await queueReport('position-result', payload);
     }
   } catch (err) { 
-    console.error(`[ERROR] reportPosition: ${err.message}. Queuing for retry.`);
+    console.log(`[ERROR] reportPosition: ${err.message}. Queuing for retry.`);
     await queueReport('position-result', payload);
   }
 }
@@ -780,7 +780,7 @@ async function executeIntent(intent, config, riskState, session = null, control 
 
   // ── Worker-side hard validation (defense in depth) ──
   const reject = async (reason) => {
-    console.warn(`[GATE] Intent ${intent.id} rejected: ${reason}`);
+    console.log(`[GATE] Intent ${intent.id} rejected: ${reason}`);
     await reportResult({ id: intent.id, idempotencyKey: intent.idempotencyKey, status: 'failed', error: reason, mode: workerMode, testnet: !isLiveSpot, realProductionOrder: isLiveSpot });
     markKeyUsed(intent.idempotencyKey);
   };
@@ -854,7 +854,7 @@ async function executeIntent(intent, config, riskState, session = null, control 
     markKeyUsed(intent.idempotencyKey);
     console.log(`[IDLE] Position open for ${intent.symbol}. Holding and refusing new BUY intents until it is closed (STOP/EMERGENCY closes it).`);
   } catch (err) {
-    console.error(`[ERROR] Execution failed for ${intent.id}: ${err.message}`);
+    console.log(`[ERROR] Execution failed for ${intent.id}: ${err.message}`);
     await reportResult({ id: intent.id, idempotencyKey: intent.idempotencyKey, status: 'failed', error: err.message, mode: workerMode, testnet: !isLiveSpot, realProductionOrder: isLiveSpot });
     markKeyUsed(intent.idempotencyKey);
   }
@@ -917,7 +917,7 @@ async function closeAllPositions(context) {
       console.log(`[${context}][CLOSE] Reported ${metrics.status} ${pos.symbol} to backend.`);
     } catch (err) {
       allClosed = false;
-      console.error(`[${context}][ERROR] Close result FAILED for ${pos.symbol}: ${err.message}. Worker stays alive; position remains open.`);
+      console.log(`[${context}][ERROR] Close result FAILED for ${pos.symbol}: ${err.message}. Worker stays alive; position remains open.`);
       await reportPosition({ symbol: pos.symbol, baseAsset: pos.baseAsset, executedQty: pos.executedQty, orderId: pos.orderId, status: 'WORKER_CLOSE_FAILED', error: err.message });
     }
   }
@@ -926,7 +926,7 @@ async function closeAllPositions(context) {
 
 async function emergencyReconcileAndClose() {
   if (isLiveSpot) {
-    console.warn('[RECONCILE] Live spot reconciliation not automated for safety.');
+    console.log('[RECONCILE] Live spot reconciliation not automated for safety.');
     return;
   }
   try {
@@ -942,10 +942,10 @@ async function emergencyReconcileAndClose() {
     // If no session-bound expected qty is known locally, we must not auto-sell arbitrary BTC.
     // However, if the control plane explicitly sent 'emergencyCloseRequested', the user pressed Emergency Close.
     // Since the original original state might be completely lost, we ask the user to clear it manually or wait.
-    console.error('[RECONCILE][CRITICAL] Account holds BTC but no local session-bound quantity is known. Auto-sell of arbitrary BTC is UNSAFE.');
+    console.log('[RECONCILE][CRITICAL] Account holds BTC but no local session-bound quantity is known. Auto-sell of arbitrary BTC is UNSAFE.');
     await reportResult({ error: 'WORKER_RECONCILIATION_REQUIRED', message: `Worker holds ${freeBtc} BTC but lacks session-bound order size. Please manually sell dust or clear kill switch.` });
   } catch (err) {
-    console.error(`[RECONCILE] Error: ${err.message}`);
+    console.log(`[RECONCILE] Error: ${err.message}`);
   }
 }
 
@@ -961,7 +961,7 @@ async function runStopSequence(data) {
 
   // If local is still 0 but backend reports open, hydration failed or backend is out of sync.
   if (data && Array.isArray(data.openPositions) && data.openPositions.length > 0 && getOpenPositions().length === 0) {
-    console.error('[STOP][CRITICAL] Backend reports open positions but local hydration failed. Worker will NOT exit with 0 closures.');
+    console.log('[STOP][CRITICAL] Backend reports open positions but local hydration failed. Worker will NOT exit with 0 closures.');
     await reportResult({ error: 'WORKER_RECOVERY_REQUIRED', message: 'Backend has open positions but worker failed to hydrate.' });
     return; // Stay alive
   }
@@ -983,7 +983,7 @@ async function runStopSequence(data) {
     }
     retries++;
     if (retries >= MAX_CLOSE_RETRIES) {
-      console.error(`[STOP][CRITICAL] CLOSE FAILED after ${retries} retries. Worker will NOT exit with open positions. Manual attention required.`);
+      console.log(`[STOP][CRITICAL] CLOSE FAILED after ${retries} retries. Worker will NOT exit with open positions. Manual attention required.`);
       await sendHeartbeat();
       await new Promise((r) => setTimeout(r, pollIntervalMs));
       retries = 0;
@@ -1016,26 +1016,26 @@ async function processCommands(commands) {
 
 async function handleMissingSession(data) {
   if (data && data.is5xx) {
-    console.warn(`[POLL] Transient 5xx error (${data.statusCode}). Keeping worker alive...`);
+    console.log(`[POLL] Transient 5xx error (${data.statusCode}). Keeping worker alive...`);
     return;
   }
   const open = getOpenPositions();
   if (data && data.stopRequested) return runStopSequence(data);
   if (open.length > 0) {
     currentState = 'running';
-    console.warn(`[RECOVERY] Continuing after open position; session missing from control plane. openPositions=${open.length}`);
+    console.log(`[RECOVERY] Continuing after open position; session missing from control plane. openPositions=${open.length}`);
     await reportOpenPositions('missing-session');
     await sendHeartbeat();
     return;
   }
   if (!missingSessionSince) {
     missingSessionSince = Date.now();
-    console.warn(`[RECOVERY] worker-session missing without local open positions; retrying for ${Math.round(MISSING_SESSION_EXIT_MS / 1000)}s before clean exit.`);
+    console.log(`[RECOVERY] worker-session missing without local open positions; retrying for ${Math.round(MISSING_SESSION_EXIT_MS / 1000)}s before clean exit.`);
     return;
   }
   if (Date.now() - missingSessionSince >= MISSING_SESSION_EXIT_MS) {
     currentState = 'stopped';
-    console.warn('[EXIT] reason=worker_session_missing_no_open_positions code=0. Worker exiting cleanly.');
+    console.log('[EXIT] reason=worker_session_missing_no_open_positions code=0. Worker exiting cleanly.');
     await sendHeartbeat();
     terminalExitNotice(0, 'worker_session_missing_no_open_positions');
     finishWorker(0);
@@ -1051,25 +1051,25 @@ async function tick() {
   try {
     heartbeatRes = await sendHeartbeat();
   } catch (err) {
-    console.warn(`[WARN] Exception in sendHeartbeat: ${err.message}`);
+    console.log(`[WARN] Exception in sendHeartbeat: ${err.message}`);
     heartbeatRes = { ok: false, is5xx: true };
   }
 
   if (heartbeatRes && heartbeatRes.is5xx && getOpenPositions().length > 0) {
-    console.warn(`[CONTROL][WARN] heartbeat failed HTTP ${heartbeatRes.status}; continuing because openPositions=${getOpenPositions().length}`);
+    console.log(`[CONTROL][WARN] heartbeat failed HTTP ${heartbeatRes.status}; continuing because openPositions=${getOpenPositions().length}`);
   }
 
   try {
     await flushPendingReports();
   } catch (err) {
-    console.warn(`[WARN] Exception in flushPendingReports: ${err.message}`);
+    console.log(`[WARN] Exception in flushPendingReports: ${err.message}`);
   }
 
   let data;
   try {
     data = await fetchSession();
   } catch (err) {
-    console.warn(`[WARN] Exception in fetchSession: ${err.message}`);
+    console.log(`[WARN] Exception in fetchSession: ${err.message}`);
     data = { ok: false, session: null, is5xx: true, statusCode: 500 };
   }
   
@@ -1080,7 +1080,7 @@ async function tick() {
   }
   
   if (data && data.is5xx) {
-    console.warn(`[POLL] Transient 5xx error (${data.statusCode}). Keeping worker alive...`);
+    console.log(`[POLL] Transient 5xx error (${data.statusCode}). Keeping worker alive...`);
     return;
   }
 
@@ -1140,7 +1140,7 @@ async function reportLivePreflightResult(result) {
       body: JSON.stringify({ workerId, hostname, platform, mode: 'live_spot', ...result }),
     });
   } catch (err) {
-    console.warn(`[PREFLIGHT] Control-plane live preflight report failed: ${err.message}`);
+    console.log(`[PREFLIGHT] Control-plane live preflight report failed: ${err.message}`);
   }
 }
 
@@ -1214,10 +1214,10 @@ async function runPreflight() {
     console.log('balances:', JSON.stringify(balances));
     const btcFree = Number(balances.BTC);
     if (Number.isFinite(btcFree) && btcFree > 0) {
-      console.warn(`[PREFLIGHT WARNING] Non-zero BTC testnet balance detected: BTC=${balances.BTC}. Worker will not auto-sell arbitrary BTC unless the position is known in ${STATE_FILE} or the user clicks Emergency Close Testnet.`);
+      console.log(`[PREFLIGHT WARNING] Non-zero BTC testnet balance detected: BTC=${balances.BTC}. Worker will not auto-sell arbitrary BTC unless the position is known in ${STATE_FILE} or the user clicks Emergency Close Testnet.`);
     }
     return 0;
-  } catch (err) { console.error(`[PREFLIGHT ERROR] ${err.message}`); return 1; }
+  } catch (err) { console.log(`[PREFLIGHT ERROR] ${err.message}`); return 1; }
 }
 
 async function main() {
@@ -1233,9 +1233,19 @@ async function main() {
   // Crash-recovery: if local state already holds an open position, re-report it to
   // the backend and refuse new BUY intents until it is closed.
   await reportOpenPositions('startup');
-  heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
-  pollTimer = setInterval(() => { tick().catch((err) => console.error('[ERROR] tick failed:', err.message)); }, pollIntervalMs);
-  tick().catch((err) => console.error('[ERROR] tick failed:', err.message));
+  heartbeatTimer = setInterval(() => {
+    sendHeartbeat()
+      .then((res) => {
+        if (res && !res.ok) {
+          console.log(`[CONTROL][WARN] heartbeat failed HTTP ${res.status}; continuing because openPositions=${getOpenPositions().length}`);
+        }
+      })
+      .catch((err) => {
+        console.log(`[CONTROL][WARN] heartbeat exception swallowed: ${err.message}; continuing because openPositions=${getOpenPositions().length}`);
+      });
+  }, HEARTBEAT_INTERVAL_MS);
+  pollTimer = setInterval(() => { tick().catch((err) => console.log('[ERROR] tick failed:', err.message)); }, pollIntervalMs);
+  tick().catch((err) => console.log('[ERROR] tick failed:', err.message));
 }
 
 // Only run the worker when executed directly (`node scripts/local-binance-worker.mjs`).
