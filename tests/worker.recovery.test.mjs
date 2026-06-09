@@ -17,10 +17,37 @@ process.env.BINANCE_API_SECRET = 'test-secret';
 process.env.WORKER_SESSION_ID = `session_test_${Date.now()}`;
 process.env.BINANCE_TESTNET_BASE_OVERRIDE = 'http://127.0.0.1:9/api'; // localhost; never real testnet
 
+import fs from 'node:fs';
+
 const worker = await import('../scripts/local-binance-worker.mjs');
-const { workerState, getOpenPositions, hydrateOpenPositionsFromBackend, closeAllPositions } = worker;
+const {
+  workerState, getOpenPositions, hydrateOpenPositionsFromBackend, closeAllPositions,
+  executeIntent, handleMissingSession, runStopSequence, STATE_FILE, LOG_FILE,
+} = worker;
 
 function reset() { workerState.positions.length = 0; }
+
+// A Binance + control-plane fetch stub. `orderResult(side)` lets callers force
+// a SELL failure. `onPositionReport` observes report ordering.
+function makeFetchStub(opts = {}) {
+  return async (url, init) => {
+    const u = String(url);
+    if (u.includes('/v3/exchangeInfo')) {
+      return { ok: true, status: 200, json: async () => ({ symbols: [{ baseAsset: 'BTC', filters: [
+        { filterType: 'LOT_SIZE', stepSize: '0.00001000' }, { filterType: 'NOTIONAL', minNotional: '1' },
+      ] }] }) };
+    }
+    if (u.includes('/v3/ticker/price')) return { ok: true, status: 200, json: async () => ({ price: '50000' }) };
+    if (u.includes('/v3/order')) {
+      const params = new URL(u).searchParams;
+      const side = params.get('side');
+      if (opts.failOrder) return { ok: false, status: 400, json: async () => ({ msg: 'forced failure' }) };
+      return { ok: true, status: 200, json: async () => ({ orderId: side === 'SELL' ? 'close-x' : 'open-x', status: 'FILLED', executedQty: '0.00010000', cummulativeQuoteQty: '5' }) };
+    }
+    if (u.includes('/api/bot/position-result') && opts.onPositionReport) opts.onPositionReport();
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+}
 
 test('worker-1/2: hydrates backend openPositions when local state is empty, marks backend-recovered', () => {
   reset();
@@ -100,4 +127,88 @@ test('worker-5: a failed close keeps the worker position open and reports not-al
     global.fetch = origFetch;
   }
   assert.equal(getOpenPositions().length, 1);
+});
+
+test('worker-1/2: a BUY persists local open state BEFORE reporting to the backend, and the worker keeps the position', async () => {
+  reset();
+  let persistedBeforeReport = false;
+  const origFetch = global.fetch;
+  global.fetch = makeFetchStub({ onPositionReport: () => { persistedBeforeReport = getOpenPositions().length > 0; } });
+  try {
+    await executeIntent(
+      { id: 'i-1', idempotencyKey: `k-${Date.now()}`, mode: 'testnet', side: 'BUY', type: 'MARKET', symbol: 'BTCUSDT', positionUsd: 5 },
+      { minTradeUsd: 1, maxTradeUsd: 10, maxOpenPositions: 1 },
+      null,
+    );
+  } finally {
+    global.fetch = origFetch;
+  }
+  assert.equal(persistedBeforeReport, true); // state written before the position-result POST
+  assert.equal(getOpenPositions().length, 1); // worker continues holding the position after BUY
+  assert.equal(getOpenPositions()[0].symbol, 'BTCUSDT');
+});
+
+test('worker-4: a hydrated/open position refuses a new BUY intent', async () => {
+  reset();
+  hydrateOpenPositionsFromBackend([{ symbol: 'BTCUSDT', executedQty: '0.0001', orderId: 'held-1', status: 'open', stepSize: '0.00001000' }]);
+  let orderAttempted = false;
+  const origFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    if (String(url).includes('/v3/order')) orderAttempted = true;
+    return makeFetchStub()(url, init);
+  };
+  try {
+    await executeIntent(
+      { id: 'i-2', idempotencyKey: `k2-${Date.now()}`, mode: 'testnet', side: 'BUY', type: 'MARKET', symbol: 'ETHUSDT', positionUsd: 5 },
+      { minTradeUsd: 1, maxTradeUsd: 10, maxOpenPositions: 1 },
+      null,
+    );
+  } finally {
+    global.fetch = origFetch;
+  }
+  assert.equal(orderAttempted, false); // max-open-positions gate blocked the BUY
+  assert.equal(getOpenPositions().length, 1);
+});
+
+test('worker-8: worker-session missing WITH an open position enters recovery and does not fatally exit', async () => {
+  reset();
+  hydrateOpenPositionsFromBackend([{ symbol: 'BTCUSDT', executedQty: '0.0001', orderId: 'held-2', status: 'open', stepSize: '0.00001000' }]);
+  const prevExit = process.exitCode;
+  process.exitCode = undefined;
+  const origFetch = global.fetch;
+  global.fetch = makeFetchStub();
+  try {
+    await handleMissingSession({ sessionMissing: true, stopRequested: false });
+  } finally {
+    global.fetch = origFetch;
+  }
+  assert.notEqual(process.exitCode, 0); // did NOT clean-exit while holding a position
+  assert.equal(getOpenPositions().length, 1);
+  process.exitCode = prevExit;
+});
+
+test('worker-6: STOP closes the open position via MARKET SELL before exiting (exit code 0)', async () => {
+  reset();
+  hydrateOpenPositionsFromBackend([{ symbol: 'BTCUSDT', executedQty: '0.00010000', orderId: 'held-3', status: 'open', stepSize: '0.00001000' }]);
+  const prevExit = process.exitCode;
+  const sells = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    if (String(url).includes('/v3/order') && new URL(String(url)).searchParams.get('side') === 'SELL') sells.push(1);
+    return makeFetchStub()(url, init);
+  };
+  try {
+    await runStopSequence();
+  } finally {
+    global.fetch = origFetch;
+  }
+  assert.ok(sells.length >= 1);
+  assert.equal(getOpenPositions().length, 0);
+  assert.equal(process.exitCode, 0); // clean exit after all positions closed
+  process.exitCode = prevExit;
+});
+
+test('worker-9/10: importing/starting the worker creates its log file and per-session state file', () => {
+  assert.ok(fs.existsSync(LOG_FILE), 'worker log file should exist');
+  assert.ok(fs.existsSync(STATE_FILE), 'per-session state file should exist');
 });

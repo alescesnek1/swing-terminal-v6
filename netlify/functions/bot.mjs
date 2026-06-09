@@ -1695,12 +1695,21 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     const fleet = await loadFleet();
     const sessions = sessionsVisibleTo(fleet, identity).map((s) => publicSessionView(fleet, s));
     const myEvents = (fleet.events || []).filter((e) => !e.ownerUserId || e.ownerUserId === identity.userId || isAdmin(identity)).slice(0, 50);
+    const backend = fleetBackend();
     return json(req, {
       ok: true,
-      backend: fleetBackend(),
+      backend,
+      // durable=true only when the Netlify Blobs store is active. memory_fallback
+      // means sessions can be lost between function invocations — surfaced loudly
+      // in the UI ("CONTROL STATE NOT DURABLE — DO NOT TRADE").
+      durable: backend === 'blobs',
+      storeMode: backend === 'blobs' ? 'durable_blobs' : 'memory_fallback',
       isAdmin: isAdmin(identity),
       identity: { userId: identity.userId, email: identity.email, orgId: identity.orgId, verified: identity.verified, authMode: identity.authMode },
       sessions,
+      // Echo the open-position session ids so the client can preserve them across
+      // a transient/empty poll (monotonic open-position state).
+      openPositionSessionIds: sessions.filter((s) => Array.isArray(s.openPositions) && s.openPositions.length > 0).map((s) => s.sessionId),
       config: getUserConfig(fleet, identity.userId),
       lastRegime: fleet.lastRegime || null,
       events: myEvents,

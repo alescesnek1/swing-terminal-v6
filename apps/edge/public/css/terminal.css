@@ -442,7 +442,12 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .fleet-hint{font-size:10px;color:var(--txt2)}
 .fleet-hint--mono{font-family:var(--mono);overflow-wrap:anywhere;line-height:1.35}
 .fleet-notice{font-size:11px;color:#ffaa00;font-weight:700;line-height:1.35}
+.fleet-notice--warn{margin:6px 0;padding:6px 9px;border:1px solid rgba(255,176,32,.45);border-radius:6px;background:rgba(255,176,32,.08)}
+.fleet-progress{margin:6px 0;padding:6px 9px;border:1px solid rgba(0,200,255,.35);border-radius:6px;background:rgba(0,200,255,.07);font-family:var(--mono);font-size:11px;color:#9fe6ff;letter-spacing:.04em}
+.fleet-debug-rows{margin:6px 0;display:flex;flex-direction:column;gap:3px}
 .fleet-error-panel{margin-bottom:8px;padding:10px;border:1px solid rgba(255,51,86,.45);border-radius:6px;background:rgba(255,51,86,.08);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.fleet-error-panel--danger{flex-direction:column;align-items:stretch;border-color:rgba(255,51,86,.7);background:rgba(255,51,86,.14)}
+.fleet-error-panel--danger .fleet-error-panel__title{color:#ff5b78}
 .fleet-error-panel__title{font-size:12px;font-weight:900;color:#ff8fa2;letter-spacing:.08em}
 .fleet-error-panel__body{font-size:11px;color:var(--txt2);font-family:var(--mono);overflow-wrap:anywhere;flex:1;min-width:180px}
 .fleet-body{display:flex;gap:8px;flex-wrap:wrap}

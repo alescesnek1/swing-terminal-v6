@@ -4773,20 +4773,54 @@ function _stopFleetPoll() {
   Fleet.pollTimer = null;
 }
 
+// Merge a freshly-polled fleet payload over the last known snapshot. A transient
+// store reset/race (common with the in-memory fallback between Netlify function
+// invocations) can return a payload that DROPS a session still holding an open
+// position. Open-position state is monotonic from the UI's perspective: we never
+// let it vanish on a single poll — we re-inject the preserved session and flag
+// the snapshot as stale so the UI can say "reconnecting to control state".
+function _fleetMergeSnapshot(prev, next) {
+  if (!next || typeof next !== 'object') return prev || next || null;
+  if (!prev || !Array.isArray(prev.sessions)) return next;
+  const nextSessions = Array.isArray(next.sessions) ? next.sessions : [];
+  const nextIds = new Set(nextSessions.map((s) => s && s.sessionId));
+  const preserved = [];
+  for (const ps of prev.sessions) {
+    if (!ps || ps.status === 'cleared') continue;
+    if (_fleetOpenPositionCount(ps) > 0 && !nextIds.has(ps.sessionId)) {
+      preserved.push({ ...ps, _preserved: true });
+    }
+  }
+  if (preserved.length) {
+    next.sessions = preserved.concat(nextSessions);
+    next._staleMerge = true;
+  }
+  return next;
+}
+
 async function refreshFleet() {
   try {
     const payload = await _fleetFetch('GET', '/api/bot/fleet');
-    Fleet.data = payload;
-    const visibleSessions = (payload.sessions || []).filter((s) => s.status !== 'cleared');
+    // Preserve last-known open-position sessions across a transient/empty poll
+    // instead of hard-resetting the UI to a fresh/offline state (flicker fix).
+    Fleet.data = _fleetMergeSnapshot(Fleet.data, payload);
+    Fleet.lastGoodAt = Date.now();
+    Fleet.refreshError = null;
+    const visibleSessions = (Fleet.data.sessions || []).filter((s) => s.status !== 'cleared');
+    // Prefer to keep the operator on the open-position session; never silently jump.
     if (!Fleet.selectedId || !visibleSessions.some((s) => s.sessionId === Fleet.selectedId)) {
-      Fleet.selectedId = visibleSessions[0] ? visibleSessions[0].sessionId : null;
+      const openFirst = visibleSessions.find((s) => _fleetOpenPositionCount(s) > 0);
+      Fleet.selectedId = (openFirst && openFirst.sessionId) || (visibleSessions[0] ? visibleSessions[0].sessionId : null);
     }
     renderFleet();
   } catch (err) {
+    // Do NOT wipe Fleet.data — keep the last stable snapshot on screen.
     console.warn('[Fleet] refresh failed:', err.message);
+    Fleet.refreshError = err.message;
     _fleetEnsurePanel();
+    if (Fleet.data) { renderFleet(); }
     const status = document.getElementById('fleet-conn');
-    if (status) { status.textContent = 'Fleet unavailable: ' + err.message; status.style.color = '#ff8fa2'; }
+    if (status) { status.textContent = 'Fleet poll failed (showing last known state): ' + err.message; status.style.color = '#ff8fa2'; }
   }
 }
 
@@ -5014,6 +5048,24 @@ function stopBotSession() {
   // Optional local fallback signal to the protocol helper.
   if (id) { try { window.location.href = 'swingworker://stop?session=' + encodeURIComponent(id) + '&control=' + encodeURIComponent(location.origin); } catch {} }
 }
+
+// Graceful STOP targeting a SPECIFIC session (closes known positions, then exits).
+// Auto-(re)launches the worker for that exact session so the close can run even
+// if the worker is offline.
+function stopAndCloseSession(sessionId) {
+  const id = sessionId || Fleet.selectedId;
+  if (!id) { window.Toast?.error('No session', 'No session to stop.'); return; }
+  if (!window.confirm('Stop bot and close the open position on session ' + id.slice(0, 12) + '? Worker will MARKET SELL then exit.')) return;
+  Fleet.selectedId = id;
+  Fleet.retryLaunchUrl = _fleetLaunchUrl(id);
+  Fleet.emergency = { sessionId: id, kind: 'stop', requestedAt: Date.now() };
+  _fleetFetch('POST', '/api/bot/session/' + encodeURIComponent(id) + '/stop', {}).then(() => {
+    try { window.Toast?.success('Stop requested', id.slice(0, 12)); } catch {}
+    // Ensure a worker is online for this exact session to perform the close.
+    try { window.location.href = Fleet.retryLaunchUrl; } catch {}
+    refreshFleet();
+  }).catch((err) => window.Toast?.error('Stop failed', err.message));
+}
 function clearSelectedStaleSession() {
   const id = Fleet.selectedId;
   if (!id) { window.Toast?.error('No session selected', 'Select a worker first.'); return; }
@@ -5075,6 +5127,7 @@ function emergencyCloseSession(sessionId) {
   if (!window.confirm('Emergency close ALL open testnet positions for session ' + id.slice(0, 12) + '? The worker stays alive.')) return;
   Fleet.selectedId = id;
   Fleet.retryLaunchUrl = _fleetLaunchUrl(id);
+  Fleet.emergency = { sessionId: id, kind: 'emergency', requestedAt: Date.now() };
   _fleetFetch('POST', '/api/bot/session/' + encodeURIComponent(id) + '/emergency-close', {}).then(() => {
     try { window.Toast?.success('Emergency close requested', id.slice(0, 12)); } catch {}
     // Auto-launch/retry the worker terminal for this same session so it receives
@@ -5337,6 +5390,47 @@ function _fleetOpenPositionCount(s) {
   return Array.isArray(s && s.openPositions) ? s.openPositions.length : 0;
 }
 
+// Exactly ONE primary state per session, by strict priority (spec A). Returns
+// { text, color }. Never produces contradictory combinations.
+function _fleetPrimaryState(s) {
+  if (!s) return { text: 'READY / NO SESSION', color: '#8899aa' };
+  const online = _fleetWorkerOnline(s);
+  const openCount = _fleetOpenPositionCount(s);
+  const closeFailed = (s.positionResults || []).some((p) => p.status === 'WORKER_CLOSE_FAILED');
+  const stopping = s.stopRequested === true || s.status === 'stopping' || s.status === 'stop_requested';
+  // 1. EMERGENCY / CLOSE FAILED / MANUAL ATTENTION
+  if (closeFailed) return { text: 'CLOSE FAILED — MANUAL ATTENTION REQUIRED', color: '#ff4a4a' };
+  // 2. WORKER OFFLINE — POSITION OPEN
+  if (openCount > 0 && !online) return { text: 'WORKER OFFLINE — POSITION OPEN', color: '#ff4a4a' };
+  // 3. OPEN POSITION EXISTS — WORKER ONLINE
+  if (openCount > 0 && online && !stopping) return { text: 'OPEN POSITION EXISTS — WORKER ONLINE', color: '#ffaa00' };
+  // 4. STOPPING — CLOSING POSITIONS
+  if (stopping) return { text: 'STOPPING — CLOSING POSITIONS', color: '#ffaa00' };
+  // 5. LOCAL WORKER ONLINE — BOT RUNNING
+  if (online) return { text: 'LOCAL WORKER ONLINE — BOT RUNNING', color: '#00ff80' };
+  // 6. LAUNCHING — WAITING FOR HEARTBEAT
+  if (s.status === 'launch_requested' || s.status === 'launching') return { text: 'LAUNCHING — WAITING FOR HEARTBEAT', color: '#ffaa00' };
+  if (s.status === 'stopped' || s.status === 'expired') return { text: 'BOT STOPPED', color: '#8899aa' };
+  if (s.pauseRequested || s.status === 'paused') return { text: 'ENTRIES PAUSED', color: '#ffaa00' };
+  // 7. LOCAL WORKER OFFLINE
+  return { text: 'LOCAL WORKER OFFLINE', color: '#ff6666' };
+}
+
+// Derived close progress for the active STOP/EMERGENCY action (spec G). No event
+// bookkeeping needed — phases are inferred from live session/worker state.
+function _fleetCloseProgress(s) {
+  if (!s || !Fleet.emergency || Fleet.emergency.sessionId !== s.sessionId) return '';
+  const online = _fleetWorkerOnline(s);
+  const openCount = _fleetOpenPositionCount(s);
+  const closeFailed = (s.positionResults || []).some((p) => p.status === 'WORKER_CLOSE_FAILED');
+  const exited = s.status === 'stopped' || s.status === 'expired';
+  if (closeFailed) return 'CLOSE FAILED — see error below';
+  if (exited && openCount === 0) return 'CLOSE REQUESTED → WORKER ONLINE → SELL SUBMITTED → CLOSED → EXITED';
+  if (openCount === 0) return 'CLOSE REQUESTED → WORKER ONLINE → SELL SUBMITTED → CLOSED';
+  if (online) return 'CLOSE REQUESTED → WORKER ONLINE → SELL SUBMITTED…';
+  return 'CLOSE REQUESTED → launching/reconnecting worker…';
+}
+
 function _fleetWorkerOnline(s) {
   return !!(s && s.worker && s.worker.online);
 }
@@ -5388,6 +5482,7 @@ function renderFleet() {
   const openPosWorkerOnline = openPosSession ? _fleetWorkerOnline(openPosSession) : false;
   // A worker is online somewhere, but NOT on the open-position session.
   const mismatchWorker = !!openPosSession && anyWorkerOnline && !openPosWorkerOnline;
+  const durable = data.backend === 'blobs';
 
   // Risk regime card
   const rg = regime ? regime.regime : 'UNKNOWN';
@@ -5412,27 +5507,51 @@ function renderFleet() {
     + (staleSessions.length > 1 && !openPosSession ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearStaleSessions()">CLEAR STALE SESSIONS</button>' : '')
     + (Fleet.retryLaunchUrl ? '<button type="button" class="paperbot-control-btn" onclick="retryOpenWorkerTerminal()">Retry Open Worker Terminal</button>' : '')
     + '</div>'
-    + '<div id="fleet-conn" class="fleet-conn">' + (data.backend === 'blobs' ? 'durable store · ' : 'in-memory store · ') + (data.isAdmin ? 'admin' : 'user') + ' · ' + _e(data.identity && data.identity.email || '') + '</div>'
+    + '<div id="fleet-conn" class="fleet-conn">' + (durable ? 'durable store · ' : 'in-memory store · ') + (data.isAdmin ? 'admin' : 'user') + ' · ' + _e(data.identity && data.identity.email || '') + '</div>'
     + (Fleet.launchNotice ? '<div class="fleet-notice">' + _e(Fleet.launchNotice) + '</div>' : '')
-    + '<div class="fleet-hint">First time on this computer? Click <b>Install Worker</b>. After that, START BOT is one-click.</div>'
-    + '<div class="fleet-hint fleet-hint--mono">' + _e(_fleetManualCommandHint(sel && sel.sessionId)) + '</div>'
+    + '<div class="fleet-hint">First time on this computer? Click <b>Install Worker</b>. After that, the entire testnet lifecycle is button-driven — no terminal needed.</div>'
     + '</div>'
     + '</div>';
+
+  // ── Durability warning (E): memory_fallback means sessions can be lost between
+  // serverless invocations. Make it impossible to miss. ──
+  if (!durable) {
+    html += '<div class="fleet-error-panel fleet-error-panel--danger">'
+      + '<div class="fleet-error-panel__title">CONTROL STATE NOT DURABLE — DO NOT TRADE</div>'
+      + '<div class="fleet-error-panel__body">Fleet store is <b>memory_fallback</b> (Netlify Blobs unavailable). '
+      + 'Sessions and open positions can be lost between requests. Configure @netlify/blobs before trading.</div>'
+      + '</div>';
+  }
+  // Transient-merge notice (D): an open-position session was preserved across an
+  // incomplete poll. Reassure the operator instead of flickering to "offline".
+  if (data._staleMerge) {
+    html += '<div class="fleet-notice fleet-notice--warn">Reconnecting to control state… preserving open-position view.</div>';
+  }
 
   // Global open-position banner: shown whenever any session holds a position,
   // regardless of which row is selected. Steers to reconnect / emergency close
   // on the EXACT open-position sessionId.
   if (openPosSession) {
+    const pos0 = (openPosSession.openPositions && openPosSession.openPositions[0]) || {};
+    const posLine = _e((pos0.symbol || 'position') + ' qty ' + (pos0.executedQty || '—'));
+    const workerSid = openPosWorkerOnline ? openPosSession.sessionId : ((mismatchWorker && sessions.find(_fleetWorkerOnline)) ? sessions.find(_fleetWorkerOnline).sessionId : null);
+    const progress = _fleetCloseProgress(openPosSession);
     html += '<div class="fleet-error-panel fleet-error-panel--connect">'
       + '<div class="fleet-error-panel__title">' + (openPosWorkerOnline ? 'OPEN POSITION EXISTS' : 'WORKER OFFLINE &mdash; POSITION OPEN') + '</div>'
-      + '<div class="fleet-error-panel__body">Open position exists. Reconnect worker to this session or Emergency Close. '
+      + '<div class="fleet-error-panel__body">' + posLine + ' &middot; status open. '
       + 'START BOT and smoke orders are disabled until it is closed.</div>'
-      + (mismatchWorker ? '<div class="fleet-orphan-warning" style="color:#ff4a4a;border-color:#ff4a4a"><b>Worker is connected to a different session. Reconnect to the open-position session.</b></div>' : '')
+      + (mismatchWorker ? '<div class="fleet-orphan-warning" style="color:#ff4a4a;border-color:#ff4a4a"><b>WORKER CONNECTED TO DIFFERENT SESSION — RECONNECT REQUIRED</b></div>' : '')
+      + (progress ? '<div class="fleet-progress">' + _e(progress) + '</div>' : '')
       + '<div class="fleet-action-row">'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="reconnectWorkerToSession(\'' + _e(openPosSession.sessionId) + '\')">Reconnect Worker to Position Session</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="stopAndCloseSession(\'' + _e(openPosSession.sessionId) + '\')">Stop Bot and Close Position</button>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _e(openPosSession.sessionId) + '\')">Emergency Close Testnet</button>'
       + '</div>'
-      + '<div class="fleet-hint fleet-hint--mono">open-position sessionId: ' + _e(openPosSession.sessionId) + '</div>'
+      + '<div class="fleet-debug-rows">'
+      + '<div class="fleet-hint fleet-hint--mono">open-position sessionId: <code onclick="_fleetCopy(\'' + _e(openPosSession.sessionId) + '\')" title="Click to copy" style="cursor:pointer">' + _e(openPosSession.sessionId) + '</code></div>'
+      + '<div class="fleet-hint fleet-hint--mono">selected sessionId: ' + _e(Fleet.selectedId || '—') + '</div>'
+      + '<div class="fleet-hint fleet-hint--mono">worker sessionId: ' + _e(workerSid || (openPosWorkerOnline ? openPosSession.sessionId : 'offline')) + '</div>'
+      + '</div>'
       + '</div>';
   }
 
@@ -5500,18 +5619,14 @@ function renderFleet() {
     const selStale = _fleetIsStaleNoWorker(sel);
     const selStaleLabel = _fleetStaleLabel(sel);
     const closeFailed = (sel.positionResults || []).some((p) => p.status === 'WORKER_CLOSE_FAILED');
-    let stateText = sel.status, stateColor = '#8899aa';
-    if (closeFailed && (sel.stopRequested || sel.status === 'stopping')) { stateText = 'CLOSE FAILED — MANUAL ATTENTION'; stateColor = '#ff4a4a'; }
-    else if (sel.stopRequested || sel.status === 'stopping') { stateText = 'STOPPING — CLOSING POSITIONS'; stateColor = '#ffaa00'; }
-    else if (orphanOpen) { stateText = 'WORKER OFFLINE — POSITION OPEN'; stateColor = '#ff4a4a'; }
-    else if (sel.status === 'stopped' || sel.status === 'expired') { stateText = 'BOT STOPPED'; stateColor = '#8899aa'; }
-    else if (sel.pauseRequested || sel.status === 'paused') { stateText = 'ENTRIES PAUSED'; stateColor = '#ffaa00'; }
-    else if (online) { stateText = 'LOCAL WORKER ONLINE — BOT RUNNING'; stateColor = '#00ff80'; }
-    else if (sel.status === 'launch_requested') { stateText = 'LAUNCHING — waiting for heartbeat'; stateColor = '#ffaa00'; }
-
-    // A stale label must never override an open-position orphan warning.
-    if (selStaleLabel && !orphanOpen) { stateText = selStaleLabel; stateColor = '#ffaa00'; }
+    // Single source of truth for the primary state (strict priority, no contradictions).
+    const primary = _fleetPrimaryState(sel);
+    let stateText = primary.text, stateColor = primary.color;
+    // Stale label is informational only and never overrides an open-position/close state.
+    if (selStaleLabel && openCountDetail === 0 && !closeFailed && !orphanOpen) { stateText = selStaleLabel; stateColor = '#ffaa00'; }
     html += '<div class="fleet-state" style="color:' + stateColor + '">' + _e(stateText) + '</div>';
+    const detailProgress = _fleetCloseProgress(sel);
+    if (detailProgress) html += '<div class="fleet-progress">' + _e(detailProgress) + '</div>';
     if (orphanOpen) {
       html += '<div class="fleet-orphan-warning">'
         + '<b>WORKER OFFLINE &mdash; POSITION OPEN</b> The position is still held on Binance Spot Testnet. '
@@ -5536,10 +5651,11 @@ function renderFleet() {
     // Copyable debug rows (spec F): exact sessionId + the worker's bound session.
     const workerSessionId = (sel.worker && sel.worker.workerId) ? sel.sessionId : null; // worker reports against this session when online
     html += '<div class="fleet-debug-rows">'
-      + '<div class="fleet-hint fleet-hint--mono">sessionId: <code onclick="_fleetCopy(\'' + _e(sel.sessionId) + '\')" title="Click to copy" style="cursor:pointer">' + _e(sel.sessionId) + '</code></div>'
+      + '<div class="fleet-hint fleet-hint--mono">selected sessionId: <code onclick="_fleetCopy(\'' + _e(sel.sessionId) + '\')" title="Click to copy" style="cursor:pointer">' + _e(sel.sessionId) + '</code></div>'
       + (online && sel.worker ? '<div class="fleet-hint fleet-hint--mono">worker: ' + _e(sel.worker.workerId || '—') + ' · session ' + _e(workerSessionId || sel.sessionId) + '</div>' : '')
+      + (openPosSession ? '<div class="fleet-hint fleet-hint--mono">open-position sessionId: ' + _e(openPosSession.sessionId) + '</div>' : '')
       + (mismatchWorker && openPosSession && sel.sessionId === openPosSession.sessionId
-          ? '<div class="fleet-orphan-warning" style="color:#ff4a4a;border-color:#ff4a4a"><b>Worker is connected to a different session. Reconnect to the open-position session.</b></div>'
+          ? '<div class="fleet-orphan-warning" style="color:#ff4a4a;border-color:#ff4a4a"><b>WORKER CONNECTED TO DIFFERENT SESSION — RECONNECT REQUIRED</b></div>'
           : '')
       + '</div>';
 

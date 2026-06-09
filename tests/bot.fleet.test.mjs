@@ -142,6 +142,45 @@ test('I-6: clear-stale refuses an open-position session', async () => {
   await closePosition(openSid); // cleanup
 });
 
+test('I-2: start-session without any open position creates a fresh session', async () => {
+  const u = freshUser();
+  const { status, json } = await call(browserReq('POST', '/api/bot/start-session', u, {}));
+  assert.equal(status, 200);
+  assert.equal(json.ok, true);
+  assert.ok(typeof json.sessionId === 'string' && json.sessionId.startsWith('session_'));
+  assert.ok(typeof json.launchUrl === 'string' && json.launchUrl.includes(encodeURIComponent(json.sessionId)));
+});
+
+test('I-8: stop-session with an open position queues a STOP close command (does NOT clear the session)', async () => {
+  const openSid = `session_open_${Date.now()}_e`;
+  await openPosition(openSid, 'ord-e');
+  const u = freshUser();
+  const { status, json } = await call(browserReq('POST', `/api/bot/session/${encodeURIComponent(openSid)}/stop`, u, {}));
+  assert.equal(status, 200);
+  assert.notEqual(json.cleared, true); // must not clear a session holding a position
+  // The worker now sees a STOP command + stopRequested for this exact session.
+  const ws = await call(workerReq('GET', `/api/bot/worker-session?sessionId=${openSid}&workerId=we`));
+  assert.equal(ws.json.stopRequested, true);
+  assert.ok(ws.json.commands.some((c) => c.type === 'STOP'));
+  // Position still tracked (not lost by the stop request).
+  assert.equal(ws.json.openPositionsCount, 1);
+  await closePosition(openSid, 'ord-e'); // cleanup
+});
+
+test('I-10: fleet response never hides an open-position session and reports durability', async () => {
+  const openSid = `session_open_${Date.now()}_f`;
+  await openPosition(openSid, 'ord-f');
+  const u = freshUser();
+  const { status, json } = await call(browserReq('GET', '/api/bot/fleet', u));
+  assert.equal(status, 200);
+  const ids = (json.sessions || []).map((s) => s.sessionId);
+  assert.ok(ids.includes(openSid), 'open-position session must be visible in fleet');
+  assert.ok(Array.isArray(json.openPositionSessionIds) && json.openPositionSessionIds.includes(openSid));
+  assert.equal(typeof json.durable, 'boolean');
+  assert.ok(json.storeMode === 'durable_blobs' || json.storeMode === 'memory_fallback');
+  await closePosition(openSid, 'ord-f'); // cleanup
+});
+
 test('I-7: after the position is closed, start-session is allowed again', async () => {
   const openSid = `session_open_${Date.now()}_d`;
   const user = freshUser();

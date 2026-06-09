@@ -660,4 +660,9 @@ export {
   closeAllPositions,
   recordOpenPosition,
   isKeyUsed,
+  executeIntent,
+  handleMissingSession,
+  runStopSequence,
+  STATE_FILE,
+  LOG_FILE,
 };
