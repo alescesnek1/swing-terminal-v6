@@ -17,7 +17,7 @@
     "bot:worker:preflight": "node scripts/local-binance-worker.mjs --preflight",
     "bot:worker:live-preflight": "node scripts/local-binance-worker.mjs --preflight",
     "test": "node --test \"tests/**/*.test.mjs\"",
-    "test:worker-subprocess": "cross-env RUN_WORKER_SUBPROCESS_TESTS=true node --test tests/worker.subprocess.test.mjs",
+    "test:worker-subprocess": "node --test tests/run-worker-subprocess.mjs"
     "e2e": "node tests/e2e-close.mjs"
   },
   "dependencies": {
