@@ -178,7 +178,18 @@ try {
     `$exitCode = 1
 }
 Write-LauncherLog "[LAUNCHER] Worker exited with code `$exitCode"
-Read-Host "Press Enter to close"
+# Terminal UX: a clean success (exit 0) should not feel stuck. Print a plain
+# instruction and auto-close, unless WORKER_HOLD_TERMINAL_ON_EXIT=true. Any
+# error (non-zero) always holds the window so diagnostics stay visible.
+`$hold = (`$env:WORKER_HOLD_TERMINAL_ON_EXIT -eq 'true')
+if (`$exitCode -eq 0 -and -not `$hold) {
+    Write-Host ''
+    Write-Host 'Trade closed successfully. You can close this window.' -ForegroundColor Green
+    Start-Sleep -Seconds 6
+} else {
+    if (`$exitCode -ne 0) { Write-Host '' ; Write-Host ('Worker exited with error code ' + `$exitCode + '. Review the log above.') -ForegroundColor Yellow }
+    Read-Host 'Press Enter to close'
+}
 exit `$exitCode
 "@
 Set-Content -LiteralPath $runnerPath -Value $runner -Encoding utf8

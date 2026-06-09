@@ -1078,6 +1078,11 @@ const STALE_LAUNCH_STATUSES = new Set(['launch_requested', 'launching', 'launch_
 const STALE_STOPPING_STATUSES = new Set(['stopping', 'stop_requested']);
 const CLEARED_ACTIVE_EXCLUDED_STATUSES = new Set(['cleared', 'stopped', 'launch_failed', 'expired']);
 const OPEN_POSITION_STATUSES = new Set(['open', 'WORKER_CLOSE_FAILED']);
+// A position that reached one of these statuses is settled: it no longer counts as
+// open, no longer blocks START, and becomes a row in the closed-trade ledger.
+// CLOSED_WITH_DUST means the position was sold down but an unsellable base-asset
+// remainder (below LOT_SIZE/MIN_NOTIONAL) is left behind — still flat for risk.
+const CLOSED_POSITION_STATUSES = new Set(['closed', 'CLOSED_WITH_DUST']);
 
 const DEFAULT_BOT_CONFIG = {
   minTradeUsd: 5,
@@ -1206,6 +1211,45 @@ function sessionOpenPositions(fleet, sessionId) {
   return latestSessionPositionRecords(fleet, sessionId).filter((p) => p && OPEN_POSITION_STATUSES.has(p.status));
 }
 
+function _num(v) { const n = Number(v); return Number.isFinite(n) ? n : null; }
+
+// Map a settled position record into the clean closed-trade ledger shape the
+// cockpit renders (latest result card + history table).
+function mapClosedTrade(p) {
+  if (!p) return null;
+  const opened = p.openedAt ? new Date(p.openedAt).getTime() : null;
+  const closed = (p.closedAt || p.receivedAt) ? new Date(p.closedAt || p.receivedAt).getTime() : null;
+  return {
+    symbol: p.symbol,
+    side: 'LONG',
+    timeOpened: p.openedAt || null,
+    timeClosed: p.closedAt || p.receivedAt || null,
+    durationMs: (Number.isFinite(opened) && Number.isFinite(closed) && closed >= opened) ? (closed - opened) : null,
+    entryAvgPrice: _num(p.entryAvgPrice),
+    closeAvgPrice: _num(p.closeAvgPrice),
+    boughtQty: p.boughtQty != null ? _num(p.boughtQty) : _num(p.executedQty),
+    soldQty: _num(p.soldQty),
+    residualDust: _num(p.residualDust) || 0,
+    realizedPnl: _num(p.realizedPnl),
+    realizedPnlPct: _num(p.realizedPnlPct),
+    // Ledger status: CLOSED / CLOSED_WITH_DUST (CLOSE_FAILED stays an open risk row).
+    status: p.status === 'CLOSED_WITH_DUST' ? 'CLOSED_WITH_DUST' : 'CLOSED',
+    entryOrderId: p.entryOrderId || p.orderId || null,
+    closeOrderId: p.closeOrderId || null,
+    feesAvailable: p.feesAvailable === true,
+  };
+}
+
+// Closed trades derived from the FINAL lifecycle state per (orderId) — a stale OPEN
+// record can never resurrect a position that has a newer CLOSED record, because
+// latestSessionPositionRecords keeps only the most recent record per key.
+function sessionClosedTrades(fleet, sessionId) {
+  return latestSessionPositionRecords(fleet, sessionId)
+    .filter((p) => p && CLOSED_POSITION_STATUSES.has(p.status))
+    .map(mapClosedTrade)
+    .filter(Boolean);
+}
+
 function normalizeOpenPositionsSummary(input, sessionId) {
   if (!Array.isArray(input)) return [];
   const out = [];
@@ -1240,7 +1284,11 @@ function upsertOpenPositionReports(fleet, sessionId, openPositions) {
   for (const rec of openPositions) {
     const key = positionRecordKey(rec);
     const latest = latestByKey.get(key);
-    if (latest && OPEN_POSITION_STATUSES.has(latest.status)) continue;
+    // Final-state guard (spec F): a stale OPEN report must NEVER override a newer
+    // lifecycle record. Skip if this position is already tracked as open/close-failed
+    // OR has already settled (closed / CLOSED_WITH_DUST). Only a genuinely new
+    // position (no prior record for this key) is added.
+    if (latest && (OPEN_POSITION_STATUSES.has(latest.status) || CLOSED_POSITION_STATUSES.has(latest.status))) continue;
     const next = { ...rec, receivedAt: new Date().toISOString() };
     fleet.positionResults[sessionId].unshift(next);
     latestByKey.set(key, next);
@@ -1351,7 +1399,11 @@ function publicSessionView(fleet, session) {
   const results = fleet.executionResults[session.sessionId] || [];
   const positions = fleet.positionResults[session.sessionId] || [];
   const openPositions = sessionOpenPositions(fleet, session.sessionId);
-  const realizedPnl = results.reduce((acc, r) => acc + (Number(r.realizedPnl) || 0), 0);
+  const closedTrades = sessionClosedTrades(fleet, session.sessionId);
+  // Realized PnL is derived from settled trades (final lifecycle) plus any PnL the
+  // worker attached to execution results; closed-trade PnL is the source of truth.
+  const realizedPnl = closedTrades.reduce((acc, t) => acc + (Number(t.realizedPnl) || 0), 0)
+    + results.reduce((acc, r) => acc + (Number(r.realizedPnl) || 0), 0);
   const now = Date.now();
   return {
     sessionId: session.sessionId,
@@ -1383,6 +1435,7 @@ function publicSessionView(fleet, session) {
     openPositions,
     positionResults: positions.slice(0, 20),
     executionResults: results.slice(0, 10),
+    closedTrades,
     realizedPnl,
   };
 }
@@ -1635,6 +1688,7 @@ async function handleFleetWorker(req, base, body) {
   if (base === 'position-result') {
     if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
     if (!body.symbol || !body.status) return json(req, { ok: false, error: 'Invalid payload' }, 400);
+    const numField = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
     const record = {
       symbol: String(body.symbol).toUpperCase().slice(0, 20),
       baseAsset: typeof body.baseAsset === 'string' ? body.baseAsset.slice(0, 20) : null,
@@ -1644,6 +1698,18 @@ async function handleFleetWorker(req, base, body) {
       status: String(body.status).slice(0, 30),
       sessionId,
       error: typeof body.error === 'string' ? body.error.slice(0, 240) : null,
+      // ── Closed-trade ledger fields (present on close reports) ──
+      entryOrderId: body.entryOrderId != null ? String(body.entryOrderId).slice(0, 40) : null,
+      openedAt: typeof body.openedAt === 'string' ? body.openedAt.slice(0, 40) : null,
+      closedAt: typeof body.closedAt === 'string' ? body.closedAt.slice(0, 40) : null,
+      entryAvgPrice: numField(body.entryAvgPrice),
+      closeAvgPrice: numField(body.closeAvgPrice),
+      boughtQty: numField(body.boughtQty),
+      soldQty: numField(body.soldQty),
+      residualDust: numField(body.residualDust),
+      realizedPnl: numField(body.realizedPnl),
+      realizedPnlPct: numField(body.realizedPnlPct),
+      feesAvailable: body.feesAvailable === true,
       testnet: true,
       realProductionOrder: false,
       receivedAt: new Date().toISOString(),
@@ -1661,7 +1727,10 @@ async function handleFleetWorker(req, base, body) {
       fleet.positionResults[sessionId] = [record, ...fleet.positionResults[sessionId]].slice(0, 30);
     }
     const sev = record.status === 'WORKER_CLOSE_FAILED' ? 'warn' : 'info';
-    fevent(fleet, record.status === 'closed' ? 'WORKER_POSITION_CLOSED' : record.status === 'WORKER_CLOSE_FAILED' ? 'WORKER_CLOSE_FAILED' : 'WORKER_POSITION_OPEN', sev,
+    const eventType = CLOSED_POSITION_STATUSES.has(record.status) ? 'WORKER_POSITION_CLOSED'
+      : record.status === 'WORKER_CLOSE_FAILED' ? 'WORKER_CLOSE_FAILED'
+      : 'WORKER_POSITION_OPEN';
+    fevent(fleet, eventType, sev,
       `${record.status} ${record.symbol} (session ${sessionId.slice(0, 12)})`, { sessionId, ownerUserId: session.ownerUserId });
     return json(req, { ok: true });
   }

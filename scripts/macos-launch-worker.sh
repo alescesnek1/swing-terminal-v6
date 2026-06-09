@@ -116,7 +116,14 @@ npm run bot:worker -- --session "\${SESSION_ID}" 2>&1 | tee -a "\${LOG_FILE}" ||
   exit_code="\${status}"
 }
 launcher_log "[LAUNCHER] Worker exited with code \${exit_code}"
-read -r -p "Press Enter to close"
+# Terminal UX: clean success (exit 0) prints a plain instruction and auto-closes
+# unless WORKER_HOLD_TERMINAL_ON_EXIT=true; any error holds the window.
+if [ "\${exit_code}" = "0" ] && [ "\${WORKER_HOLD_TERMINAL_ON_EXIT:-}" != "true" ]; then
+  printf '\\nTrade closed successfully. You can close this window.\\n'
+  sleep 6
+else
+  read -r -p "Press Enter to close"
+fi
 exit "\${exit_code}"
 RUNNER_EOF
 chmod +x "${RUNNER}"

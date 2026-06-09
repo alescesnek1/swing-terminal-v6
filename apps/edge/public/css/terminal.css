@@ -481,6 +481,24 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .fleet-table{width:100%;border-collapse:collapse;font-size:11px;margin-top:4px}
 .fleet-table th{text-align:left;color:var(--txt3);font-size:9px;letter-spacing:.1em;border-bottom:1px solid rgba(255,255,255,.08);padding:4px}
 .fleet-table td{padding:4px;border-bottom:1px solid rgba(255,255,255,.04);font-family:var(--mono)}
+/* ── TRADE CLOSED result card (spec A.4 / state 5) — green/neutral, never red ── */
+.fleet-result-card{margin:8px 0;padding:11px 13px;border:1px solid rgba(0,255,128,.4);border-radius:8px;background:linear-gradient(180deg,rgba(0,255,128,.08),rgba(0,255,128,.03))}
+.fleet-result-card--dust{border-color:rgba(255,170,0,.45);background:linear-gradient(180deg,rgba(255,170,0,.08),rgba(255,170,0,.03))}
+.fleet-result-card__head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}
+.fleet-result-card__title{font-size:13px;font-weight:900;letter-spacing:.06em;color:var(--txt)}
+.fleet-result-card__pnl{font-size:14px;font-weight:900;font-family:var(--mono)}
+.fleet-result-card__grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:7px;margin-top:9px}
+.fleet-result-card__grid>div{background:rgba(0,0,0,.22);border-radius:4px;padding:6px 8px}
+.fleet-result-card__grid span{display:block;font-size:9px;color:var(--txt3);letter-spacing:.1em}
+.fleet-result-card__grid b{font-size:12px;color:var(--txt);font-family:var(--mono);overflow-wrap:anywhere}
+.fleet-result-card .fleet-action-row{margin-top:10px}
+/* Closed-trade ledger */
+.fleet-ledger{font-size:10px}
+.fleet-ledger th,.fleet-ledger td{padding:3px 5px;white-space:nowrap}
+/* Neutral "exited cleanly" note — explicitly not an alarm */
+.fleet-clean-exit{margin:6px 0;padding:6px 9px;border:1px solid rgba(120,140,160,.3);border-radius:6px;background:rgba(120,140,160,.07);font-size:11px;color:var(--txt2)}
+.fleet-history__row--btn{cursor:pointer;align-items:center}
+.fleet-history__row--btn:hover{color:var(--txt)}
 .fleet-bottom{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 .fleet-config{flex:1;min-width:280px;background:var(--s2);border:1px solid rgba(255,255,255,.08);border-radius:6px;padding:10px}
 .fleet-config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:7px;margin-bottom:8px}

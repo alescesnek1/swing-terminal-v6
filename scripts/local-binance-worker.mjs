@@ -88,6 +88,11 @@ const MISSING_SESSION_EXIT_MS = 60000;
 
 const isPreflight = process.argv.includes('--preflight') || process.env.WORKER_PREFLIGHT === 'true';
 
+// Terminal UX: after a CLEAN success (positions closed, exit 0) the worker should
+// not leave the operator staring at a window that feels stuck. Default behaviour
+// auto-closes; set WORKER_HOLD_TERMINAL_ON_EXIT=true to keep the window open.
+const holdTerminalOnExit = process.env.WORKER_HOLD_TERMINAL_ON_EXIT === 'true';
+
 // Per-session worker id; persisted so a restart rebinds to the same session.
 const workerId = `worker_${crypto.randomBytes(4).toString('hex')}`;
 const hostname = os.hostname();
@@ -173,9 +178,21 @@ function recordOpenPosition(pos) {
   saveState();
   console.log(`[STATE] saved open position ${pos.symbol} qty=${pos.executedQty}`);
 }
-function markPositionClosed(orderId, closeOrderId) {
+function markPositionClosed(orderId, closeOrderId, metrics) {
   const pos = workerState.positions.find((p) => p && p.orderId === orderId && p.status === 'open');
-  if (pos) { pos.status = 'closed'; pos.closeOrderId = closeOrderId; pos.closedAt = new Date().toISOString(); saveState(); }
+  if (pos) {
+    // Local state keeps the simple open/closed lifecycle flag; CLOSED_WITH_DUST is
+    // a closed position (it no longer counts as open / no longer blocks START).
+    pos.status = 'closed';
+    pos.closeOrderId = closeOrderId;
+    pos.closedAt = new Date().toISOString();
+    if (metrics) {
+      pos.closeStatus = metrics.status;
+      pos.residualDust = metrics.residualDust;
+      pos.realizedPnl = metrics.realizedPnl;
+    }
+    saveState();
+  }
 }
 
 // --- Backend-driven recovery ---
@@ -221,6 +238,88 @@ function stepPrecision(stepSize) {
   return step.split('.')[1].replace(/0+$/, '').length;
 }
 
+// ── Trade-result math (pure; exported for unit tests) ───────────────────────
+// Average fill price. Prefer the per-fill array (price * qty weighted); fall back
+// to cummulativeQuoteQty / executedQty (Binance MARKET order summary fields).
+function avgPriceFromFills(fills, executedQty, cummulativeQuoteQty) {
+  if (Array.isArray(fills) && fills.length) {
+    let quote = 0;
+    let qty = 0;
+    for (const f of fills) {
+      const price = Number(f && f.price);
+      const fqty = Number(f && f.qty);
+      if (Number.isFinite(price) && Number.isFinite(fqty) && fqty > 0) { quote += price * fqty; qty += fqty; }
+    }
+    if (qty > 0) return quote / qty;
+  }
+  const eq = Number(executedQty);
+  const cq = Number(cummulativeQuoteQty);
+  if (Number.isFinite(eq) && eq > 0 && Number.isFinite(cq) && cq > 0) return cq / eq;
+  return null;
+}
+
+// Residual base-asset left after a close. A real testnet SELL can fill fewer base
+// units than were bought (LOT_SIZE rounding, fee taken in base asset), leaving
+// dust. Never negative.
+function residualDustQty(boughtQty, soldQty) {
+  const b = Number(boughtQty);
+  const s = Number(soldQty);
+  if (!Number.isFinite(b) || !Number.isFinite(s)) return 0;
+  return Math.max(0, b - s);
+}
+
+// Is the leftover dust still sellable? It is only sellable when it clears BOTH the
+// LOT_SIZE minQty and the MIN_NOTIONAL floors. Below either, it is permanent dust.
+function isResidualSellable(residualQty, minQty, minNotional, price) {
+  const r = Number(residualQty);
+  if (!Number.isFinite(r) || r <= 0) return false;
+  const mq = Number(minQty);
+  if (Number.isFinite(mq) && mq > 0 && r < mq) return false;
+  const mn = Number(minNotional);
+  const px = Number(price);
+  if (Number.isFinite(mn) && mn > 0 && Number.isFinite(px) && px > 0 && r * px < mn) return false;
+  return true;
+}
+
+// Compute the closed-trade result from the stored open position and the SELL order
+// response. realizedPnl is proceeds minus the cost basis of the *sold* portion, so
+// unsold dust is never miscounted as a loss. Fees are testnet-unavailable and do
+// not block the PnL display.
+function computeCloseMetrics(pos, closeOrder, opts = {}) {
+  const boughtQty = Number(pos && pos.executedQty) || 0;
+  const soldQty = Number(closeOrder && closeOrder.executedQty) || 0;
+  const entryAvgPrice = (pos && pos.entryAvgPrice != null && Number.isFinite(Number(pos.entryAvgPrice)))
+    ? Number(pos.entryAvgPrice)
+    : avgPriceFromFills(pos && pos.entryFills, pos && pos.executedQty, pos && pos.entryQuoteQty);
+  const closeAvgPrice = avgPriceFromFills(closeOrder && closeOrder.fills, soldQty, closeOrder && closeOrder.cummulativeQuoteQty);
+  const proceeds = Number(closeOrder && closeOrder.cummulativeQuoteQty);
+  const proceedsUsd = Number.isFinite(proceeds) && proceeds > 0
+    ? proceeds
+    : (closeAvgPrice != null ? closeAvgPrice * soldQty : null);
+  const costOfSold = entryAvgPrice != null ? entryAvgPrice * soldQty : Number(pos && pos.entryQuoteQty);
+  let realizedPnl = null;
+  let realizedPnlPct = null;
+  if (proceedsUsd != null && Number.isFinite(costOfSold) && costOfSold > 0) {
+    realizedPnl = proceedsUsd - costOfSold;
+    realizedPnlPct = (realizedPnl / costOfSold) * 100;
+  }
+  const residualDust = residualDustQty(boughtQty, soldQty);
+  const sellable = isResidualSellable(residualDust, opts.minQty, opts.minNotional, closeAvgPrice != null ? closeAvgPrice : entryAvgPrice);
+  const status = residualDust > 0 && !sellable ? 'CLOSED_WITH_DUST' : 'closed';
+  return {
+    status,
+    boughtQty,
+    soldQty,
+    residualDust,
+    residualSellable: sellable,
+    entryAvgPrice,
+    closeAvgPrice,
+    realizedPnl: realizedPnl != null ? Number(realizedPnl) : null,
+    realizedPnlPct: realizedPnlPct != null ? Number(realizedPnlPct) : null,
+    feesAvailable: false,
+  };
+}
+
 // Lifecycle: starting | running | paused | stopping | stopped
 let currentState = 'starting';
 let stopping = false;
@@ -238,6 +337,21 @@ function finishWorker(code) {
   heartbeatTimer = null;
   pollTimer = null;
   process.exitCode = code;
+}
+
+// Friendly terminal close message. On a clean success the operator should never
+// feel the window is "stuck" — print a plain instruction. The launcher decides
+// whether to actually hold the window (WORKER_HOLD_TERMINAL_ON_EXIT), but the
+// worker always prints the human-readable result line.
+function terminalExitNotice(code, reason) {
+  if (code === 0 && /closed/i.test(reason || '')) {
+    console.log('[DONE] Trade closed successfully. You can close this window.');
+    if (!holdTerminalOnExit) console.log('[DONE] (Window will not block on input — auto-close is safe after a clean close.)');
+  } else if (code === 0) {
+    console.log('[DONE] Worker exited cleanly. You can close this window.');
+  } else {
+    console.log(`[DONE] Worker exited with an error (${reason || 'see log above'}). Keep this window open for diagnostics.`);
+  }
 }
 
 // --- Control plane I/O ---
@@ -413,11 +527,19 @@ async function executeIntent(intent, config, riskState) {
     const order = await submitMarketOrder(intent.symbol, 'BUY', qty, precision);
     console.log(`[ORDER] Order successful. OrderID: ${order.orderId} status=${order.status} executedQty=${order.executedQty}`);
 
+    // Capture entry economics now so the eventual close can compute realized PnL
+    // (entry avg price + cost basis) without re-querying Binance.
+    const entryAvgPrice = avgPriceFromFills(order.fills, order.executedQty, order.cummulativeQuoteQty);
+
     // PERSIST FIRST: write the open position to local state BEFORE reporting to
     // the backend, so a crash between order and report can be recovered locally.
     recordOpenPosition({
       symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, executedQty: order.executedQty,
       orderId: order.orderId, sessionId, status: 'open', openedAt: new Date().toISOString(), stepSize: lot.stepSize,
+      entryQuoteQty: order.cummulativeQuoteQty != null ? String(order.cummulativeQuoteQty) : null,
+      entryAvgPrice: entryAvgPrice != null ? entryAvgPrice : null,
+      minQty: lot.minQty != null ? String(lot.minQty) : null,
+      minNotional: (() => { const n = symbolInfo.filters.find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL'); return n && n.minNotional != null ? String(n.minNotional) : null; })(),
     });
     console.log(`[POSITION] Open position persisted locally before backend report: ${intent.symbol} order ${order.orderId} -> ${STATE_FILE}`);
 
@@ -426,7 +548,7 @@ async function executeIntent(intent, config, riskState) {
       symbol: intent.symbol, orderId: order.orderId, orderStatus: order.status, executedQty: order.executedQty,
       cummulativeQuoteQty: order.cummulativeQuoteQty, testnet: true, realProductionOrder: false,
     });
-    await reportPosition({ symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, executedQty: order.executedQty, orderId: order.orderId, status: 'open' });
+    await reportPosition({ symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, executedQty: order.executedQty, orderId: order.orderId, status: 'open', openedAt: new Date().toISOString(), entryAvgPrice: entryAvgPrice != null ? entryAvgPrice : null });
     console.log(`[POSITION] Reported OPEN ${intent.symbol} to backend.`);
     markKeyUsed(intent.idempotencyKey);
     console.log(`[IDLE] Position open for ${intent.symbol}. Holding and refusing new BUY intents until it is closed (STOP/EMERGENCY closes it).`);
@@ -446,10 +568,19 @@ async function closeAllPositions(context) {
   for (const pos of open) {
     try {
       let stepSize = pos.stepSize;
+      let minQty = pos.minQty;
+      let minNotional = pos.minNotional;
+      // Only hit the network when we lack the lot step (preserves the offline path);
+      // when we do fetch it, opportunistically capture the dust thresholds too.
       if (!stepSize) {
         const info = await getSymbolInfo(pos.symbol);
         const lot = info.filters.find((f) => f.filterType === 'LOT_SIZE');
         stepSize = lot ? lot.stepSize : '0.00000001';
+        if (minQty == null && lot) minQty = lot.minQty;
+        if (minNotional == null) {
+          const n = info.filters.find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
+          if (n) minNotional = n.minNotional;
+        }
       }
       const precision = stepPrecision(stepSize);
       const stepNum = parseFloat(stepSize) || 0;
@@ -460,9 +591,25 @@ async function closeAllPositions(context) {
       console.log(`[${context}][CLOSE] Submitting TESTNET SELL MARKET ${sellQty} ${pos.symbol} (close of order ${pos.orderId})...`);
       const close = await submitMarketOrder(pos.symbol, 'SELL', sellQty, precision);
       console.log(`[${context}][CLOSE] Close result OK. ${pos.symbol} CloseOrderID: ${close.orderId} executedQty=${close.executedQty}`);
-      markPositionClosed(pos.orderId, close.orderId);
-      await reportPosition({ symbol: pos.symbol, baseAsset: pos.baseAsset, executedQty: close.executedQty, orderId: pos.orderId, closeOrderId: close.orderId, status: 'closed' });
-      console.log(`[${context}][CLOSE] Reported CLOSED ${pos.symbol} to backend.`);
+
+      // Compute the realized trade result (avg prices, PnL, residual dust) so the
+      // operator sees a clean trade-result card instead of raw order JSON. When the
+      // exchange minQty is unknown, the lot stepSize is the dust floor: a remainder
+      // smaller than one step is never independently sellable.
+      const metrics = computeCloseMetrics(pos, close, { minQty: minQty != null ? minQty : stepSize, minNotional });
+      const closedAt = new Date().toISOString();
+      markPositionClosed(pos.orderId, close.orderId, metrics);
+      const pnlLog = metrics.realizedPnl != null ? `${metrics.realizedPnl >= 0 ? '+' : ''}${metrics.realizedPnl.toFixed(4)} (${metrics.realizedPnlPct != null ? metrics.realizedPnlPct.toFixed(2) : '—'}%)` : 'n/a';
+      console.log(`[${context}][CLOSE] Result ${metrics.status} ${pos.symbol}: bought=${metrics.boughtQty} sold=${metrics.soldQty} dust=${metrics.residualDust} pnl=${pnlLog}`);
+      await reportPosition({
+        symbol: pos.symbol, baseAsset: pos.baseAsset, executedQty: close.executedQty,
+        orderId: pos.orderId, closeOrderId: close.orderId, status: metrics.status,
+        entryOrderId: pos.orderId, openedAt: pos.openedAt || null, closedAt,
+        entryAvgPrice: metrics.entryAvgPrice, closeAvgPrice: metrics.closeAvgPrice,
+        boughtQty: metrics.boughtQty, soldQty: metrics.soldQty, residualDust: metrics.residualDust,
+        realizedPnl: metrics.realizedPnl, realizedPnlPct: metrics.realizedPnlPct, feesAvailable: false,
+      });
+      console.log(`[${context}][CLOSE] Reported ${metrics.status} ${pos.symbol} to backend.`);
     } catch (err) {
       allClosed = false;
       console.error(`[${context}][ERROR] Close result FAILED for ${pos.symbol}: ${err.message}. Worker stays alive; position remains open.`);
@@ -486,6 +633,7 @@ async function runStopSequence() {
       currentState = 'stopped';
       console.log('[STOP] All positions closed. [EXIT] reason=stop_requested_all_closed code=0. Worker exiting.');
       await sendHeartbeat();
+      terminalExitNotice(0, 'stop_requested_all_closed');
       finishWorker(0);
       return;
     }
@@ -538,6 +686,7 @@ async function handleMissingSession(data) {
     currentState = 'stopped';
     console.warn('[EXIT] reason=worker_session_missing_no_open_positions code=0. Worker exiting cleanly.');
     await sendHeartbeat();
+    terminalExitNotice(0, 'worker_session_missing_no_open_positions');
     finishWorker(0);
     return;
   }
@@ -663,6 +812,10 @@ export {
   executeIntent,
   handleMissingSession,
   runStopSequence,
+  avgPriceFromFills,
+  residualDustQty,
+  isResidualSellable,
+  computeCloseMetrics,
   STATE_FILE,
   LOG_FILE,
 };

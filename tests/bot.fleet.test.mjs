@@ -268,6 +268,98 @@ test('I-7/G-6: after the position is closed, openPositionSessionIds empties and 
   assert.ok(typeof ok.json.sessionId === 'string');
 });
 
+// ── Closed-trade ledger + final-state derivation (spec C/F/G) ────────────────
+
+// Close a position with full PnL metrics (the rich worker close report).
+async function closeWithMetrics(sessionId, orderId, overrides = {}) {
+  return call(workerReq('POST', '/api/bot/position-result', Object.assign({
+    sessionId, symbol: 'BTCUSDT', baseAsset: 'BTC', executedQty: '0.00015000', orderId,
+    closeOrderId: 'c-' + orderId, status: 'closed',
+    entryOrderId: orderId,
+    openedAt: new Date(Date.now() - 60000).toISOString(), closedAt: new Date().toISOString(),
+    entryAvgPrice: 50000, closeAvgPrice: 55000, boughtQty: 0.00015, soldQty: 0.00015,
+    residualDust: 0, realizedPnl: 0.75, realizedPnlPct: 10, feesAvailable: false,
+  }, overrides)));
+}
+function fleetSession(fleetJson, sid) {
+  return (fleetJson.sessions || []).find((s) => s.sessionId === sid) || null;
+}
+
+test('CT-1/CT-5: OPEN then CLOSED yields openPositions=0, closedTrades=1 with PnL fields', async () => {
+  const u = freshUser();
+  const sid = await ownedSessionWithPosition(u, 'ord-ct1');
+  await closeWithMetrics(sid, 'ord-ct1');
+  const fleet = await call(browserReq('GET', '/api/bot/fleet', u));
+  const s = fleetSession(fleet.json, sid);
+  assert.ok(s, 'owned session visible in fleet');
+  assert.equal(s.openPositions.length, 0);
+  assert.equal(s.closedTrades.length, 1);
+  const t = s.closedTrades[0];
+  assert.equal(t.status, 'CLOSED');
+  assert.equal(t.symbol, 'BTCUSDT');
+  assert.equal(t.entryAvgPrice, 50000);
+  assert.equal(t.closeAvgPrice, 55000);
+  assert.equal(t.realizedPnl, 0.75);
+  assert.equal(t.realizedPnlPct, 10);
+  assert.equal(t.entryOrderId, 'ord-ct1');
+  assert.equal(t.closeOrderId, 'c-ord-ct1');
+  assert.ok(typeof t.durationMs === 'number' && t.durationMs > 0);
+  assert.ok(Math.abs(s.realizedPnl - 0.75) < 1e-9);
+  assert.ok(!(fleet.json.openPositionSessionIds || []).includes(sid));
+});
+
+test('CT-2: CLOSED_WITH_DUST yields openPositions=0 and START is allowed again', async () => {
+  const u = freshUser();
+  const sid = await ownedSessionWithPosition(u, 'ord-ct2');
+  await closeWithMetrics(sid, 'ord-ct2', {
+    status: 'CLOSED_WITH_DUST', executedQty: '0.00014000', soldQty: 0.00014, residualDust: 0.00001,
+  });
+  const fleet = await call(browserReq('GET', '/api/bot/fleet', u));
+  const s = fleetSession(fleet.json, sid);
+  assert.equal(s.openPositions.length, 0);
+  assert.equal(s.closedTrades.length, 1);
+  assert.equal(s.closedTrades[0].status, 'CLOSED_WITH_DUST');
+  assert.equal(s.closedTrades[0].residualDust, 0.00001);
+  assert.ok(!(fleet.json.openPositionSessionIds || []).includes(sid));
+  // START is no longer blocked by an open position.
+  const start = await call(browserReq('POST', '/api/bot/start-session', u, {}));
+  assert.equal(start.json.ok, true);
+  assert.notEqual(start.json.conflict, 'open_position');
+});
+
+test('CT-3: a stale OPEN report after CLOSED does NOT reopen the position', async () => {
+  const u = freshUser();
+  const sid = await ownedSessionWithPosition(u, 'ord-ct3');
+  await closeWithMetrics(sid, 'ord-ct3');
+  // A late/duplicate OPEN report for the SAME orderId arrives (worker heartbeat lag).
+  await openPosition(sid, 'ord-ct3');
+  const fleet = await call(browserReq('GET', '/api/bot/fleet', u));
+  const s = fleetSession(fleet.json, sid);
+  assert.equal(s.openPositions.length, 0, 'stale OPEN must not resurrect a closed position');
+  assert.equal(s.closedTrades.length, 1);
+  assert.ok(!(fleet.json.openPositionSessionIds || []).includes(sid));
+});
+
+test('CT-4: a close_failed keeps openPositions=1 and blocks START', async () => {
+  const u = freshUser();
+  const sid = await ownedSessionWithPosition(u, 'ord-ct4');
+  await call(workerReq('POST', '/api/bot/position-result', {
+    sessionId: sid, symbol: 'BTCUSDT', baseAsset: 'BTC', executedQty: '0.00015000',
+    orderId: 'ord-ct4', status: 'WORKER_CLOSE_FAILED', error: 'insufficient balance',
+  }));
+  const fleet = await call(browserReq('GET', '/api/bot/fleet', u));
+  const s = fleetSession(fleet.json, sid);
+  assert.equal(s.openPositions.length, 1);
+  assert.equal(s.closedTrades.length, 0); // a failed close is NOT a settled trade
+  assert.ok((fleet.json.openPositionSessionIds || []).includes(sid));
+  // START is blocked with a reconnect conflict.
+  const start = await call(browserReq('POST', '/api/bot/start-session', u, {}));
+  assert.equal(start.status, 409);
+  assert.equal(start.json.conflict, 'open_position');
+  // cleanup: a real close clears it.
+  await closeWithMetrics(sid, 'ord-ct4');
+});
+
 test('G-1: a non-durable store blocks START + smoke but still allows closing an existing position', async () => {
   const prev = process.env.BOT_ALLOW_MEMORY_STORE;
   delete process.env.BOT_ALLOW_MEMORY_STORE; // simulate production memory_fallback (not allowed)

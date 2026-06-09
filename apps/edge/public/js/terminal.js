@@ -5482,6 +5482,108 @@ function _fleetManualCommandHint(sessionId) {
     + id + '&control=https%3A%2F%2Fswing-terminal-v6.netlify.app"';
 }
 
+// ── Cockpit cleanup helpers (spec B/C) ──────────────────────────────────────
+const _FLEET_TERMINAL_STATUSES = new Set(['stopped', 'expired']);
+
+function _fleetSessionCloseFailed(s) {
+  return Array.isArray(s && s.positionResults) && s.positionResults.some((p) => p && p.status === 'WORKER_CLOSE_FAILED');
+}
+
+// A session belongs in the collapsed "History / Stopped Sessions" drawer when it
+// is offline, flat (no open position), not close-failed, and either terminal
+// (stopped/expired) or a stale no-worker shell. These must never look like live risk.
+function _fleetIsHistorySession(s) {
+  if (!s) return false;
+  if (_fleetWorkerOnline(s)) return false;
+  if (_fleetOpenPositionCount(s) > 0) return false;
+  if (_fleetSessionCloseFailed(s)) return false;
+  return _FLEET_TERMINAL_STATUSES.has(s.status) || _fleetIsStaleNoWorker(s);
+}
+
+// Worker exited cleanly: terminal status, offline, flat, no failed close. Render
+// as a neutral note, not a red alarm (spec B.5).
+function _fleetExitedCleanly(s) {
+  return !!s && !_fleetWorkerOnline(s) && _fleetOpenPositionCount(s) === 0
+    && !_fleetSessionCloseFailed(s) && _FLEET_TERMINAL_STATUSES.has(s.status);
+}
+
+function _fleetClosedTrades(s) {
+  return Array.isArray(s && s.closedTrades) ? s.closedTrades : [];
+}
+
+// Most-recent closed trade across all visible sessions (for the global result card).
+function _fleetLatestClosedTrade(sessions) {
+  let best = null;
+  for (const s of (sessions || [])) {
+    for (const t of _fleetClosedTrades(s)) {
+      const ts = new Date(t && t.timeClosed || 0).getTime();
+      const norm = Number.isFinite(ts) ? ts : 0;
+      if (!best || norm > best._ts) best = Object.assign({}, t, { sessionId: s.sessionId, _ts: norm });
+    }
+  }
+  return best;
+}
+
+function _fleetFmtDuration(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return '—';
+  const s = Math.floor(n / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm ' + (s % 60) + 's';
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+}
+function _fmtPrice(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  if (n >= 1) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return n.toPrecision(6);
+}
+function _fmtQty(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  const s = n.toFixed(8);
+  return s.replace(/\.?0+$/, '') || '0';
+}
+function _fmtPnlUsd(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 'n/a';
+  return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2);
+}
+function _fmtPnlPct(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '';
+  return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+}
+
+// Build the green/neutral TRADE CLOSED result card markup (spec A.4 / state 5).
+function _fleetClosedTradeCardHtml(t, _e, opts) {
+  if (!t) return '';
+  const pnl = Number(t.realizedPnl);
+  const pnlColor = !Number.isFinite(pnl) ? '#8899aa' : pnl >= 0 ? '#00ff80' : '#ff6b6b';
+  const dust = Number(t.residualDust) > 0;
+  const statusLabel = t.status === 'CLOSED_WITH_DUST' ? 'CLOSED (dust left)' : 'CLOSED';
+  const showStart = opts && opts.showStartAgain;
+  return '<div class="fleet-result-card' + (dust ? ' fleet-result-card--dust' : '') + '">'
+    + '<div class="fleet-result-card__head">'
+    + '<span class="fleet-result-card__title">' + _e(t.symbol || 'TRADE') + ' CLOSED</span>'
+    + '<span class="fleet-result-card__pnl" style="color:' + pnlColor + '">' + _e(_fmtPnlUsd(t.realizedPnl))
+    + (Number.isFinite(Number(t.realizedPnlPct)) ? ' · ' + _e(_fmtPnlPct(t.realizedPnlPct)) : '') + '</span>'
+    + '</div>'
+    + '<div class="fleet-result-card__grid">'
+    + '<div><span>Entry → Exit</span><b>' + _e(_fmtPrice(t.entryAvgPrice)) + ' → ' + _e(_fmtPrice(t.closeAvgPrice)) + '</b></div>'
+    + '<div><span>Bought / Sold</span><b>' + _e(_fmtQty(t.boughtQty)) + ' / ' + _e(_fmtQty(t.soldQty)) + '</b></div>'
+    + '<div><span>Entry order</span><b>' + _e(t.entryOrderId || '—') + '</b></div>'
+    + '<div><span>Close order</span><b>' + _e(t.closeOrderId || '—') + '</b></div>'
+    + '<div><span>Duration</span><b>' + _e(_fleetFmtDuration(t.durationMs)) + '</b></div>'
+    + '<div><span>Status</span><b>' + _e(statusLabel) + '</b></div>'
+    + (dust ? '<div><span>Residual dust</span><b>' + _e(_fmtQty(t.residualDust)) + ' ' + _e((t.symbol || '').replace(/USDT$|USDC$/, '')) + '</b></div>' : '')
+    + (t.feesAvailable ? '' : '<div><span>Fees</span><b>unavailable / testnet</b></div>')
+    + '</div>'
+    + (showStart ? '<div class="fleet-action-row"><button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT AGAIN</button></div>' : '')
+    + '</div>';
+}
+
 function renderFleet() {
   const panel = _fleetEnsurePanel();
   if (!panel || !Fleet.data) return;
@@ -5490,6 +5592,11 @@ function renderFleet() {
   const clearedSessions = allSessions.filter((s) => s.status === 'cleared');
   const sessions = allSessions.filter((s) => s.status !== 'cleared');
   const staleSessions = sessions.filter(_fleetIsStaleNoWorker);
+  // Worker list cleanup (spec B): only live/at-risk sessions stay in the primary
+  // list; cleanly-stopped/stale shells drop into a collapsed history drawer so the
+  // cockpit is not crowded with old rows that look like active risk.
+  const historySessions = sessions.filter(_fleetIsHistorySession);
+  const activeSessions = sessions.filter((s) => !_fleetIsHistorySession(s));
   const sel = sessions.find((s) => s.sessionId === Fleet.selectedId) || null;
   const regime = data.lastRegime || (sel && sel.riskState) || null;
   const _e = (typeof _esc === 'function') ? _esc : ((x) => String(x == null ? '' : x));
@@ -5590,6 +5697,17 @@ function renderFleet() {
       + '</div>';
   }
 
+  // ── TRADE CLOSED result card (spec A.4 / state 5) ──
+  // Shown ONLY when no position is open anywhere: the operator gets a clean trade
+  // result (PnL, entry→exit, dust, duration) and START BOT AGAIN as the primary
+  // action — never a red panel after a successful close.
+  if (!anyOpenPosition) {
+    const latestClosed = _fleetLatestClosedTrade(sessions);
+    if (latestClosed) {
+      html += _fleetClosedTradeCardHtml(latestClosed, _e, { showStartAgain: newEntriesAllowed });
+    }
+  }
+
   const workerConnectOpenPosition = sel && !_fleetWorkerOnline(sel) && _fleetOpenPositionCount(sel) > 0;
   if (Fleet.workerConnectFailed) {
     html += '<div class="fleet-error-panel fleet-error-panel--connect">'
@@ -5616,9 +5734,13 @@ function renderFleet() {
 
   // Body: worker list + detail
   html += '<div class="fleet-body">';
-  html += '<div class="fleet-workers"><div class="fleet-col-title">WORKERS (' + sessions.length + ')</div>';
-  if (!sessions.length) html += '<div class="fleet-empty">No active sessions. Click START BOT.</div>';
-  for (const s of sessions) {
+  html += '<div class="fleet-workers"><div class="fleet-col-title">WORKERS (' + activeSessions.length + ')</div>';
+  if (!activeSessions.length) {
+    html += '<div class="fleet-empty">'
+      + (historySessions.length ? 'No active worker. Last worker exited cleanly — click START BOT to run again.' : 'No active sessions. Click START BOT.')
+      + '</div>';
+  }
+  for (const s of activeSessions) {
     const online = s.worker && s.worker.online;
     const openCountRow = Array.isArray(s.openPositions) ? s.openPositions.length : 0;
     const orphanRow = !online && openCountRow > 0;
@@ -5634,10 +5756,20 @@ function renderFleet() {
       + '<span class="fleet-worker__meta">' + _e((s.worker && s.worker.platform) || '—') + ' · ' + _e(s.status) + '</span>'
       + '</div>';
   }
-  if (clearedSessions.length) {
-    html += '<details class="fleet-history"><summary>CLEARED HISTORY (' + clearedSessions.length + ')</summary>';
+  // History / Stopped Sessions: collapsed, neutral (never red), out of the way.
+  const historyCount = historySessions.length + clearedSessions.length;
+  if (historyCount) {
+    html += '<details class="fleet-history"><summary>History / Stopped Sessions (' + historyCount + ')</summary>';
+    for (const s of historySessions.slice(0, 12)) {
+      const exitedClean = _fleetExitedCleanly(s);
+      const note = exitedClean ? 'exited cleanly' : (_fleetStaleLabel(s) || s.status || 'stopped');
+      html += '<div class="fleet-history__row fleet-history__row--btn" onclick="selectFleetSession(\'' + _e(s.sessionId) + '\')">'
+        + '<span class="fleet-dot" style="background:#5a6b7a"></span>'
+        + '<span>' + _e((s.sessionId || '').slice(0, 12)) + '</span>'
+        + '<b>' + _e(note) + '</b></div>';
+    }
     for (const s of clearedSessions.slice(0, 10)) {
-      html += '<div class="fleet-history__row"><span>' + _e((s.sessionId || '').slice(0, 12)) + '</span><b>' + _e(s.clearedReason || 'cleared') + '</b></div>';
+      html += '<div class="fleet-history__row"><span class="fleet-dot" style="background:#5a6b7a"></span><span>' + _e((s.sessionId || '').slice(0, 12)) + '</span><b>' + _e(s.clearedReason || 'cleared') + '</b></div>';
     }
     html += '</details>';
   }
@@ -5662,6 +5794,10 @@ function renderFleet() {
     html += '<div class="fleet-state" style="color:' + stateColor + '">' + _e(stateText) + '</div>';
     const detailProgress = _fleetCloseProgress(sel);
     if (detailProgress) html += '<div class="fleet-progress">' + _e(detailProgress) + '</div>';
+    // Neutral (not red) confirmation for a worker that finished and exited (spec B.5).
+    if (_fleetExitedCleanly(sel)) {
+      html += '<div class="fleet-clean-exit">Last worker exited cleanly — no open position. START BOT to run again.</div>';
+    }
     if (orphanOpen) {
       html += '<div class="fleet-orphan-warning">'
         + '<b>WORKER OFFLINE &mdash; POSITION OPEN</b> The position is still held on Binance Spot Testnet. '
@@ -5772,8 +5908,38 @@ function renderFleet() {
     else {
       html += '<table class="fleet-table"><thead><tr><th>Symbol</th><th>Qty</th><th>Status</th><th>Order</th><th>Close</th></tr></thead><tbody>';
       for (const p of positions.slice(0, 10)) {
-        const sc = p.status === 'WORKER_CLOSE_FAILED' ? '#ff4a4a' : p.status === 'closed' ? '#8899aa' : '#00ff80';
+        const sc = p.status === 'WORKER_CLOSE_FAILED' ? '#ff4a4a' : (p.status === 'closed' || p.status === 'CLOSED_WITH_DUST') ? '#8899aa' : '#00ff80';
         html += '<tr><td>' + _e(p.symbol) + '</td><td>' + _e(p.executedQty || '—') + '</td><td style="color:' + sc + '">' + _e(p.status) + '</td><td>' + _e(p.orderId || '—') + '</td><td>' + _e(p.closeOrderId || '—') + '</td></tr>';
+      }
+      html += '</tbody></table>';
+    }
+
+    // ── Closed-trade ledger (spec C) ──
+    // Latest closed trade as a result card, full history in the table below.
+    const ledger = _fleetClosedTrades(sel);
+    if (ledger.length) {
+      html += '<div class="fleet-section-title">CLOSED TRADES (' + ledger.length + ')</div>';
+      const latest = ledger.slice().sort((a, b) => new Date(b.timeClosed || 0) - new Date(a.timeClosed || 0))[0];
+      html += _fleetClosedTradeCardHtml(latest, _e, { showStartAgain: false });
+      html += '<table class="fleet-table fleet-ledger"><thead><tr>'
+        + '<th>Closed</th><th>Sym</th><th>Side</th><th>Entry</th><th>Exit</th><th>Bought</th><th>Sold</th><th>Dust</th><th>PnL $</th><th>PnL %</th><th>Status</th>'
+        + '</tr></thead><tbody>';
+      for (const t of ledger.slice().sort((a, b) => new Date(b.timeClosed || 0) - new Date(a.timeClosed || 0)).slice(0, 20)) {
+        const pnl = Number(t.realizedPnl);
+        const pc = !Number.isFinite(pnl) ? '#8899aa' : pnl >= 0 ? '#00ff80' : '#ff6b6b';
+        html += '<tr>'
+          + '<td>' + _e(t.timeClosed ? new Date(t.timeClosed).toLocaleTimeString() : '—') + '</td>'
+          + '<td>' + _e(t.symbol || '—') + '</td>'
+          + '<td>' + _e(t.side || 'LONG') + '</td>'
+          + '<td>' + _e(_fmtPrice(t.entryAvgPrice)) + '</td>'
+          + '<td>' + _e(_fmtPrice(t.closeAvgPrice)) + '</td>'
+          + '<td>' + _e(_fmtQty(t.boughtQty)) + '</td>'
+          + '<td>' + _e(_fmtQty(t.soldQty)) + '</td>'
+          + '<td>' + (Number(t.residualDust) > 0 ? _e(_fmtQty(t.residualDust)) : '—') + '</td>'
+          + '<td style="color:' + pc + '">' + _e(_fmtPnlUsd(t.realizedPnl)) + '</td>'
+          + '<td style="color:' + pc + '">' + _e(_fmtPnlPct(t.realizedPnlPct)) + '</td>'
+          + '<td>' + _e(t.status) + '</td>'
+          + '</tr>';
       }
       html += '</tbody></table>';
     }
