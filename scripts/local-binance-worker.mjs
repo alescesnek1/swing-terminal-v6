@@ -91,6 +91,14 @@ const MISSING_SESSION_EXIT_MS = 60000;
 const BINANCE_TESTNET_BASE_URL = 'https://testnet.binance.vision/api';
 const BINANCE_LIVE_SPOT_BASE_URL = 'https://api.binance.com/api';
 const LIVE_SPOT_ACK_TEXT = 'I_UNDERSTAND_REAL_MONEY_RISK';
+// Hard live-preflight ceilings. These are independent assertions on the risk caps
+// the worker actually enforces (liveRiskCaps reads the same LIVE_* env). Preflight
+// FAILS if the configured caps exceed these, so a misconfigured machine can never
+// pass preflight and then place oversized live orders.
+const LIVE_PREFLIGHT_MAX_POSITION_USD = 10;
+const LIVE_PREFLIGHT_MAX_DAILY_LOSS_USD = 5;
+const LIVE_PREFLIGHT_MAX_DAILY_TRADES = 3;
+const LIVE_PREFLIGHT_ALLOWED_SYMBOL = 'BTCUSDT';
 const LIVE_PREFLIGHT_MAX_AGE_MS = Number(process.env.LIVE_PREFLIGHT_MAX_AGE_MS) || 60 * 60 * 1000;
 const LIVE_PREFLIGHT_FILE = path.join(REPO_ROOT, '.paperbot-live-spot-preflight.json');
 const SPOT_ONLY_FORBIDDEN_RE = /\/sapi|\/fapi|\/dapi|withdraw|margin|leverage|borrow|repay|marginType|isolated|cross/i;
@@ -101,7 +109,13 @@ const SPOT_ONLY_ALLOWED = new Set([
   'GET /v3/ticker/price',
 ]);
 
-const isPreflight = process.argv.includes('--preflight') || process.env.WORKER_PREFLIGHT === 'true';
+// --live-preflight is a one-shot live readiness check. It must be parsed BEFORE
+// session validation and before the main loop: it never requires --session, never
+// sends a heartbeat, never polls worker-session, never starts a setInterval, and
+// never submits an order. It only validates env gates + the live Spot account and
+// exits 0 (PASS) or 1 (FAIL). It is a strict subset of preflight mode.
+const isLivePreflight = process.argv.includes('--live-preflight') || process.env.WORKER_LIVE_PREFLIGHT === 'true';
+const isPreflight = process.argv.includes('--preflight') || isLivePreflight || process.env.WORKER_PREFLIGHT === 'true';
 
 // Terminal UX: after a CLEAN success (positions closed, exit 0) the worker should
 // not leave the operator staring at a window that feels stuck. Default behaviour
@@ -1127,10 +1141,11 @@ async function reportLivePreflightResult(result) {
 }
 
 async function runPreflight() {
-  const modeLabel = isLiveSpot ? 'Live Spot' : 'Spot Testnet';
+  const livePreflight = isLiveSpot || isLivePreflight;
+  const modeLabel = livePreflight ? 'Live Spot' : 'Spot Testnet';
   console.log(`[PREFLIGHT] Binance ${modeLabel} preflight...`);
   try {
-    if (isLiveSpot) {
+    if (livePreflight) {
       const env = liveEnvGateSnapshot();
       const missing = [];
       if (env.workerMode !== 'live_spot') missing.push('WORKER_MODE=live_spot');
@@ -1140,6 +1155,16 @@ async function runPreflight() {
       if (!env.liveSpotAck) missing.push(`LIVE_SPOT_ACK="${LIVE_SPOT_ACK_TEXT}"`);
       if (!env.localConfirm) missing.push('LOCAL_WORKER_LIVE_CONFIRM=true');
       if (getBinanceBaseUrl() !== BINANCE_LIVE_SPOT_BASE_URL) missing.push('live base URL mismatch');
+      // Risk-cap ceilings: validate the *enforced* caps (liveRiskCaps reads the same
+      // LIVE_* env that gates real orders). For the symbol allowlist, validate the
+      // raw env so a longer list can't slip through the maxSymbols clamp.
+      const caps = liveRiskCaps();
+      const rawAllowedSymbols = String(process.env.LIVE_ALLOWED_SYMBOLS || LIVE_PREFLIGHT_ALLOWED_SYMBOL)
+        .split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+      if (!(caps.maxPositionUsd > 0 && caps.maxPositionUsd <= LIVE_PREFLIGHT_MAX_POSITION_USD)) missing.push(`LIVE_MAX_POSITION_USD must be > 0 and <= ${LIVE_PREFLIGHT_MAX_POSITION_USD}`);
+      if (!(caps.maxDailyLossUsd > 0 && caps.maxDailyLossUsd <= LIVE_PREFLIGHT_MAX_DAILY_LOSS_USD)) missing.push(`LIVE_MAX_DAILY_LOSS_USD must be > 0 and <= ${LIVE_PREFLIGHT_MAX_DAILY_LOSS_USD}`);
+      if (!(caps.maxDailyTrades > 0 && caps.maxDailyTrades <= LIVE_PREFLIGHT_MAX_DAILY_TRADES)) missing.push(`LIVE_MAX_DAILY_TRADES must be > 0 and <= ${LIVE_PREFLIGHT_MAX_DAILY_TRADES}`);
+      if (!(rawAllowedSymbols.length === 1 && rawAllowedSymbols[0] === LIVE_PREFLIGHT_ALLOWED_SYMBOL)) missing.push(`LIVE_ALLOWED_SYMBOLS must be exactly ${LIVE_PREFLIGHT_ALLOWED_SYMBOL}`);
       if (missing.length) {
         const fail = { ok: false, checkedAt: new Date().toISOString(), reason: missing.join('; '), spotOnlyPolicy: true };
         fs.writeFileSync(LIVE_PREFLIGHT_FILE, JSON.stringify(fail, null, 2));
@@ -1179,7 +1204,7 @@ async function runPreflight() {
       spotOnlyPolicy: true,
       baseUrl: getBinanceBaseUrl(),
     };
-    if (isLiveSpot) {
+    if (livePreflight) {
       fs.writeFileSync(LIVE_PREFLIGHT_FILE, JSON.stringify(result, null, 2));
       await reportLivePreflightResult(result);
       console.log(result.ok ? 'LIVE PREFLIGHT PASS' : 'LIVE PREFLIGHT FAIL');
@@ -1289,6 +1314,8 @@ export {
   validateLiveIntentGate,
   liveRiskCaps,
   readLivePreflight,
+  runPreflight,
+  isLivePreflight,
   STATE_FILE,
   LIVE_PREFLIGHT_FILE,
   LOG_FILE,

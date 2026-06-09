@@ -19,5 +19,6 @@ Thumbs.db
 .env.worker
 .paperbot-worker-state.json
 .paperbot-worker-state*.json
+.paperbot-live-spot-preflight.json
 logs/local-binance-worker.log
 logs/local-binance-worker.err.log
