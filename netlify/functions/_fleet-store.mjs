@@ -47,6 +47,8 @@ function emptyFleet() {
     liveAuditEvents: [],   // immutable live_spot action ring, no secrets
     livePreflight: null,   // sanitized latest local-worker live preflight result
     globalKillSwitch: false,
+    liveSafetyLock: null,  // { active, sessionId, reason, since } — set after a failed live close, cleared on reconciliation
+
     lastRegime: null,     // { regime, entriesAllowed, reason[], metrics, updatedAt }
     updatedAt: null,
   };

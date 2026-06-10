@@ -79,7 +79,7 @@ async function call(req) {
   return { status: res.status, json };
 }
 
-async function postPreflight(ok) {
+async function postPreflight(ok, balances = { BTC: '0', USDC: '20' }) {
   return call(workerReq('POST', '/api/bot/live-preflight-result', {
     ok,
     checkedAt: new Date().toISOString(),
@@ -87,7 +87,7 @@ async function postPreflight(ok) {
     canTradeSpot: true,
     accountType: 'SPOT',
     permissions: ['SPOT'],
-    balances: { BTC: '0', USDC: '20' },
+    balances,
     spotOnlyPolicy: true,
   }));
 }
@@ -235,6 +235,68 @@ test('live intent rejects a session that is not live_spot', async () => {
     sessionId: 'session_does_not_exist', symbol: 'BTCUSDC', positionUsd: 6,
   }));
   assert.equal(res.status, 404);
+});
+
+test('free USDC 4.49 blocks a $6 live intent with the exact insufficient-balance message', async () => {
+  // Fresh preflight account snapshot reports only 4.49147530 free USDC.
+  const pf = await postPreflight(true, { BTC: '0.00008991', USDC: '4.49147530' });
+  assert.equal(pf.status, 200);
+  const res = await call(adminReq('POST', '/api/bot/create-live-execution-intent', {
+    sessionId: SID, symbol: 'BTCUSDC', positionUsd: 6,
+  }));
+  assert.equal(res.status, 409);
+  assert.equal(res.json.error, 'Insufficient USDC balance. Required 6, available 4.49147530.');
+});
+
+test('free USDC 10 allows a $6 live intent (sufficient balance)', async () => {
+  const pf = await postPreflight(true, { BTC: '0.00008991', USDC: '10' });
+  assert.equal(pf.status, 200);
+  const res = await call(adminReq('POST', '/api/bot/create-live-execution-intent', {
+    sessionId: SID, symbol: 'BTCUSDC', positionUsd: 6,
+  }));
+  assert.equal(res.status, 200);
+  assert.equal(res.json.ok, true);
+  // Restore the default healthy preflight for any later runs.
+  await postPreflight(true);
+});
+
+test('a failed live close engages the live safety lock and blocks new live intents until reconciliation', async () => {
+  const failOrderId = 'live-closefail-ord-1';
+  // Open a live position, then report a worker close failure.
+  await call(workerReq('POST', '/api/bot/position-result', {
+    sessionId: SID, symbol: 'BTCUSDC', baseAsset: 'BTC', executedQty: '0.00010000', orderId: failOrderId, status: 'open', mode: 'live_spot',
+  }));
+  const fail = await call(workerReq('POST', '/api/bot/position-result', {
+    sessionId: SID, symbol: 'BTCUSDC', baseAsset: 'BTC', executedQty: '0.00010000', orderId: failOrderId,
+    status: 'WORKER_CLOSE_FAILED', error: 'Account has insufficient balance', mode: 'live_spot',
+  }));
+  assert.equal(fail.status, 200);
+  let fleet = await call(adminReq('GET', '/api/bot/fleet'));
+  assert.equal(fleet.json.liveReadiness.liveSafetyLockActive, true, 'safety lock engaged after failed close');
+
+  // Resuming entries clears the session pause but must NOT clear the safety lock —
+  // only reconciliation does. The new intent is then blocked by the lock itself.
+  await call(adminReq('POST', `/api/bot/session/${SID}/resume`));
+  fleet = await call(adminReq('GET', '/api/bot/fleet'));
+  assert.equal(fleet.json.liveReadiness.liveSafetyLockActive, true, 'resume does not clear the safety lock');
+
+  const blocked = await call(adminReq('POST', '/api/bot/create-live-execution-intent', {
+    sessionId: SID, symbol: 'BTCUSDC', positionUsd: 6,
+  }));
+  assert.equal(blocked.status, 409);
+  assert.match(blocked.json.error, /locked after a failed live close|reconcile/i);
+
+  // Reconcile the position to CLOSED_WITH_DUST → clears the lock and openPositions.
+  const recon = await call(workerReq('POST', '/api/bot/position-result', {
+    sessionId: SID, symbol: 'BTCUSDC', baseAsset: 'BTC', executedQty: '0', orderId: failOrderId, entryOrderId: failOrderId,
+    closeOrderId: null, status: 'CLOSED_WITH_DUST', mode: 'live_spot',
+    boughtQty: 0.0001, soldQty: 0, residualDust: 0.00008991, closeReason: 'DUST_ONLY_CLOSE_NOT_POSSIBLE',
+  }));
+  assert.equal(recon.status, 200);
+  fleet = await call(adminReq('GET', '/api/bot/fleet'));
+  assert.equal(fleet.json.liveReadiness.liveSafetyLockActive, false, 'reconciled close clears the safety lock');
+  const sess = fleet.json.sessions.find((s) => s.sessionId === SID);
+  assert.equal(sess.openPositions.length, 0, 'openPositions becomes 0 after dust reconciliation');
 });
 
 test('create-live-execution-intent source enforces durable store, allowLive, and explicit live intent fields', () => {

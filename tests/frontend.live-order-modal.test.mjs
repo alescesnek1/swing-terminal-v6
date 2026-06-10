@@ -166,6 +166,62 @@ test('live button is hidden when the live cap is below the buffered minimum spen
   assert.match(terminalJs, /below the minimum live spend/);
 });
 
+test('live button is hidden/blocked when free quote balance is below the required spend', () => {
+  // Source-level guard (spec 1 + 8): the render branch compares the fresh preflight
+  // free quote balance against the required spend and surfaces the exact message.
+  assert.match(terminalJs, /live\.preflight && live\.preflight\.balances/);
+  assert.match(terminalJs, /haveFreeQuote && freeQuoteNum < requiredSpend/);
+  assert.match(terminalJs, /'Insufficient ' \+ liveQuote \+ ' balance\. Required ' \+ requiredSpend \+ ', available ' \+ freeQuoteRaw \+ '\.'/);
+});
+
+// Behavioral check: render the live action branch in a sandbox and assert that an
+// underfunded account hides the CREATE LIVE button and shows the exact insufficient
+// message, while a funded account shows the button.
+function renderLiveActionBranch({ usdc, cap = 6, min = 6 }) {
+  // Extract just the live-order block (from `if (selLive) {` to the matching close)
+  // and evaluate it with a minimal sandbox that captures `html`.
+  const marker = 'if (selLive) {';
+  const start = terminalJs.indexOf(marker);
+  assert.notEqual(start, -1, 'live branch exists');
+  let depth = 0; let end = -1;
+  for (let i = terminalJs.indexOf('{', start); i < terminalJs.length; i += 1) {
+    if (terminalJs[i] === '{') depth += 1;
+    else if (terminalJs[i] === '}') { depth -= 1; if (depth === 0) { end = i + 1; break; } }
+  }
+  const branch = terminalJs.slice(start, end);
+  const ctx = {
+    html: '',
+    _esc: (v) => String(v == null ? '' : v),
+    data: { isAdmin: true },
+    live: {
+      caps: { allowedSymbols: ['BTCUSDC'], maxPositionUsd: cap, minPositionUsd: min },
+      preflightPassed: true, durable: true, state: 'LIVE READY - MICRO CAPS', allowLive: true,
+      preflight: { balances: { USDC: usdc } },
+    },
+    sel: { stopRequested: false },
+    selLive: true,
+    newEntriesAllowed: true, anyOpenPosition: false, smokeOpenCount: 0,
+    online: true, canStop: true, globalKillActive: false, sessionPaused: false, entriesAllowed: true,
+    Fleet: { liveOrderResult: null },
+  };
+  // The branch references these locals; provide them on the context.
+  ctx.sel.openPositions = [];
+  vm.runInNewContext(`(function(){ var smokeOpenCount = ${0}; ${branch.replace(/^if \(selLive\) \{/, '').replace(/\}$/, '')} })()`, ctx);
+  return ctx.html;
+}
+
+test('underfunded live account hides the CREATE LIVE button and shows the exact message', () => {
+  const html = renderLiveActionBranch({ usdc: '4.49147530' });
+  assert.doesNotMatch(html, /CREATE LIVE/);
+  assert.match(html, /Insufficient USDC balance\. Required 6, available 4\.49147530\./);
+});
+
+test('funded live account renders the CREATE LIVE button', () => {
+  const html = renderLiveActionBranch({ usdc: '10' });
+  assert.match(html, /CREATE LIVE BTCUSDC ORDER/);
+  assert.doesNotMatch(html, /Insufficient USDC balance/);
+});
+
 test('a dust-closed session shows no open position (no CLOSE REQUIRED) and a dust card', () => {
   // CLOSE REQUIRED is driven by _fleetOpenPositionCount > 0; a dust close leaves 0.
   const fn = vm.runInNewContext(`${extractFunctionSource('_fleetOpenPositionCount')}; _fleetOpenPositionCount`);

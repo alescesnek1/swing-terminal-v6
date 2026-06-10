@@ -800,14 +800,19 @@ async function getTickerPrice(symbol) {
   return parseFloat(data.price);
 }
 
-// Read the ACTUAL free balance of a base asset from the live account. Used before
-// every live close so we never try to sell more than the account holds (the BUY
-// fee is taken in base asset, leaving free < executedQty).
-async function getFreeBaseBalance(baseAsset) {
+// Read the ACTUAL free balance of any asset from the live account. Used before a
+// live close (base asset) so we never sell more than the account holds, and before
+// a live BUY (quote asset) so we never submit an order the account cannot fund.
+async function getFreeAssetBalance(asset) {
   const data = await binanceFetch('/v3/account', { signed: true });
-  const bal = (data && Array.isArray(data.balances) ? data.balances : []).find((b) => b && b.asset === baseAsset);
+  const bal = (data && Array.isArray(data.balances) ? data.balances : []).find((b) => b && b.asset === asset);
   const free = bal ? Number(bal.free) : 0;
   return Number.isFinite(free) && free > 0 ? free : 0;
+}
+// Base-asset balance for the live close path (the BUY fee is taken in base asset,
+// leaving free < executedQty).
+async function getFreeBaseBalance(baseAsset) {
+  return getFreeAssetBalance(baseAsset);
 }
 
 // Deterministic close errors that must NOT trigger the retry loop: the same SELL
@@ -903,6 +908,18 @@ async function executeIntent(intent, config, riskState, session = null, control 
     if (notional) {
       const minNotional = parseFloat(notional.minNotional);
       if (qty * price < minNotional) throw new Error(`Order size ${qty * price} < minNotional ${minNotional}`);
+    }
+
+    // LIVE: independently re-check the ACTUAL free quote balance against the spend
+    // before submitting a real order (spec 3). The control plane already rejected on
+    // its preflight snapshot, but the worker is the source of truth at order time and
+    // must never submit a BUY the account cannot fund. Reject cleanly, no order.
+    if (isLiveSpot) {
+      const freeQuote = await getFreeAssetBalance(quoteAsset);
+      if (!(freeQuote >= posUsd)) {
+        await reject(`Insufficient ${quoteAsset} balance. Required ${posUsd}, available ${freeQuote}.`);
+        return;
+      }
     }
 
     const modeLabel = isLiveSpot ? 'LIVE SPOT REAL MONEY' : 'TESTNET';

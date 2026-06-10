@@ -1168,6 +1168,28 @@ function livePreflightFresh(fleet) {
   return Number.isFinite(at) && Date.now() - at <= LIVE_PREFLIGHT_MAX_AGE_MS;
 }
 
+// Free balance of a quote asset (USDC/USDT) from the latest live preflight account
+// snapshot (the worker reports GET /v3/account balances via /live-preflight-result).
+// This is the "fresh worker/account preflight data" the live intent gate uses to
+// reject a BUY whose spend exceeds the available free quote balance — without the
+// control plane itself holding Binance keys. Returns { raw, value }: `raw` is the
+// original string (preserves trailing precision for the UI message), `value` is the
+// finite numeric balance, or null when no snapshot is available.
+// True while a live close has failed and not yet reconciled. Blocks new live BUY
+// intents (spec 7) until a settled close clears fleet.liveSafetyLock.
+function liveSafetyLockActive(fleet) {
+  return !!(fleet && fleet.liveSafetyLock && fleet.liveSafetyLock.active === true);
+}
+
+function liveFreeQuoteBalance(fleet, quoteAsset) {
+  const pf = fleet && fleet.livePreflight;
+  const balances = pf && pf.balances && typeof pf.balances === 'object' ? pf.balances : null;
+  const raw = balances ? balances[quoteAsset] : undefined;
+  if (raw === undefined || raw === null || raw === '') return { raw: null, value: null };
+  const value = Number(raw);
+  return { raw: String(raw), value: Number.isFinite(value) ? value : null };
+}
+
 function liveReadiness(fleet, identity) {
   const storeInfo = fleetStoreInfo();
   const env = liveEnvStatus();
@@ -1194,6 +1216,8 @@ function liveReadiness(fleet, identity) {
     allowLive: userConfig.allowLive === true,
     preflight: fleet.livePreflight || null,
     globalKillSwitchActive: env.globalKillSwitch || fleet.globalKillSwitch === true,
+    liveSafetyLockActive: liveSafetyLockActive(fleet),
+    liveSafetyLock: fleet.liveSafetyLock || null,
     canStartLive: readyToConfirm,
     // True when readiness is fully met but the user has not yet consented
     // (allowLive=false): the modal will both enable live trading and start.
@@ -1987,6 +2011,31 @@ async function handleFleetWorker(req, base, body) {
         sessionId, symbol: record.symbol, qty: record.executedQty, orderId: record.closeOrderId || record.orderId,
         result: record.error || (dustOnly ? 'DUST_ONLY_CLOSE_NOT_POSSIBLE' : record.status), workerId: body.workerId,
       });
+      // ── Live safety lock (spec 7) ──
+      // A failed live close leaves real exposure on the account. Pause this session's
+      // entries AND raise a live safety lock so no new live BUY intent can be created
+      // until the position reconciles. A subsequent settled close (CLOSED /
+      // CLOSED_WITH_DUST) for the same session clears the lock.
+      if (record.status === 'WORKER_CLOSE_FAILED') {
+        session.pauseRequested = true;
+        fleet.liveSafetyLock = {
+          active: true,
+          sessionId,
+          reason: `live close failed for ${record.symbol}: ${record.error || 'unknown error'}`,
+          since: new Date().toISOString(),
+        };
+        fevent(fleet, 'LIVE_SAFETY_LOCK_ENGAGED', 'warn',
+          `Live entries locked after a failed live close of ${record.symbol}. Reconcile the open position before any new live order.`,
+          { sessionId, ownerUserId: session.ownerUserId });
+        liveAudit(fleet, null, 'LIVE_SAFETY_LOCK_ENGAGED', { sessionId, symbol: record.symbol, result: record.error || 'WORKER_CLOSE_FAILED', workerId: body.workerId });
+      } else if (CLOSED_POSITION_STATUSES.has(record.status)
+        && fleet.liveSafetyLock && fleet.liveSafetyLock.active === true && fleet.liveSafetyLock.sessionId === sessionId) {
+        fleet.liveSafetyLock = { active: false, sessionId, clearedAt: new Date().toISOString(), clearedBy: record.status };
+        fevent(fleet, 'LIVE_SAFETY_LOCK_CLEARED', 'info',
+          `Live safety lock cleared: ${record.symbol} reconciled to ${record.status}.`,
+          { sessionId, ownerUserId: session.ownerUserId });
+        liveAudit(fleet, null, 'LIVE_SAFETY_LOCK_CLEARED', { sessionId, symbol: record.symbol, result: record.status, workerId: body.workerId });
+      }
     }
     return json(req, { ok: true });
   }
@@ -2475,6 +2524,11 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     const todayStart = new Date(); todayStart.setUTCHours(0, 0, 0, 0);
     const todayTrades = closed.filter((t) => new Date(t.timeClosed || 0).getTime() >= todayStart.getTime());
     const todayLoss = todayTrades.reduce((n, t) => n + Math.max(0, -(Number(t.realizedPnl) || 0)), 0);
+    // Reject before creating the intent when the live account does not hold enough
+    // free quote balance (USDC/USDT) to fund this spend. Source is the fresh worker
+    // preflight account snapshot — the control plane never holds Binance keys.
+    const quoteAsset = symbol.endsWith('USDC') ? 'USDC' : 'USDT';
+    const freeQuote = liveFreeQuoteBalance(fleet, quoteAsset);
     const checks = [
       { ok: readiness.state === 'LIVE READY - MICRO CAPS', reason: readiness.state },
       { ok: fleetStoreInfo().durable, reason: 'durable store is required' },
@@ -2483,6 +2537,8 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       { ok: caps.allowedSymbols.includes(symbol), reason: 'symbol is not allowlisted' },
       { ok: positionUsd >= caps.minPositionUsd, reason: `positionUsd ${positionUsd} below live minimum ${caps.minPositionUsd} (minNotional ${LIVE_ASSUMED_MIN_NOTIONAL_USD} + ${liveMinNotionalBufferPct()}% buffer)` },
       { ok: positionUsd > 0 && positionUsd <= maxUsd, reason: `positionUsd exceeds live cap ${maxUsd}` },
+      { ok: freeQuote.value == null || freeQuote.value >= positionUsd, reason: `Insufficient ${quoteAsset} balance. Required ${positionUsd}, available ${freeQuote.raw}.` },
+      { ok: !liveSafetyLockActive(fleet), reason: 'live entries locked after a failed live close — reconcile the open position first' },
       { ok: sessionOpenPositions(fleet, sessionId).length < caps.maxOpenPositions, reason: `max open live positions (${caps.maxOpenPositions}) reached` },
       { ok: todayLoss < caps.maxDailyLossUsd, reason: `daily realized loss cap reached (${todayLoss}/${caps.maxDailyLossUsd})` },
       { ok: todayTrades.length < caps.maxDailyTrades, reason: `daily trade cap reached (${todayTrades.length}/${caps.maxDailyTrades})` },

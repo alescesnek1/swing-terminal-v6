@@ -6241,6 +6241,14 @@ function renderFleet() {
       const liveMin = Number(caps.minPositionUsd) || 0;
       const preflightOk = live.preflightPassed === true || live.preflightFresh === true;
       const liveAllowed = live.allowLive === true || (data.config && data.config.allowLive === true);
+      // Required spend = the live cap (the modal spends caps.maxPositionUsd). Free
+      // quote balance comes from the fresh worker preflight account snapshot.
+      const liveQuote = liveSymbol ? (liveSymbol.endsWith('USDC') ? 'USDC' : 'USDT') : 'USDC';
+      const requiredSpend = liveCap > 0 ? liveCap : liveMin;
+      const liveBalances = (live.preflight && live.preflight.balances) || {};
+      const freeQuoteRaw = liveBalances[liveQuote];
+      const freeQuoteNum = Number(freeQuoteRaw);
+      const haveFreeQuote = freeQuoteRaw != null && freeQuoteRaw !== '' && Number.isFinite(freeQuoteNum);
       let liveBlockedReason = '';
       if (!data.isAdmin) liveBlockedReason = 'Live order hidden: admin only.';
       else if (!newEntriesAllowed || live.durable === false) liveBlockedReason = 'Live order hidden: control state is not durable.';
@@ -6250,11 +6258,13 @@ function renderFleet() {
       else if (!online) liveBlockedReason = 'Live order hidden: local worker is offline.';
       else if (!canStop || sel.stopRequested) liveBlockedReason = 'Live order hidden: session is stopping.';
       else if (globalKillActive) liveBlockedReason = 'Live order hidden: global kill switch is active.';
+      else if (live.liveSafetyLockActive === true) liveBlockedReason = 'Live order hidden: live entries locked after a failed live close — reconcile first.';
       else if (sessionPaused) liveBlockedReason = 'Live order hidden: entries are paused for this session.';
       else if (!entriesAllowed) liveBlockedReason = 'Live order hidden: market regime blocks entries.';
       else if (!liveSymbol) liveBlockedReason = 'Live order hidden: exactly one allowed symbol is required.';
       else if (!(liveCap > 0)) liveBlockedReason = 'Live order hidden: live position cap is not set.';
       else if (liveMin > 0 && liveCap < liveMin) liveBlockedReason = 'Live order hidden: live cap $' + liveCap + ' is below the minimum live spend $' + liveMin + ' (raise BOT_MAX_POSITION_USD / LIVE_MAX_POSITION_USD).';
+      else if (haveFreeQuote && freeQuoteNum < requiredSpend) liveBlockedReason = 'Insufficient ' + liveQuote + ' balance. Required ' + requiredSpend + ', available ' + freeQuoteRaw + '.';
       if (!liveBlockedReason) {
         const quote = liveSymbol.endsWith('USDC') ? 'USDC' : 'USDT';
         html += '<div class="fleet-smoke fleet-live-order">'
