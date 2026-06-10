@@ -12,7 +12,7 @@ import { scoreCandidate, scoreUniverse } from '../scripts/auto/auto-scorer.mjs';
 import { evaluateEntryGates } from '../scripts/auto/auto-risk.mjs';
 import { evaluateExit } from '../scripts/auto/auto-exit-manager.mjs';
 import { decideEntry, buildEntryIntent } from '../scripts/auto/auto-strategy.mjs';
-import { evaluateAutoTrader } from '../scripts/auto/auto-trader.mjs';
+import { evaluateAutoTrader, evaluateAutoTraderWithFallback } from '../scripts/auto/auto-trader.mjs';
 import { fetchBinancePublicUniverse } from '../scripts/auto/binance-public.mjs';
 
 const FULL_LIVE_ENV = {
@@ -293,4 +293,35 @@ test('21. binance-public fetcher uses only allowed endpoints and builds correct 
   } finally {
     global.fetch = originalFetch;
   }
+});
+
+// 22. orchestrator correctly falls back to public fetch if scanner is empty or filtered
+test('22. evaluateAutoTraderWithFallback attempts public fetch and captures diagnostics', async () => {
+  const envShadow = { AUTO_TRADER_ENABLED: 'true', AUTO_TRADER_MODE: 'shadow' };
+
+  // Case 1: Scanner non-empty but all filtered -> fallback triggered
+  const fetchMock1 = async () => ([
+    { symbol: 'ETHUSDC', volume24hUsd: 10000000, spreadPct: 0.01, status: 'TRADING', baseAsset: 'ETH', quoteAsset: 'USDC' }
+  ]);
+  const marketsFiltered = [{ symbol: 'BTCUSDT', volume24hUsd: 10, spreadPct: 1, status: 'TRADING' }]; // will be filtered
+  const res1 = await evaluateAutoTraderWithFallback({ env: envShadow, markets: marketsFiltered, caps: CAPS, fleet: HEALTHY_FLEET }, fetchMock1);
+  assert.equal(res1.out.diagnostics.publicFetchAttempted, true, 'attempted public fetch');
+  assert.equal(res1.out.diagnostics.publicFetchOk, true, 'public fetch ok');
+  assert.equal(res1.out.diagnostics.dataSource, 'binance_public', 'switched to public data');
+  assert.equal(res1.out.candidate.symbol, 'ETHUSDC');
+
+  // Case 2: Scanner empty -> fallback triggered
+  const res2 = await evaluateAutoTraderWithFallback({ env: envShadow, markets: [], caps: CAPS, fleet: HEALTHY_FLEET }, fetchMock1);
+  assert.equal(res2.out.diagnostics.publicFetchAttempted, true);
+  assert.equal(res2.out.candidate.symbol, 'ETHUSDC');
+
+  // Case 3: Public fetch fails -> fallback to allowlist
+  const fetchMockFail = async () => { throw new Error('fetch error'); };
+  const res3 = await evaluateAutoTraderWithFallback({ env: envShadow, markets: [], caps: CAPS, fleet: HEALTHY_FLEET }, fetchMockFail);
+  assert.equal(res3.out.diagnostics.publicFetchAttempted, true);
+  assert.equal(res3.out.diagnostics.publicFetchOk, false);
+  assert.equal(res3.out.diagnostics.fetchError, 'fetch error');
+  assert.equal(res3.out.diagnostics.dataSource, 'fallback');
+  assert.equal(res3.out.candidate.symbol, 'BTCUSDC');
+  assert.ok(res3.out.candidate.riskFlags.includes('FALLBACK_ALLOWLIST_SYMBOL'));
 });

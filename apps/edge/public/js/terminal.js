@@ -6351,8 +6351,11 @@ function renderFleet() {
     const isFallback = ud.fallbackUsed || ud.dataSource === 'fallback';
     const fetchErrorHtml = ud.fetchError ? '<li style="color:var(--rd);">Fetch Error: ' + _esc(ud.fetchError) + '</li>' : '';
     
+    const pubFetchHtml = ud.publicFetchAttempted ? '<li style="color:var(--yw);">Public Fetch: ' + (ud.publicFetchOk ? 'OK (' + ud.publicFetchCount + ' in ' + ud.publicFetchMs + 'ms)' : 'FAILED (' + ud.publicFetchMs + 'ms)') + '</li>' : '';
+    
     diagnosticsHtml = '<div><span>Diagnostics</span><ul>'
       + '<li>Source: <b>' + _esc(ud.dataSource) + '</b>' + (isFallback ? ' <span style="color:var(--rd);">(FALLBACK)</span>' : '') + '</li>'
+      + pubFetchHtml
       + fetchErrorHtml
       + '<li>Fetched: ' + ud.fetchedSymbols + '</li>'
       + '<li>USDC: ' + ud.usdcSymbols + '</li>'

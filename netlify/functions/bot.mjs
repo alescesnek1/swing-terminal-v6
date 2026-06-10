@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { getIdentity, isAdmin, canControlSession } from './_auth.mjs';
 import { loadFleet, saveFleet, mutateFleet, fleetBackend, fleetStoreInfo } from './_fleet-store.mjs';
 import { computeMarketRegime } from './_market-regime.mjs';
-import { evaluateAutoTrader } from '../../scripts/auto/auto-trader.mjs';
+import { evaluateAutoTrader, evaluateAutoTraderWithFallback } from '../../scripts/auto/auto-trader.mjs';
 import { fetchBinancePublicUniverse } from '../../scripts/auto/binance-public.mjs';
 
 const DEFAULT_STATE = {
@@ -2261,20 +2261,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
         let dataSource = markets.length > 0 ? 'scanner' : 'empty';
         let fetchError = null;
 
-        if (markets.length === 0 && autoStatus.effectiveMode === 'shadow') {
-          try {
-            const publicMarkets = await fetchBinancePublicUniverse();
-            if (publicMarkets && publicMarkets.length > 0) {
-              markets = publicMarkets;
-              dataSource = 'binance_public';
-            }
-          } catch (err) {
-            console.error('Public binance fetch failed', err);
-            fetchError = err.message;
-          }
-        }
-
-        const regime = computeMarketRegime(markets);
+        let regime = computeMarketRegime(markets);
         const config = getUserConfig(fleet, identity.userId);
         const caps = liveRiskCaps(config);
         const readiness = liveReadiness(fleet, identity);
@@ -2296,7 +2283,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
            quoteAsset: 'USDC'
         };
 
-        const out = evaluateAutoTrader({
+        const { out, events } = await evaluateAutoTraderWithFallback({
           env: process.env,
           markets,
           regime,
@@ -2306,7 +2293,14 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
           threshold: 1,
           dataSource,
           fetchError,
-        });
+          computeRegime: computeMarketRegime,
+        }, fetchBinancePublicUniverse);
+
+        for (const e of events) {
+          e.ts = new Date().toISOString();
+          fleet.events.unshift(e);
+        }
+        fleet.events = fleet.events.slice(0, 100);
 
         if (!fleet.autoTrader) fleet.autoTrader = {};
         

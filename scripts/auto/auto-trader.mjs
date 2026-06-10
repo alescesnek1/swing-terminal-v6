@@ -145,3 +145,48 @@ export function evaluateAutoTrader({
     diagnostics,
   };
 }
+
+export async function evaluateAutoTraderWithFallback(args, fetchPublicFn) {
+  let out = evaluateAutoTrader(args);
+  const effectiveMode = effectiveAutoMode(args.env);
+
+  let publicFetchAttempted = false;
+  let publicFetchOk = false;
+  let publicFetchCount = 0;
+  let publicFetchMs = 0;
+  let fetchError = null;
+  const events = [];
+
+  if (effectiveMode === 'shadow' && (!out.candidate || out.diagnostics.fallbackUsed)) {
+    publicFetchAttempted = true;
+    events.push({ type: 'AUTO_PUBLIC_FETCH_ATTEMPT', severity: 'info', message: 'Scanner universe empty or fully filtered. Attempting Binance public fetch...' });
+    const start = Date.now();
+    try {
+      const publicMarkets = await fetchPublicFn();
+      publicFetchCount = publicMarkets ? publicMarkets.length : 0;
+      publicFetchOk = true;
+      publicFetchMs = Date.now() - start;
+      events.push({ type: 'AUTO_PUBLIC_FETCH_OK', severity: 'info', message: `Binance public fetch succeeded with ${publicFetchCount} markets in ${publicFetchMs}ms.` });
+
+      if (publicMarkets && publicMarkets.length > 0) {
+        const newArgs = { ...args, markets: publicMarkets, dataSource: 'binance_public', fetchError: null };
+        if (args.computeRegime) newArgs.regime = args.computeRegime(publicMarkets);
+        out = evaluateAutoTrader(newArgs);
+      }
+    } catch (err) {
+      publicFetchMs = Date.now() - start;
+      fetchError = err.message;
+      events.push({ type: 'AUTO_PUBLIC_FETCH_FAILED', severity: 'warning', message: `Binance public fetch failed after ${publicFetchMs}ms: ${fetchError}` });
+      out.diagnostics.fetchError = fetchError;
+    }
+  }
+
+  if (out.diagnostics) {
+    out.diagnostics.publicFetchAttempted = publicFetchAttempted;
+    out.diagnostics.publicFetchOk = publicFetchOk;
+    out.diagnostics.publicFetchCount = publicFetchCount;
+    out.diagnostics.publicFetchMs = publicFetchMs;
+  }
+
+  return { out, events };
+}
