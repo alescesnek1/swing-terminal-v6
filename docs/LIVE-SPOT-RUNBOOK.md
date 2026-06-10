@@ -119,6 +119,28 @@ signatures, or full headers.
 
 The live session is separate from testnet sessions and uses `mode=live_spot`.
 
+## Placing the First Live Micro Order
+
+Live sessions never use the testnet smoke button. Once the live worker is online
+for the live session, the session detail shows a dedicated **`CREATE LIVE BTCUSDC
+ORDER`** button (it only appears when admin + durable + fresh preflight + a single
+allowlisted symbol + a set live cap + no open position + entries not paused/killed).
+
+1. Click `CREATE LIVE <symbol> ORDER`. The persistent **"Create Live Micro
+   Order"** modal opens with the real-money warning, symbol, `BUY` / `MARKET`,
+   max spend, quote asset, and the live session id.
+2. Tick `I understand this will place a real-money market order` and click
+   `Create live <symbol> order`. This POSTs an explicit intent
+   (`symbol`, `side=BUY`, `type=MARKET`, `positionUsd`, `mode=live_spot`,
+   `realProductionOrder=true`) to `/api/bot/create-live-execution-intent`.
+3. The backend re-checks every live gate, and the local worker independently
+   re-enforces `LIVE_ALLOWED_SYMBOLS`, `LIVE_MAX_POSITION_USD`, and the spot-only
+   allowlist before it places the order. After the order fills, click **STOP** to
+   close the position immediately.
+
+Nothing is auto-placed on worker start, and multi-coin is not enabled — exactly
+one allowlisted symbol is supported.
+
 ## Emergency Stop
 
 Click `EMERGENCY STOP ALL LIVE SPOT` as admin. This sets the global live kill

@@ -5454,6 +5454,65 @@ function createSmokeIntent() {
   });
 }
 
+// ── Live micro order (REAL MONEY) ──
+// Live sessions never use the testnet smoke button. This opens the SAME
+// persistent body-level confirmation modal (kill-switch infrastructure) with a
+// real-money checkbox, then POSTs the explicit live intent. The backend
+// (create-live-execution-intent) and the worker (validateLiveIntentGate +
+// spot-only allowlist) independently re-enforce every live gate, so this UI
+// only gates visibility/UX — it cannot bypass a server/worker check.
+function openCreateLiveMicroOrderModal() {
+  const data = Fleet.data || {};
+  const sel = _fleetSessionFromData(Fleet.selectedId);
+  if (!sel || sel.mode !== 'live_spot') { try { window.Toast?.error('No live session', 'Select a live Spot session first.'); } catch {} return; }
+  const live = data.liveReadiness || {};
+  const caps = live.caps || {};
+  const allowed = caps.allowedSymbols || [];
+  const symbol = allowed.length === 1 ? allowed[0] : (allowed[0] || 'BTCUSDC');
+  const spend = Number(caps.maxPositionUsd) || 5;
+  const quote = symbol.endsWith('USDC') ? 'USDC' : 'USDT';
+  const sid = sel.sessionId;
+  openBotConfirmModal({
+    title: 'Create Live Micro Order',
+    severity: 'danger',
+    summary: 'REAL MONEY — the live worker will place one real Binance Spot MARKET BUY when it claims this intent.',
+    infoLabel: 'Order',
+    info: [
+      'Symbol: ' + symbol,
+      'Side: BUY',
+      'Type: MARKET',
+      'Max spend: $' + spend + ' ' + quote,
+      'Quote asset: ' + quote,
+      'Live session: ' + sid,
+    ],
+    warnings: [
+      'This uses REAL MONEY. It is not a testnet or smoke order.',
+      'After it fills, click STOP to close the position immediately.',
+    ],
+    checkboxLabel: 'I understand this will place a real-money market order',
+    confirmLabel: 'Create live ' + symbol + ' order',
+    cancelLabel: 'Cancel',
+    onConfirm: () => _fleetFetch('POST', '/api/bot/create-live-execution-intent', {
+      sessionId: sid,
+      symbol,
+      side: 'BUY',
+      type: 'MARKET',
+      positionUsd: spend,
+      mode: 'live_spot',
+      realProductionOrder: true,
+    }).then((payload) => {
+      Fleet.liveOrderResult = {
+        sessionId: sid,
+        intentId: payload.intent && payload.intent.id,
+        symbol: (payload.intent && payload.intent.symbol) || symbol,
+        existing: payload.existing === true,
+      };
+      try { window.Toast?.success(payload.existing ? 'Live intent already pending' : 'Live order intent created', symbol + ' MARKET BUY queued for the live worker.'); } catch {}
+      refreshFleet();
+    }),
+  });
+}
+
 // ── Config form: built ONCE, backed by a draft so polling never clobbers edits ──
 const FLEET_CONFIG_DEFAULTS = { minTradeUsd: 5, maxTradeUsd: 10, maxDailyLossUsd: 3, maxDailyTrades: 5, maxOpenPositions: 1, stopLossPct: 3, takeProfitPct: 15, pauseOnMarketCrash: true, allowTestnet: true, allowLive: false };
 const FLEET_CONFIG_FIELDS = [
@@ -6165,32 +6224,81 @@ function renderFleet() {
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseTestnet()"' + (canStop ? '' : ' disabled') + '>EMERGENCY CLOSE ' + _fleetModeLabel(sel) + '</button>'
       + '</div>';
 
-    // ── Testnet smoke order ──
+    // ── Entry actions: testnet smoke OR live micro order (never both) ──
     // Visible only when this session has an online worker, is running, has zero
-    // open positions, and is not stopping/paused. Live trading is hard-locked.
+    // open positions, and is not stopping/paused.
     const smokeOpenCount = sel.openPositions ? sel.openPositions.length : 0;
-    const smokeBusy = Fleet.smokePending && Fleet.selectedId === sel.sessionId;
-    const smokeModeOk = (sel.mode || 'testnet') === 'testnet';
     const globalKillActive = data.globalKillSwitchActive === true || live.globalKillSwitchActive === true || sel.globalKillSwitchActive === true || sel.entryBlockedReason === 'global_kill_switch';
     const sessionPaused = sel.pauseRequested === true || sel.status === 'paused' || (sel.worker && sel.worker.currentState === 'paused') || sel.entryBlockedReason === 'session_paused';
-    let smokeBlockedReason = '';
-    if (!newEntriesAllowed) smokeBlockedReason = 'Smoke order hidden: control state is not durable.';
-    else if (anyOpenPosition || smokeOpenCount > 0) smokeBlockedReason = 'Smoke order hidden: close the open position first.';
-    else if (!online) smokeBlockedReason = 'Smoke order hidden: local worker is offline.';
-    else if (!canStop || sel.stopRequested) smokeBlockedReason = 'Smoke order hidden: session is stopping.';
-    else if (globalKillActive) smokeBlockedReason = 'Smoke order hidden: global kill switch is active.';
-    else if (sessionPaused) smokeBlockedReason = 'Smoke order hidden: entries are paused for this session.';
-    else if (!entriesAllowed) smokeBlockedReason = 'Smoke order hidden: market regime blocks entries.';
-    else if (!smokeModeOk) smokeBlockedReason = 'Smoke order hidden: selected session is not testnet.';
-    const smokeEligible = !smokeBlockedReason;
-    if (smokeEligible || smokeBusy) {
-      html += '<div class="fleet-smoke">'
-        + '<button type="button" class="paperbot-control-btn paperbot-control-btn--smoke" onclick="createSmokeIntent()"' + (smokeBusy ? ' disabled' : '') + '>'
-        + (smokeBusy ? 'CREATING SMOKE INTENT...' : 'CREATE TESTNET SMOKE ORDER') + '</button>'
-        + '<span class="fleet-smoke__hint">Queues one BTCUSDT testnet MARKET BUY for this session (≤ $10).</span>'
-        + '</div>';
-    } else if (smokeBlockedReason) {
-      html += '<div class="fleet-smoke__note">' + _esc(smokeBlockedReason) + '</div>';
+    if (selLive) {
+      // ── Live micro order (REAL MONEY) — live_spot sessions only ──
+      const caps = (live && live.caps) || {};
+      const allowedSymbols = caps.allowedSymbols || [];
+      const liveSymbol = allowedSymbols.length === 1 ? allowedSymbols[0] : null;
+      const liveCap = Number(caps.maxPositionUsd);
+      const preflightOk = live.preflightPassed === true || live.preflightFresh === true;
+      const liveAllowed = live.allowLive === true || (data.config && data.config.allowLive === true);
+      let liveBlockedReason = '';
+      if (!data.isAdmin) liveBlockedReason = 'Live order hidden: admin only.';
+      else if (!newEntriesAllowed || live.durable === false) liveBlockedReason = 'Live order hidden: control state is not durable.';
+      else if (!preflightOk || live.state !== 'LIVE READY - MICRO CAPS') liveBlockedReason = 'Live order hidden: live readiness/preflight not met.';
+      else if (!liveAllowed) liveBlockedReason = 'Live order hidden: enable live trading via START LIVE SPOT first.';
+      else if (anyOpenPosition || smokeOpenCount > 0) liveBlockedReason = 'Live order hidden: close the open position first.';
+      else if (!online) liveBlockedReason = 'Live order hidden: local worker is offline.';
+      else if (!canStop || sel.stopRequested) liveBlockedReason = 'Live order hidden: session is stopping.';
+      else if (globalKillActive) liveBlockedReason = 'Live order hidden: global kill switch is active.';
+      else if (sessionPaused) liveBlockedReason = 'Live order hidden: entries are paused for this session.';
+      else if (!entriesAllowed) liveBlockedReason = 'Live order hidden: market regime blocks entries.';
+      else if (!liveSymbol) liveBlockedReason = 'Live order hidden: exactly one allowed symbol is required.';
+      else if (!(liveCap > 0)) liveBlockedReason = 'Live order hidden: live position cap is not set.';
+      if (!liveBlockedReason) {
+        const quote = liveSymbol.endsWith('USDC') ? 'USDC' : 'USDT';
+        html += '<div class="fleet-smoke fleet-live-order">'
+          + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openCreateLiveMicroOrderModal()">CREATE LIVE ' + _esc(liveSymbol) + ' ORDER</button>'
+          + '<span class="fleet-smoke__hint fleet-live-order__hint">REAL MONEY: queues one ' + _esc(liveSymbol) + ' MARKET BUY (≤ $' + _esc(liveCap) + ' ' + _esc(quote) + ') for this live session. Click STOP after fill to close.</span>'
+          + '</div>';
+      } else {
+        html += '<div class="fleet-smoke__note">' + _esc(liveBlockedReason) + '</div>';
+      }
+      // Live intent pending card (mirrors the smoke result card).
+      if (Fleet.liveOrderResult && Fleet.liveOrderResult.sessionId === sel.sessionId) {
+        const lr = Fleet.liveOrderResult;
+        const openFromLive = (sel.openPositions && sel.openPositions[0]) || null;
+        if (smokeOpenCount > 0 && openFromLive) {
+          html += '<div class="fleet-smoke-result">'
+            + '<div class="fleet-smoke-result__title">LIVE POSITION OPENED</div>'
+            + '<div class="fleet-smoke-result__body">Live order ' + _esc(openFromLive.orderId || '—')
+            + ' — ' + _esc(openFromLive.symbol || lr.symbol) + ' qty ' + _esc(openFromLive.executedQty || '—') + ' · click STOP to close.</div>'
+            + '</div>';
+        } else {
+          html += '<div class="fleet-smoke-result">'
+            + '<div class="fleet-smoke-result__title">' + (lr.existing ? 'LIVE INTENT ALREADY PENDING' : 'LIVE ORDER INTENT CREATED') + '</div>'
+            + '<div class="fleet-smoke-result__body">' + _esc(lr.symbol) + ' MARKET BUY queued for the live worker'
+            + (lr.intentId ? ' · ' + _esc(String(lr.intentId).slice(0, 18)) : '') + '</div>'
+            + '</div>';
+        }
+      }
+    } else {
+      // ── Testnet smoke order — testnet sessions only ──
+      const smokeBusy = Fleet.smokePending && Fleet.selectedId === sel.sessionId;
+      let smokeBlockedReason = '';
+      if (!newEntriesAllowed) smokeBlockedReason = 'Smoke order hidden: control state is not durable.';
+      else if (anyOpenPosition || smokeOpenCount > 0) smokeBlockedReason = 'Smoke order hidden: close the open position first.';
+      else if (!online) smokeBlockedReason = 'Smoke order hidden: local worker is offline.';
+      else if (!canStop || sel.stopRequested) smokeBlockedReason = 'Smoke order hidden: session is stopping.';
+      else if (globalKillActive) smokeBlockedReason = 'Smoke order hidden: global kill switch is active.';
+      else if (sessionPaused) smokeBlockedReason = 'Smoke order hidden: entries are paused for this session.';
+      else if (!entriesAllowed) smokeBlockedReason = 'Smoke order hidden: market regime blocks entries.';
+      const smokeEligible = !smokeBlockedReason;
+      if (smokeEligible || smokeBusy) {
+        html += '<div class="fleet-smoke">'
+          + '<button type="button" class="paperbot-control-btn paperbot-control-btn--smoke" onclick="createSmokeIntent()"' + (smokeBusy ? ' disabled' : '') + '>'
+          + (smokeBusy ? 'CREATING SMOKE INTENT...' : 'CREATE TESTNET SMOKE ORDER') + '</button>'
+          + '<span class="fleet-smoke__hint">Queues one BTCUSDT testnet MARKET BUY for this session (≤ $10).</span>'
+          + '</div>';
+      } else if (smokeBlockedReason) {
+        html += '<div class="fleet-smoke__note">' + _esc(smokeBlockedReason) + '</div>';
+      }
     }
     // Smoke result card: once a position is actually open, do NOT keep showing the
     // intent as if still actionable — show the resulting open order instead (C5).
