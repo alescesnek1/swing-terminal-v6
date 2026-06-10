@@ -14,7 +14,16 @@ process that may sign Spot orders.
   - `LIVE_MAX_DAILY_TRADES=3`
   - `LIVE_MAX_OPEN_POSITIONS=1`
   - `LIVE_MAX_SYMBOLS=1`
-  - `LIVE_ALLOWED_SYMBOLS=BTCUSDT`
+  - `LIVE_ALLOWED_SYMBOLS=BTCUSDT` (USDT-quoted) **or** `LIVE_ALLOWED_SYMBOLS=BTCUSDC`
+    (USDC-quoted — keep funds in USDC and trade BTCUSDC)
+
+### Single-symbol live policy
+
+A live run trades exactly one symbol. `LIVE_ALLOWED_SYMBOLS` must be **exactly**
+`BTCUSDT` or **exactly** `BTCUSDC`. Any multi-symbol list (e.g. `BTCUSDT,BTCUSDC`) or
+any other symbol (e.g. `ETHUSDC`) fails preflight. For `BTCUSDC` the quote asset is
+USDC: the preflight shows the USDC balance and market BUY sizing spends the USDC quote
+amount. For `BTCUSDT` the quote asset is USDT. No other gate is relaxed.
 
 ## Binance API Key
 
@@ -40,12 +49,14 @@ BOT_LIVE_TRADING_ENABLED=true
 BOT_ALLOW_REAL_ORDERS=true
 LIVE_SPOT_ACK=I_UNDERSTAND_REAL_MONEY_RISK
 LOCAL_WORKER_LIVE_CONFIRM=true
-LIVE_MAX_POSITION_USD=10
+# Ceiling is 10; start at 5 for the first live runs.
+LIVE_MAX_POSITION_USD=5
 LIVE_MAX_DAILY_LOSS_USD=5
 LIVE_MAX_DAILY_TRADES=3
 LIVE_MAX_OPEN_POSITIONS=1
 LIVE_MAX_SYMBOLS=1
-LIVE_ALLOWED_SYMBOLS=BTCUSDT
+# Exactly one symbol: BTCUSDT (USDT-quoted) or BTCUSDC (USDC-quoted).
+LIVE_ALLOWED_SYMBOLS=BTCUSDC
 LIVE_ALLOW_MARKET_BUY=true
 LIVE_ALLOW_MARKET_SELL=true
 LIVE_ALLOW_LIMIT_ORDERS=false

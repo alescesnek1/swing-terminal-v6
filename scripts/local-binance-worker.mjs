@@ -98,7 +98,12 @@ const LIVE_SPOT_ACK_TEXT = 'I_UNDERSTAND_REAL_MONEY_RISK';
 const LIVE_PREFLIGHT_MAX_POSITION_USD = 10;
 const LIVE_PREFLIGHT_MAX_DAILY_LOSS_USD = 5;
 const LIVE_PREFLIGHT_MAX_DAILY_TRADES = 3;
+// A live run trades a SINGLE symbol. Two single-symbol configurations are valid:
+// exactly BTCUSDT (USDT-quoted) or exactly BTCUSDC (USDC-quoted, keep funds in USDC).
+// Any multi-symbol list, or any other symbol, FAILS preflight. This is intentionally
+// an allowlist of exact strings, not a substring/prefix check.
 const LIVE_PREFLIGHT_ALLOWED_SYMBOL = 'BTCUSDT';
+const LIVE_PREFLIGHT_ALLOWED_SYMBOLS = ['BTCUSDT', 'BTCUSDC'];
 const LIVE_PREFLIGHT_MAX_AGE_MS = Number(process.env.LIVE_PREFLIGHT_MAX_AGE_MS) || 60 * 60 * 1000;
 const LIVE_PREFLIGHT_FILE = path.join(REPO_ROOT, '.paperbot-live-spot-preflight.json');
 const SPOT_ONLY_FORBIDDEN_RE = /\/sapi|\/fapi|\/dapi|withdraw|margin|leverage|borrow|repay|marginType|isolated|cross/i;
@@ -287,6 +292,26 @@ function stepPrecision(stepSize) {
   const step = String(stepSize || '');
   if (!step.includes('.')) return 0;
   return step.split('.')[1].replace(/0+$/, '').length;
+}
+
+// Quote asset for a Spot symbol. BTCUSDC is USDC-quoted; BTCUSDT is USDT-quoted.
+// Used so sizing, balances and fee accounting never assume USDT for a USDC pair.
+function quoteAssetForSymbol(symbol) {
+  return String(symbol || '').toUpperCase().endsWith('USDC') ? 'USDC' : 'USDT';
+}
+
+// Market BUY sizing (pure). `quoteAmount` is the spend in the symbol's QUOTE asset
+// (USDC for BTCUSDC, USDT for BTCUSDT); `price` is the base price in that same quote
+// asset. Returns the base quantity floored to the LOT_SIZE step. There is no USDT
+// assumption here: the quote amount and price are whatever the symbol's quote asset is.
+function computeBuyQuantity(quoteAmount, price, stepSize) {
+  const amt = Number(quoteAmount);
+  const px = Number(price);
+  const step = Number(stepSize);
+  if (!(amt > 0) || !(px > 0) || !(step > 0)) return 0;
+  const precision = Math.max(0, -Math.floor(Math.log10(step)));
+  const stepPow = Math.pow(10, precision);
+  return Math.floor((amt / px) * stepPow) / stepPow;
 }
 
 // ── Trade-result math (pure; exported for unit tests) ───────────────────────
@@ -808,9 +833,11 @@ async function executeIntent(intent, config, riskState, session = null, control 
 
     const price = await getTickerPrice(intent.symbol);
 
+    // posUsd is the spend in the symbol's quote asset (USDC for BTCUSDC, USDT for
+    // BTCUSDT). Size against that quote amount; never assume USDT.
+    const quoteAsset = quoteAssetForSymbol(intent.symbol);
     const precision = Math.max(0, -Math.floor(Math.log10(stepSize)));
-    const stepPow = Math.pow(10, precision);
-    const qty = Math.floor((posUsd / price) * stepPow) / stepPow;
+    const qty = computeBuyQuantity(posUsd, price, stepSize);
 
     const notional = symbolInfo.filters.find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
     if (notional) {
@@ -830,7 +857,7 @@ async function executeIntent(intent, config, riskState, session = null, control 
     // PERSIST FIRST: write the open position to local state BEFORE reporting to
     // the backend, so a crash between order and report can be recovered locally.
     recordOpenPosition({
-      mode: workerMode, symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, executedQty: order.executedQty,
+      mode: workerMode, symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, quoteAsset, executedQty: order.executedQty,
       orderId: order.orderId, sessionId, status: 'open', openedAt: new Date().toISOString(), stepSize: lot.stepSize,
       entryQuoteQty: order.cummulativeQuoteQty != null ? String(order.cummulativeQuoteQty) : null,
       entryAvgPrice: entryAvgPrice != null ? entryAvgPrice : null,
@@ -894,7 +921,7 @@ async function closeAllPositions(context) {
       // operator sees a clean trade-result card instead of raw order JSON. When the
       // exchange minQty is unknown, the lot stepSize is the dust floor: a remainder
       // smaller than one step is never independently sellable.
-      const quoteAsset = String(pos.symbol || '').endsWith('USDC') ? 'USDC' : 'USDT';
+      const quoteAsset = pos.quoteAsset || quoteAssetForSymbol(pos.symbol);
       const metrics = computeCloseMetrics(pos, close, { minQty: minQty != null ? minQty : stepSize, minNotional, quoteAsset });
       const closedAt = new Date().toISOString();
       markPositionClosed(pos.orderId, close.orderId, metrics);
@@ -1164,7 +1191,7 @@ async function runPreflight() {
       if (!(caps.maxPositionUsd > 0 && caps.maxPositionUsd <= LIVE_PREFLIGHT_MAX_POSITION_USD)) missing.push(`LIVE_MAX_POSITION_USD must be > 0 and <= ${LIVE_PREFLIGHT_MAX_POSITION_USD}`);
       if (!(caps.maxDailyLossUsd > 0 && caps.maxDailyLossUsd <= LIVE_PREFLIGHT_MAX_DAILY_LOSS_USD)) missing.push(`LIVE_MAX_DAILY_LOSS_USD must be > 0 and <= ${LIVE_PREFLIGHT_MAX_DAILY_LOSS_USD}`);
       if (!(caps.maxDailyTrades > 0 && caps.maxDailyTrades <= LIVE_PREFLIGHT_MAX_DAILY_TRADES)) missing.push(`LIVE_MAX_DAILY_TRADES must be > 0 and <= ${LIVE_PREFLIGHT_MAX_DAILY_TRADES}`);
-      if (!(rawAllowedSymbols.length === 1 && rawAllowedSymbols[0] === LIVE_PREFLIGHT_ALLOWED_SYMBOL)) missing.push(`LIVE_ALLOWED_SYMBOLS must be exactly ${LIVE_PREFLIGHT_ALLOWED_SYMBOL}`);
+      if (!(rawAllowedSymbols.length === 1 && LIVE_PREFLIGHT_ALLOWED_SYMBOLS.includes(rawAllowedSymbols[0]))) missing.push(`LIVE_ALLOWED_SYMBOLS must be exactly one of ${LIVE_PREFLIGHT_ALLOWED_SYMBOLS.join(' or ')} (single symbol only)`);
       if (missing.length) {
         const fail = { ok: false, checkedAt: new Date().toISOString(), reason: missing.join('; '), spotOnlyPolicy: true };
         fs.writeFileSync(LIVE_PREFLIGHT_FILE, JSON.stringify(fail, null, 2));
@@ -1306,6 +1333,8 @@ export {
   executeIntent,
   handleMissingSession,
   runStopSequence,
+  quoteAssetForSymbol,
+  computeBuyQuantity,
   avgPriceFromFills,
   residualDustQty,
   isResidualSellable,

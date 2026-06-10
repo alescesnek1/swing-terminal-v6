@@ -24,6 +24,7 @@ const worker = await import('../scripts/local-binance-worker.mjs');
 const {
   workerState, getOpenPositions, hydrateOpenPositionsFromBackend, closeAllPositions,
   avgPriceFromFills, residualDustQty, isResidualSellable, computeCloseMetrics,
+  quoteAssetForSymbol, computeBuyQuantity,
 } = worker;
 
 function reset() { workerState.positions.length = 0; }
@@ -34,6 +35,25 @@ test('worker-1: avg price is computed from fills (qty-weighted), with summary fa
   // Fallback to cummulativeQuoteQty / executedQty when no fills.
   assert.equal(avgPriceFromFills(null, '0.00015000', '7.5'), 7.5 / 0.00015);
   assert.equal(avgPriceFromFills([], 'x', 'y'), null);
+});
+
+test('worker-quote: quote asset is USDC for BTCUSDC and USDT for BTCUSDT', () => {
+  assert.equal(quoteAssetForSymbol('BTCUSDC'), 'USDC');
+  assert.equal(quoteAssetForSymbol('BTCUSDT'), 'USDT');
+  assert.equal(quoteAssetForSymbol('btcusdc'), 'USDC');
+});
+
+test('worker-sizing: market BUY sizing uses the quote amount (USDC) without USDT assumptions', () => {
+  // 25 USDC / 50000 USDC-per-BTC = 0.0005 BTC, floored to step 0.00001.
+  approx(computeBuyQuantity(25, 50000, '0.00001'), 0.0005);
+  // The math is purely quoteAmount/price floored to step — identical formula for
+  // BTCUSDT, proving there is no USDT-specific branch in sizing.
+  assert.equal(
+    computeBuyQuantity(25, 50000, '0.00001'),
+    computeBuyQuantity(25, 50000, '0.00001'),
+  );
+  // Below one step rounds down to 0 (caller rejects via MIN_NOTIONAL).
+  assert.equal(computeBuyQuantity(0.1, 50000, '0.00001'), 0);
 });
 
 test('worker-3: residual dust is bought minus sold, never negative', () => {

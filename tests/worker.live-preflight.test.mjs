@@ -73,6 +73,50 @@ test('live preflight passes on valid gates and uses only the spot /api/v3/accoun
   }
 });
 
+// ── In-process PASS path for USDC-only mode: keep funds in USDC, trade BTCUSDC. ──
+test('live preflight passes for BTCUSDC, shows USDC balance, and uses only the spot account path', async () => {
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  const realLog = console.log;
+  const logged = [];
+  console.log = (...a) => { logged.push(a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')); };
+  process.env.LIVE_ALLOWED_SYMBOLS = 'BTCUSDC';
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    calls.push({ url: u, method: (init && init.method) || 'GET' });
+    if (u.includes('/v3/account')) {
+      return jsonResponse({ canTrade: true, accountType: 'SPOT', permissions: ['SPOT'], balances: [{ asset: 'USDC', free: '25' }, { asset: 'USDT', free: '0' }, { asset: 'BTC', free: '0' }] });
+    }
+    if (u.includes('/v3/exchangeInfo')) {
+      return jsonResponse({ symbols: [{ baseAsset: 'BTC', quoteAsset: 'USDC', isSpotTradingAllowed: true, filters: [{ filterType: 'LOT_SIZE', stepSize: '0.00001', minQty: '0.00001' }, { filterType: 'NOTIONAL', minNotional: '10' }] }] });
+    }
+    if (u.includes('/api/bot/live-preflight-result')) return jsonResponse({ ok: true });
+    return jsonResponse({ ok: true });
+  };
+  try {
+    const code = await runPreflight();
+    assert.equal(code, 0, 'BTCUSDC valid gates must PASS (exit 0)');
+    const out = logged.join('\n');
+    assert.match(out, /LIVE PREFLIGHT PASS/, 'must print LIVE PREFLIGHT PASS');
+    assert.match(out, /"USDC":"25"/, 'balances must include the USDC balance');
+    assert.match(out, /"allowedSymbols":\["BTCUSDC"\]/, 'risk caps must show allowedSymbols ["BTCUSDC"]');
+
+    const urls = calls.map((c) => c.url.toLowerCase());
+    // req: only signed spot path used is /api/v3/account
+    assert.ok(urls.some((u) => /\/api\/v3\/account(\?|$)/.test(u)), 'must reach signed /api/v3/account');
+    assert.ok(!urls.some((u) => u.includes('worker-session')), 'must NOT call worker-session');
+    assert.ok(!urls.some((u) => u.includes('worker-heartbeat')), 'must NOT call worker-heartbeat');
+    for (const bad of FORBIDDEN_FRAGMENTS) {
+      assert.ok(!urls.some((u) => u.includes(bad)), `must NOT call any ${bad} path`);
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+    console.log = realLog;
+    process.env.LIVE_ALLOWED_SYMBOLS = 'BTCUSDT';
+    try { fs.rmSync(LIVE_PREFLIGHT_FILE, { force: true }); } catch { /* best effort */ }
+  }
+});
+
 // ── Subprocess paths: prove the CLI flag never enters the worker loop. ──
 function baseLiveEnv(port) {
   return {
@@ -177,4 +221,20 @@ test('live preflight refuses a multi-symbol allowlist that includes BTCUSDT plus
   const { exitCode, stdout } = await runLivePreflightSubprocess((env) => { env.LIVE_ALLOWED_SYMBOLS = 'BTCUSDT,ETHUSDT'; });
   assert.equal(exitCode, 1, 'extra symbols beyond BTCUSDT must FAIL');
   assert.match(stdout, /LIVE_ALLOWED_SYMBOLS/);
+});
+
+test('live preflight refuses the BTCUSDT,BTCUSDC multi-symbol allowlist', async () => {
+  const { exitCode, stdout, hits } = await runLivePreflightSubprocess((env) => { env.LIVE_ALLOWED_SYMBOLS = 'BTCUSDT,BTCUSDC'; });
+  assert.equal(exitCode, 1, 'two valid symbols together must still FAIL (single symbol only)');
+  assert.match(stdout, /LIVE PREFLIGHT FAIL/);
+  assert.match(stdout, /LIVE_ALLOWED_SYMBOLS/);
+  assertNoWorkerLoopCalls(hits, 'multi-symbol-usdc');
+});
+
+test('live preflight refuses ETHUSDC (unsupported single symbol)', async () => {
+  const { exitCode, stdout, hits } = await runLivePreflightSubprocess((env) => { env.LIVE_ALLOWED_SYMBOLS = 'ETHUSDC'; });
+  assert.equal(exitCode, 1, 'ETHUSDC must FAIL (only BTCUSDT or BTCUSDC allowed)');
+  assert.match(stdout, /LIVE PREFLIGHT FAIL/);
+  assert.match(stdout, /LIVE_ALLOWED_SYMBOLS/);
+  assertNoWorkerLoopCalls(hits, 'eth-usdc');
 });
