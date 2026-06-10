@@ -6348,9 +6348,9 @@ function renderFleet() {
     + '<div><span>Reasons</span>' + (autoReasons.length ? '<ul>' + autoReasons.map((r) => '<li>' + _esc(r) + '</li>').join('') + '</ul>' : '<p>--</p>') + '</div>'
     + '<div><span>Risk blocks</span>' + (autoBlocksView.length ? '<ul>' + autoBlocksView.map((b) => '<li>' + _esc((b.code ? b.code + ': ' : '') + (b.reason || b)) + '</li>').join('') + '</ul>' : '<p>none reported</p>') + '</div>'
     + '</div>'
-    + (auto.liveExecutionAllowed ? '' : '<div class="fleet-auto-trader__locked">Autonomous live locked: missing ' + _esc((auto.liveGateMissing || []).join(', ') || 'required gates') + '</div>')
+    + (auto.liveExecutionAllowed ? '' : '<div class="fleet-auto-trader__locked">' + (auto.mode === 'live_spot' ? 'Live auto locked: missing ' : 'Live promotion locked: missing ') + _esc((auto.liveGateMissing || []).join(', ') || 'required gates') + '</div>')
     + (data.isAdmin ? '<div class="fleet-live-readiness__confirm">'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="setAutoTraderMode(\'shadow\')">Enable Shadow Auto</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="setAutoTraderMode(\'shadow\')"' + (auto.effectiveMode === 'shadow' ? ' disabled title="Shadow Auto is already active"' : '') + '>Enable Shadow Auto</button>'
       + '<button type="button" class="paperbot-control-btn" onclick="setAutoTraderMode(\'off\')">Disable Auto</button>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="setAutoTraderMode(\'paper\')">Promote to Paper</button>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openPromoteAutoLiveModal()"' + (autoCanPromoteLive ? '' : ' disabled title="' + _esc(autoPromoteTitle) + '"') + '>Promote to Live</button>'

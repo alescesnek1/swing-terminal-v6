@@ -72,12 +72,16 @@ test('2. scorer returns score, reasons and risk flags', () => {
   assert.equal(ranked[0].symbol, 'BTCUSDC', 'higher-momentum candidate ranks first');
 });
 
-// 3. shadow mode never creates a live OR testnet order intent
-test('3. shadow mode never creates any execution intent', () => {
-  const out = evaluateAutoTrader({ env: { AUTO_TRADER_ENABLED: 'true', AUTO_TRADER_MODE: 'shadow' }, markets, caps: CAPS, fleet: HEALTHY_FLEET, threshold: 1, sessionId: 'sess_1', regime: { regime: 'RISK_ON', entriesAllowed: true } });
+// 3. shadow mode never creates a live OR testnet order intent, does not require live gates, and evaluates despite daily cap
+test('3. shadow mode never creates any execution intent and evaluates despite daily cap', () => {
+  // Pass NO live env variables (AUTO_LIVE_TRADING_ENABLED is missing), and daily cap is exhausted
+  const out = evaluateAutoTrader({ env: { AUTO_TRADER_ENABLED: 'true', AUTO_TRADER_MODE: 'shadow' }, markets, caps: CAPS, fleet: { ...HEALTHY_FLEET, dailyTradesUsed: 2 }, threshold: 1, sessionId: 'sess_1', regime: { regime: 'RISK_ON', entriesAllowed: true } });
   assert.equal(out.mode, 'shadow');
   assert.equal(out.decision, 'SHADOW_BUY');
   assert.equal(out.intent, null, 'shadow emits no intent');
+  assert.ok(out.candidate, 'shadow candidate is evaluated even when daily cap exhausted and live gates missing');
+  assert.ok(out.blocks.some(b => b.code === 'DAILY_TRADES_CAP'), 'daily cap block is recorded for shadow');
+  
   // buildEntryIntent also refuses for shadow regardless of decision.
   assert.equal(buildEntryIntent({ action: 'BUY', symbol: 'BTCUSDC', positionUsd: 6 }, { sessionId: 's', mode: 'shadow' }), null);
 });

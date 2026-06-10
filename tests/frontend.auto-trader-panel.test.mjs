@@ -17,7 +17,7 @@ test('UI renders an AUTO TRADER cockpit panel with mode, candidate, score, reaso
   assert.match(terminalCss, /\.fleet-auto-trader/);
 });
 
-test('UI exposes shadow, disable, paper and live promotion controls', () => {
+test('UI exposes shadow, disable, paper and live promotion controls, and hides/disables shadow when active', () => {
   assert.match(terminalJs, /Enable Shadow Auto/);
   assert.match(terminalJs, /Disable Auto/);
   assert.match(terminalJs, /Promote to Paper/);
@@ -25,6 +25,7 @@ test('UI exposes shadow, disable, paper and live promotion controls', () => {
   assert.match(terminalJs, /function setAutoTraderMode\(mode\)/);
   assert.ok(terminalJs.includes("setAutoTraderMode(\\'shadow\\')"));
   assert.ok(terminalJs.includes("setAutoTraderMode(\\'paper\\')"));
+  assert.match(terminalJs, /auto\.effectiveMode === 'shadow' \? ' disabled title="Shadow Auto is already active"' : ''/);
 });
 
 test('live auto promotion uses explicit modal phrase confirmation', () => {
