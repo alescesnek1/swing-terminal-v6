@@ -1102,13 +1102,16 @@ const DEFAULT_BOT_CONFIG = {
 
 function liveRiskCaps() {
   const maxSymbols = envNumber('LIVE_MAX_SYMBOLS', 1);
-  const symbols = String(process.env.LIVE_ALLOWED_SYMBOLS || 'BTCUSDT')
+  // LIVE_* vars take precedence; BOT_ALLOWED_SYMBOLS / BOT_MAX_POSITION_USD are
+  // the Netlify-deployed fallbacks so the readiness panel and the enforced caps
+  // always describe the same configuration (e.g. BTCUSDC / $5).
+  const symbols = String(process.env.LIVE_ALLOWED_SYMBOLS || process.env.BOT_ALLOWED_SYMBOLS || 'BTCUSDT')
     .split(',')
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean)
     .slice(0, maxSymbols);
   return {
-    maxPositionUsd: envNumber('LIVE_MAX_POSITION_USD', 10),
+    maxPositionUsd: envNumber('LIVE_MAX_POSITION_USD', envNumber('BOT_MAX_POSITION_USD', 10)),
     maxDailyLossUsd: envNumber('LIVE_MAX_DAILY_LOSS_USD', 5),
     maxDailyTrades: envNumber('LIVE_MAX_DAILY_TRADES', 3),
     maxOpenPositions: envNumber('LIVE_MAX_OPEN_POSITIONS', 1),

@@ -991,7 +991,7 @@ async function runStopSequence(data) {
 
   stopping = true;
   currentState = 'stopping';
-  console.log(`[STOP] Stop requested. Closing ${getOpenPositions().length} open testnet position(s) via MARKET SELL before exit.`);
+  console.log(`[STOP] Stop requested. Closing ${getOpenPositions().length} open ${isLiveSpot ? 'LIVE SPOT (REAL MONEY)' : 'testnet'} position(s) via MARKET SELL before exit.`);
   await sendHeartbeat();
   let retries = 0;
   while (true) {
@@ -1120,7 +1120,7 @@ async function tick() {
   // already acked/consumed). Honour it even while paused, before stop handling.
   if (data.emergencyCloseRequested === true) {
     if (getOpenPositions().length > 0) {
-      console.log('[EMERGENCY] emergencyCloseRequested set by backend; closing open testnet position(s) via MARKET SELL.');
+      console.log(`[EMERGENCY] emergencyCloseRequested set by backend; closing open ${isLiveSpot ? 'LIVE SPOT (REAL MONEY)' : 'testnet'} position(s) via MARKET SELL.`);
       await closeAllPositions('EMERGENCY');
     } else {
       await emergencyReconcileAndClose();

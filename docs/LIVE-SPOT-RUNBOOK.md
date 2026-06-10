@@ -104,13 +104,13 @@ signatures, or full headers.
 1. Confirm the Bot Feed live readiness panel shows `LIVE READY - MICRO CAPS`.
 2. Set the user config `allowLive=true`.
 3. Use an admin account.
-4. Type exactly:
-
-```text
-I UNDERSTAND THIS USES REAL MONEY
-```
-
-5. Click `START LIVE SPOT`.
+4. Click `START LIVE SPOT`. A confirmation modal ("Start Live Spot Trading")
+   opens showing the symbol allowlist, max trade, max daily loss, max daily
+   trades, and current live preflight status.
+5. Tick the checkbox `I understand this uses real money` and click
+   `Start live spot`. (The UI sends the exact backend confirmation phrase
+   `I UNDERSTAND THIS USES REAL MONEY` on your behalf — the API contract is
+   unchanged.)
 
 The live session is separate from testnet sessions and uses `mode=live_spot`.
 

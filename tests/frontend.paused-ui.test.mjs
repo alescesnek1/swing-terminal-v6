@@ -227,7 +227,9 @@ test('frontend kill-switch controls render for the right active state', () => {
   assert.doesNotMatch(terminalJs, /fleet-clear-gks-input/);
   assert.doesNotMatch(terminalJs, /Type: CLEAR GLOBAL KILL SWITCH/);
   assert.doesNotMatch(terminalJs, /Type: ACTIVATE GLOBAL KILL SWITCH/);
-  assert.match(terminalJs, /Type: I UNDERSTAND THIS USES REAL MONEY/);
+  // Live activation moved to the persistent modal too — no typed phrase field.
+  assert.doesNotMatch(terminalJs, /Type: I UNDERSTAND THIS USES REAL MONEY/);
+  assert.doesNotMatch(terminalJs, /fleet-live-confirm-input/);
 });
 
 test('terminal.js must not contain deprecated _e( references', () => {

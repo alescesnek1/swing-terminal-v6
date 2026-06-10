@@ -4794,8 +4794,10 @@ function _renderBotConfirmModal() {
     document.body.appendChild(modal);
   }
   const sev = cfg.severity || 'warning';
+  const info = _botConfirmList(cfg.info);
   const effects = _botConfirmList(cfg.effects);
   const warnings = _botConfirmList(cfg.warnings);
+  const ackBlocked = !!cfg.checkboxLabel && cfg.checkboxChecked !== true;
   modal.innerHTML = '<div class="bot-confirm bot-confirm--' + _esc(sev) + '" role="dialog" aria-modal="true" aria-labelledby="bot-confirm-title">'
     + '<div class="bot-confirm__head">'
     + '<div id="bot-confirm-title" class="bot-confirm__title">' + _esc(cfg.title || 'Confirm Action') + '</div>'
@@ -4803,13 +4805,15 @@ function _renderBotConfirmModal() {
     + '</div>'
     + '<div class="bot-confirm__body">'
     + (cfg.summary ? '<p class="bot-confirm__summary">' + _esc(cfg.summary) + '</p>' : '')
+    + (info.length ? '<div class="bot-confirm__section"><div class="bot-confirm__label">' + _esc(cfg.infoLabel || 'Details') + '</div><ul>' + info.map((x) => '<li>' + _esc(x) + '</li>').join('') + '</ul></div>' : '')
     + (effects.length ? '<div class="bot-confirm__section"><div class="bot-confirm__label">Effects</div><ul>' + effects.map((x) => '<li>' + _esc(x) + '</li>').join('') + '</ul></div>' : '')
     + (warnings.length ? '<div class="bot-confirm__section bot-confirm__section--warning"><div class="bot-confirm__label">Warnings</div><ul>' + warnings.map((x) => '<li>' + _esc(x) + '</li>').join('') + '</ul></div>' : '')
+    + (cfg.checkboxLabel ? '<label class="bot-confirm__ack"><input id="bot-confirm-ack" type="checkbox" onchange="toggleBotConfirmAck(this.checked)"' + (cfg.checkboxChecked ? ' checked' : '') + (cfg.busy ? ' disabled' : '') + '> <span>' + _esc(cfg.checkboxLabel) + '</span></label>' : '')
     + (cfg.error ? '<div class="bot-confirm__error">' + _esc(cfg.error) + '</div>' : '')
     + '</div>'
     + '<div class="bot-confirm__actions">'
     + '<button type="button" class="paperbot-control-btn" onclick="closeBotConfirmModal()"' + (cfg.busy ? ' disabled' : '') + '>' + _esc(cfg.cancelLabel || 'Cancel') + '</button>'
-    + '<button id="bot-confirm-continue" type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="confirmBotConfirmModal()"' + (cfg.busy ? ' disabled' : '') + '>'
+    + '<button id="bot-confirm-continue" type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="confirmBotConfirmModal()"' + (cfg.busy || ackBlocked ? ' disabled' : '') + '>'
     + _esc(cfg.busy ? 'Working...' : (cfg.confirmLabel || 'Continue')) + '</button>'
     + '</div>'
     + '</div>';
@@ -4820,14 +4824,25 @@ function openBotConfirmModal(opts) {
     title: opts && opts.title,
     severity: opts && opts.severity,
     summary: opts && opts.summary,
+    info: _botConfirmList(opts && opts.info),
+    infoLabel: opts && opts.infoLabel,
     effects: _botConfirmList(opts && opts.effects),
     warnings: _botConfirmList(opts && opts.warnings),
+    checkboxLabel: (opts && opts.checkboxLabel) || null,
+    checkboxChecked: false,
     confirmLabel: opts && opts.confirmLabel,
     cancelLabel: opts && opts.cancelLabel,
     onConfirm: opts && opts.onConfirm,
     busy: false,
     error: null,
   };
+  _renderBotConfirmModal();
+}
+
+function toggleBotConfirmAck(checked) {
+  const cfg = Fleet.botConfirm;
+  if (!cfg || cfg.busy) return;
+  cfg.checkboxChecked = checked === true;
   _renderBotConfirmModal();
 }
 
@@ -4840,6 +4855,7 @@ function closeBotConfirmModal() {
 function confirmBotConfirmModal() {
   const cfg = Fleet.botConfirm;
   if (!cfg || cfg.busy || typeof cfg.onConfirm !== 'function') return;
+  if (cfg.checkboxLabel && cfg.checkboxChecked !== true) return;
   cfg.busy = true;
   cfg.error = null;
   _renderBotConfirmModal();
@@ -4968,21 +4984,47 @@ function startBotSession() {
   });
 }
 
-function startLiveSpotSession() {
-  const input = document.getElementById('fleet-live-confirm-input');
-  const phrase = input ? input.value : '';
-  _fleetFetch('POST', '/api/bot/start-live-session', {
-    liveModeConfirmed: true,
-    confirmationPhrase: phrase,
-  }).then((payload) => {
-    if (payload.session) Fleet.selectedId = payload.session.sessionId;
-    Fleet.retryLaunchUrl = payload.launchUrl || null;
-    try { window.Toast?.success('Live Spot session requested', 'Open the local worker terminal with live env enabled.'); } catch {}
-    if (payload.launchUrl) { try { window.location.href = payload.launchUrl; } catch (e) { console.warn('[Fleet] live launch failed:', e.message); } }
-    refreshFleet();
-  }).catch((err) => {
-    try { window.Toast?.error('Live Spot blocked', err.message); } catch {}
-    renderFleet();
+// START LIVE SPOT opens a persistent body-level confirmation modal (same
+// infrastructure as the kill-switch confirmations) instead of an inline typed
+// phrase. The modal survives fleet polling rerenders because it lives outside
+// the rerendered fleet panel; the backend confirmation phrase is sent
+// programmatically once the operator checks the acknowledgement box, so the
+// exact backend live gates stay unchanged.
+function openStartLiveSpotModal() {
+  const data = Fleet.data || {};
+  const live = data.liveReadiness || {};
+  const caps = live.caps || {};
+  const pf = live.preflight || null;
+  const preflightStatus = live.preflightFresh
+    ? 'PASSED (fresh' + (pf && pf.checkedAt ? ', checked ' + new Date(pf.checkedAt).toLocaleTimeString() : '') + ')'
+    : (pf && pf.ok === false ? 'FAILED' : 'REQUIRED / STALE');
+  openBotConfirmModal({
+    title: 'Start Live Spot Trading',
+    severity: 'danger',
+    summary: 'REAL MONEY SPOT TRADING — this starts a live Spot session that can place real Binance orders within the micro caps below.',
+    infoLabel: 'Live configuration',
+    info: [
+      'Allowed symbols: ' + (((caps.allowedSymbols || []).join(', ')) || '—'),
+      'Max trade: ' + (caps.maxPositionUsd != null ? '$' + caps.maxPositionUsd : '—'),
+      'Max daily loss: ' + (caps.maxDailyLossUsd != null ? '$' + caps.maxDailyLossUsd : '—'),
+      'Max daily trades: ' + (caps.maxDailyTrades != null ? caps.maxDailyTrades : '—'),
+      'Live preflight: ' + preflightStatus,
+      'Readiness state: ' + (live.state || '—'),
+    ],
+    warnings: ['This uses REAL MONEY. Orders are not simulated and are not testnet.'],
+    checkboxLabel: 'I understand this uses real money',
+    confirmLabel: 'Start live spot',
+    cancelLabel: 'Cancel',
+    onConfirm: () => _fleetFetch('POST', '/api/bot/start-live-session', {
+      liveModeConfirmed: true,
+      confirmationPhrase: 'I UNDERSTAND THIS USES REAL MONEY',
+    }).then((payload) => {
+      if (payload.session) Fleet.selectedId = payload.session.sessionId;
+      Fleet.retryLaunchUrl = payload.launchUrl || null;
+      try { window.Toast?.success('Live Spot session requested', 'Open the local worker terminal with live env enabled.'); } catch {}
+      if (payload.launchUrl) { try { window.location.href = payload.launchUrl; } catch (e) { console.warn('[Fleet] live launch failed:', e.message); } }
+      refreshFleet();
+    }),
   });
 }
 
@@ -5246,6 +5288,11 @@ function _fleetSessionFromData(id) {
   return ((Fleet.data && Fleet.data.sessions) || []).find((s) => s.sessionId === id) || null;
 }
 
+// Mode-aware wording: a live_spot session must never be labelled "testnet" in
+// stop/close confirmations, logs, or panels (and vice versa).
+function _fleetSessionIsLive(s) { return !!s && s.mode === 'live_spot'; }
+function _fleetModeLabel(s) { return _fleetSessionIsLive(s) ? 'LIVE' : 'TESTNET'; }
+
 function stopAndCloseSession(sessionId) {
   const id = sessionId || Fleet.selectedId;
   if (!id) { window.Toast?.error('No session', 'No session to stop.'); return; }
@@ -5343,7 +5390,7 @@ function reconnectWorkerToSession(sessionId) {
 function emergencyCloseSession(sessionId) {
   const id = sessionId || Fleet.selectedId;
   if (!id) { window.Toast?.error('No session selected', 'Select a worker first.'); return; }
-  if (!window.confirm('Emergency close ALL open testnet positions for session ' + id.slice(0, 12) + '? The worker stays alive.')) return;
+  if (!window.confirm('Emergency close ALL open ' + _fleetModeLabel(_fleetSessionFromData(id)).toLowerCase() + ' positions for session ' + id.slice(0, 12) + '? The worker stays alive.')) return;
   Fleet.selectedId = id;
   Fleet.emergency = { sessionId: id, kind: 'emergency', requestedAt: Date.now() };
   renderFleet(); // show CLOSE REQUESTED immediately
@@ -5835,8 +5882,7 @@ function renderFleet() {
     : liveClosed ? 'LIVE CLOSED'
     : liveState;
   const adminLiveControls = data.isAdmin ? '<div class="fleet-live-readiness__confirm">'
-    + '<input id="fleet-live-confirm-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type: I UNDERSTAND THIS USES REAL MONEY">'
-    + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="startLiveSpotSession()"' + (live.canStartLive ? '' : ' disabled') + '>START LIVE SPOT</button>'
+    + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openStartLiveSpotModal()"' + (live.canStartLive ? '' : ' disabled') + '>START LIVE SPOT</button>'
     + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyStopAllLiveSpot()">EMERGENCY STOP ALL LIVE SPOT</button>'
     + (globalKillActive
         ? '<button id="fleet-clear-gks-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="clearGlobalKillSwitch()">CLEAR GLOBAL KILL SWITCH</button>'
@@ -5862,7 +5908,7 @@ function renderFleet() {
     + (anyOpenPosition ? '' : '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="openInstallWorker()">Install Worker on this computer</button>')
     + (anyOpenPosition
         // Open position → START is disabled with a reason; reconnect is primary.
-        ? '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" disabled title="Disabled: close BTCUSDT position first">START BOT (disabled: close position first)</button>'
+        ? '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" disabled title="Disabled: close ' + _esc((openPosSession.openPositions && openPosSession.openPositions[0] && openPosSession.openPositions[0].symbol) || 'open') + ' position first">START BOT (disabled: close position first)</button>'
           + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="reconnectWorkerToSession(\'' + _esc(openPosSession.sessionId) + '\')">Reconnect Worker to Position Session</button>'
         : !newEntriesAllowed
           // Non-durable store → START disabled (close-only mode).
@@ -5885,11 +5931,14 @@ function renderFleet() {
     + '<div class="fleet-live-readiness__banner">LIVE SPOT</div>'
     + '</div>'
     + '<div class="fleet-live-readiness__warn">REAL MONEY SPOT TRADING</div>'
+    // Caps come from the backend liveReadiness payload (env-driven). Never
+    // substitute hardcoded symbol/cap defaults here — a stale BTCUSDT/$10
+    // fallback misrepresents what the backend will actually enforce.
     + '<div class="fleet-live-readiness__caps">'
-    + '<div><span>Max trade</span><b>$' + _esc(liveCaps.maxPositionUsd || 10) + '</b></div>'
-    + '<div><span>Max daily loss</span><b>$' + _esc(liveCaps.maxDailyLossUsd || 5) + '</b></div>'
-    + '<div><span>Max daily trades</span><b>' + _esc(liveCaps.maxDailyTrades || 3) + '</b></div>'
-    + '<div><span>Allowed symbols</span><b>' + _esc((liveCaps.allowedSymbols || ['BTCUSDT']).join(', ')) + '</b></div>'
+    + '<div><span>Max trade</span><b>' + (liveCaps.maxPositionUsd != null ? '$' + _esc(liveCaps.maxPositionUsd) : '—') + '</b></div>'
+    + '<div><span>Max daily loss</span><b>' + (liveCaps.maxDailyLossUsd != null ? '$' + _esc(liveCaps.maxDailyLossUsd) : '—') + '</b></div>'
+    + '<div><span>Max daily trades</span><b>' + (liveCaps.maxDailyTrades != null ? _esc(liveCaps.maxDailyTrades) : '—') + '</b></div>'
+    + '<div><span>Allowed symbols</span><b>' + (_esc((liveCaps.allowedSymbols || []).join(', ')) || '—') + '</b></div>'
     + '</div>'
     + (globalKillActive ? '<div class="fleet-live-readiness__kill">GLOBAL KILL SWITCH ACTIVE</div><div class="fleet-smoke__note">Entries are blocked because global kill switch is active.</div>' : '')
     + adminLiveControls
@@ -5925,10 +5974,10 @@ function renderFleet() {
       + (mismatchWorker ? '<div class="fleet-orphan-warning" style="color:#ff4a4a;border-color:#ff4a4a"><b>WORKER CONNECTED TO DIFFERENT SESSION — RECONNECT REQUIRED</b></div>' : '')
       + (progress ? '<div class="fleet-progress">' + _esc(progress) + '</div>' : '')
       + '<div class="fleet-action-row">'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop fleet-close-primary" onclick="stopAndCloseSession(\'' + _esc(openPosSession.sessionId) + '\')">CLOSE ' + _esc(sym) + ' TESTNET POSITION</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop fleet-close-primary" onclick="stopAndCloseSession(\'' + _esc(openPosSession.sessionId) + '\')">CLOSE ' + _esc(sym) + ' ' + _fleetModeLabel(openPosSession) + ' POSITION</button>'
       + '</div>'
       + '<div class="fleet-action-row fleet-action-row--secondary">'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _esc(openPosSession.sessionId) + '\')">Emergency Close Testnet</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _esc(openPosSession.sessionId) + '\')">Emergency Close ' + (_fleetSessionIsLive(openPosSession) ? 'Live' : 'Testnet') + '</button>'
       + (openPosWorkerOnline ? '' : '<button type="button" class="paperbot-control-btn" onclick="reconnectWorkerToSession(\'' + _esc(openPosSession.sessionId) + '\')">Reconnect Worker</button>')
       + '</div>'
       + '<div class="fleet-debug-rows">'
@@ -5954,10 +6003,10 @@ function renderFleet() {
   if (Fleet.workerConnectFailed) {
     html += '<div class="fleet-error-panel fleet-error-panel--connect">'
       + '<div class="fleet-error-panel__title">' + (workerConnectOpenPosition ? 'WORKER OFFLINE &mdash; POSITION OPEN' : 'Worker did not connect') + '</div>'
-      + '<div class="fleet-error-panel__body">' + (workerConnectOpenPosition ? 'The backend has an open testnet position but no live worker heartbeat for this session.' : 'The local worker has not sent a heartbeat. Install or retry the local worker.') + '</div>'
+      + '<div class="fleet-error-panel__body">' + (workerConnectOpenPosition ? 'The backend has an open ' + _fleetModeLabel(sel).toLowerCase() + ' position but no worker heartbeat for this session.' : 'The local worker has not sent a heartbeat. Install or retry the local worker.') + '</div>'
       + '<div class="fleet-action-row">'
       + (Fleet.retryLaunchUrl ? '<button type="button" class="paperbot-control-btn" onclick="retryOpenWorkerTerminal()">Retry Open Worker Terminal</button>' : '')
-      + (workerConnectOpenPosition ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseTestnet()">Emergency Close Testnet</button>' : '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="openInstallWorker()">Install Worker</button>')
+      + (workerConnectOpenPosition ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseTestnet()">Emergency Close ' + (_fleetSessionIsLive(sel) ? 'Live' : 'Testnet') + '</button>' : '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="openInstallWorker()">Install Worker</button>')
       + (!workerConnectOpenPosition ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearSelectedStaleSession()">Clear stale session</button>' : '')
       + '</div>'
       + '</div>';
@@ -6045,13 +6094,15 @@ function renderFleet() {
     if (_fleetExitedCleanly(sel)) {
       html += '<div class="fleet-clean-exit">Last worker exited cleanly — no open position. START BOT to run again.</div>';
     }
+    const selLive = _fleetSessionIsLive(sel);
+    const selEmergencyLabel = 'Emergency Close ' + (selLive ? 'Live' : 'Testnet');
     if (orphanOpen) {
       html += '<div class="fleet-orphan-warning">'
-        + '<b>WORKER OFFLINE &mdash; POSITION OPEN</b> The position is still held on Binance Spot Testnet. '
-        + 'Bring the worker back online so it can close the position, or use Emergency Close Testnet.'
+        + '<b>WORKER OFFLINE &mdash; POSITION OPEN</b> The position is still held on ' + (selLive ? 'Binance Spot (LIVE - REAL MONEY)' : 'Binance Spot Testnet') + '. '
+        + 'Bring the worker back online so it can close the position, or use ' + selEmergencyLabel + '.'
         + '<div class="fleet-action-row">'
         + '<button type="button" class="paperbot-control-btn" onclick="reconnectWorkerToSession(\'' + _esc(sel.sessionId) + '\')">Reconnect Worker to Position Session</button>'
-        + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _esc(sel.sessionId) + '\')">Emergency Close Testnet</button>'
+        + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _esc(sel.sessionId) + '\')">' + selEmergencyLabel + '</button>'
         + '</div>'
         + '</div>';
     } else if (openCountDetail > 0 && online && sel.worker && sel.worker.openPositions === 0) {
@@ -6060,7 +6111,7 @@ function renderFleet() {
         + 'Reconnect worker / Emergency Close required.'
         + '<div class="fleet-action-row">'
         + '<button type="button" class="paperbot-control-btn" onclick="reconnectWorkerToSession(\'' + _esc(sel.sessionId) + '\')">Reconnect Worker</button>'
-        + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _esc(sel.sessionId) + '\')">Emergency Close Testnet</button>'
+        + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseSession(\'' + _esc(sel.sessionId) + '\')">' + selEmergencyLabel + '</button>'
         + '</div>'
         + '</div>';
     }
@@ -6072,7 +6123,7 @@ function renderFleet() {
       + '<div><span>Worker state</span><b>' + _esc((sel.worker && sel.worker.currentState) || '—') + '</b></div>'
       + '<div><span>Realized PnL</span><b>' + (sel.realizedPnl >= 0 ? '+' : '') + (Number(sel.realizedPnl) || 0).toFixed(2) + '</b></div>'
       + '<div><span>Open positions</span><b>' + (sel.openPositions ? sel.openPositions.length : 0) + '</b></div>'
-      + '<div><span>Mode</span><b>TESTNET</b></div>'
+      + '<div><span>Mode</span><b>' + (selLive ? 'LIVE SPOT - REAL MONEY' : 'TESTNET') + '</b></div>'
       + '</div>';
 
     // Copyable debug rows (spec F): exact sessionId + the worker's bound session.
@@ -6092,7 +6143,7 @@ function renderFleet() {
       + (selStale && openCountDetail === 0 ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearSelectedStaleSession()">CLEAR STALE SESSION</button>' : '')
       + '<button type="button" class="paperbot-control-btn" onclick="pauseBotEntries()"' + (sel.pauseRequested || !canStop ? ' disabled' : '') + '>PAUSE ENTRIES</button>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="resumeBotEntries()"' + (sel.pauseRequested && canStop ? '' : ' disabled') + '>RESUME ENTRIES</button>'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseTestnet()"' + (canStop ? '' : ' disabled') + '>EMERGENCY CLOSE TESTNET</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseTestnet()"' + (canStop ? '' : ' disabled') + '>EMERGENCY CLOSE ' + _fleetModeLabel(sel) + '</button>'
       + '</div>';
 
     // ── Testnet smoke order ──
