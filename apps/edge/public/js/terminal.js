@@ -5667,9 +5667,25 @@ function _fleetApplyConfigToForm(cfg) {
   _fleetSetConfigStatus('Config saved', 'saved');
 }
 
+// Live-aware config labels (spec 2): the config form is built once, so its header
+// and note are updated here on every poll. In live mode we drop "TESTNET" wording
+// and frame the live caps as backend-enforced (shown in the Live Readiness panel).
+function _fleetUpdateConfigLabels(liveMode) {
+  const title = document.getElementById('fleet-cfg-title');
+  if (title) title.textContent = liveMode ? 'BOT CONFIG / LIVE CAPS' : 'BOT CONFIG (TESTNET, max trade ≤ $10)';
+  const note = document.getElementById('fleet-cfg-note');
+  if (note) {
+    note.textContent = liveMode
+      ? 'Live caps (allowed symbol, max trade, daily limits) are enforced by the backend and shown in the Live Readiness panel above. The fields below are advanced bot caps.'
+      : 'This form sets testnet caps only. Live trading (allowLive) is enabled from the Live Readiness panel via START LIVE SPOT — confirm the real-money checkbox there. No phrase typing required.';
+  }
+}
+
 function _fleetBuildConfigForm(container) {
   const d = _fleetCompleteConfig(window.__botFleetConfigDraft);
-  let html = '<div class="fleet-section-title">BOT CONFIG (TESTNET, max trade ≤ $10)</div><div class="fleet-config-grid">';
+  // Header/note text is set live-aware by _fleetUpdateConfigLabels() on every poll;
+  // these are the default (testnet) strings used before the first render.
+  let html = '<div id="fleet-cfg-title" class="fleet-section-title">BOT CONFIG (TESTNET, max trade ≤ $10)</div><div class="fleet-config-grid">';
   for (const f of FLEET_CONFIG_FIELDS) {
     const val = String(_fleetNum(d[f.name], FLEET_CONFIG_DEFAULTS[f.name]));
     const attrs = 'type="number" name="' + f.name + '" id="cfg-' + f.name + '" value="' + val + '"'
@@ -5685,7 +5701,7 @@ function _fleetBuildConfigForm(container) {
     + '<span id="fleet-cfg-status" class="fleet-cfg-status">Config saved</span>'
     + '</div>'
     + '<div id="fleet-cfg-error" class="fleet-cfg-error"></div>'
-    + '<span class="fleet-cfg-note">This form sets testnet caps only. Live trading (allowLive) is enabled from the Live Readiness panel via START LIVE SPOT — confirm the real-money checkbox there. No phrase typing required.</span>';
+    + '<span id="fleet-cfg-note" class="fleet-cfg-note">This form sets testnet caps only. Live trading (allowLive) is enabled from the Live Readiness panel via START LIVE SPOT — confirm the real-money checkbox there. No phrase typing required.</span>';
   container.innerHTML = html;
   for (const f of FLEET_CONFIG_FIELDS) {
     const el = document.getElementById('cfg-' + f.name);
@@ -6102,12 +6118,16 @@ function renderFleet() {
   // Live mode is active whenever any live_spot session exists. Drives the live-first
   // cockpit: default selection, the testnet/paper archive, and the closed-card start.
   const liveModeActive = _fleetLiveModeActive(sessions);
-  const liveStopping = sessions.some((s) => s.mode === 'live_spot' && (s.stopRequested || s.status === 'stopping' || s.status === 'stop_requested'));
-  const liveClosed = sessions.some((s) => s.mode === 'live_spot' && (s.status === 'stopped' || s.status === 'expired') && _fleetOpenPositionCount(s) === 0);
+  // "LIVE STOPPING / CLOSING" only applies while a live position is actually being
+  // closed (openPositions > 0). A lingering stopRequested flag on a flat, stopped
+  // session must NOT read as stopping (spec 1) — it is idle/ready.
+  const liveStopping = sessions.some((s) => s.mode === 'live_spot'
+    && (s.stopRequested || s.status === 'stopping' || s.status === 'stop_requested')
+    && _fleetOpenPositionCount(s) > 0);
   const liveDisplayState = globalKillActive ? 'LIVE PAUSED'
     : liveStopping ? 'LIVE STOPPING / CLOSING'
     : liveRunning && liveOpen ? 'LIVE RUNNING - REAL MONEY'
-    : liveClosed ? 'LIVE CLOSED'
+    : liveModeActive && !liveOpen ? 'LIVE IDLE / READY'
     : liveState;
   // Locked reason: never leave a dead disabled button without an explanation.
   // When readiness IS met but the user has not consented yet (allowLive=false),
@@ -6651,6 +6671,9 @@ function renderFleet() {
   // Only the dynamic half is replaced — config inputs are untouched.
   const dyn = document.getElementById('bot-fleet-dynamic');
   if (dyn) dyn.innerHTML = html;
+  // Keep the (build-once) config header/note in sync with live mode without
+  // touching the inputs the operator may be editing.
+  _fleetUpdateConfigLabels(liveModeActive);
   if (data.config && !window.__botFleetConfigDirty && !_fleetConfigFocused()) _fleetApplyConfigToForm(data.config);
   // Retry the initial config load if it failed earlier.
   if (!Fleet.configLoaded) _fleetInitConfig();
