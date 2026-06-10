@@ -538,6 +538,8 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .fleet-clean-exit{margin:6px 0;padding:6px 9px;border:1px solid rgba(120,140,160,.3);border-radius:6px;background:rgba(120,140,160,.07);font-size:11px;color:var(--txt2)}
 .fleet-history__row--btn{cursor:pointer;align-items:center}
 .fleet-history__row--btn:hover{color:var(--txt)}
+/* Testnet/paper archive: visually muted so it never competes with the live feed. */
+.fleet-archive>summary{color:var(--txt3);opacity:.85}
 .fleet-bottom{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 .fleet-config{flex:1;min-width:280px;background:var(--s2);border:1px solid rgba(255,255,255,.08);border-radius:6px;padding:10px}
 .fleet-config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:7px;margin-bottom:8px}

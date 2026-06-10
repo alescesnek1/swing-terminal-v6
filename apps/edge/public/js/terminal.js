@@ -5283,6 +5283,13 @@ function _fleetSessionAction(action, label, opts) {
 
 function stopBotSession() {
   const id = Fleet.selectedId;
+  // Convergence + disambiguation (spec 1/2/5): if this session holds an open
+  // position, STOP BOT is NOT a separate "stop the bot" action — it must close the
+  // position. Delegate to the exact same close command the CLOSE button uses
+  // (the real-money modal for live, the native confirm for testnet) so there is
+  // never an ambiguous STOP-that-leaves-a-position-open path.
+  const sess = _fleetSessionFromData(id);
+  if (sess && _fleetOpenPositionCount(sess) > 0) { stopAndCloseSession(id); return; }
   _fleetSessionAction('stop', 'Stop');
   // Optional local fallback signal to the protocol helper.
   if (id) { try { window.location.href = 'swingworker://stop?session=' + encodeURIComponent(id) + '&control=' + encodeURIComponent(location.origin); } catch {} }
@@ -5300,22 +5307,72 @@ function _fleetSessionFromData(id) {
 function _fleetSessionIsLive(s) { return !!s && s.mode === 'live_spot'; }
 function _fleetModeLabel(s) { return _fleetSessionIsLive(s) ? 'LIVE' : 'TESTNET'; }
 
-function stopAndCloseSession(sessionId) {
-  const id = sessionId || Fleet.selectedId;
-  if (!id) { window.Toast?.error('No session', 'No session to stop.'); return; }
-  if (!window.confirm('Stop bot and close the open position on session ' + id.slice(0, 12) + '? Worker will MARKET SELL then exit.')) return;
+// Core close action (no confirmation prompt): queues the graceful STOP that makes
+// the worker MARKET SELL the open position then exit. Returns the fetch promise so
+// callers (e.g. the live confirmation modal) can show progress and surface errors.
+// This is the SINGLE close command both the CLOSE button and STOP BOT converge on.
+function _doStopAndCloseSession(id) {
   Fleet.selectedId = id;
   Fleet.emergency = { sessionId: id, kind: 'stop', requestedAt: Date.now() };
   renderFleet(); // show CLOSE REQUESTED immediately (do not wait for the next poll)
   const sess = _fleetSessionFromData(id);
   const workerOffline = !(sess && sess.worker && sess.worker.online);
   Fleet.retryLaunchUrl = _fleetLaunchUrl(id);
-  _fleetFetch('POST', '/api/bot/session/' + encodeURIComponent(id) + '/stop', {}).then((payload) => {
+  return _fleetFetch('POST', '/api/bot/session/' + encodeURIComponent(id) + '/stop', {}).then((payload) => {
     try { window.Toast?.success('Close requested', (payload.commandType || 'STOP') + ' queued · ' + id.slice(0, 12)); } catch {}
     // Only (re)launch the worker if it is offline — never disrupt an online worker.
     if (workerOffline) { try { window.location.href = Fleet.retryLaunchUrl; } catch {} }
     refreshFleet();
-  }).catch((err) => window.Toast?.error('Stop failed', err.message));
+  });
+}
+
+// Live close (REAL MONEY) goes through the persistent confirmation modal: symbol,
+// qty, MARKET SELL, real-money warning, and a consent checkbox. On confirm it runs
+// the SAME _doStopAndCloseSession command as STOP BOT (no separate close path).
+function confirmCloseLivePosition(sessionId) {
+  const id = sessionId || Fleet.openPositionSessionId || Fleet.selectedId;
+  if (!id) { window.Toast?.error('No live position', 'No live position to close.'); return; }
+  const sess = _fleetSessionFromData(id);
+  const pos = (sess && sess.openPositions && sess.openPositions[0]) || {};
+  const symbol = pos.symbol || 'BTCUSDC';
+  const qty = pos.executedQty != null && pos.executedQty !== '' ? String(pos.executedQty) : '—';
+  const entryOrderId = pos.orderId != null && pos.orderId !== '' ? String(pos.orderId) : '—';
+  const estValue = pos.notionalUsd != null ? '$' + pos.notionalUsd
+    : (Number(pos.executedQty) > 0 && Number(pos.entryPrice) > 0 ? '~$' + (Number(pos.executedQty) * Number(pos.entryPrice)).toFixed(2) : '—');
+  openBotConfirmModal({
+    title: 'Close ' + symbol + ' Live Position',
+    severity: 'danger',
+    summary: 'REAL MONEY — the live worker will place one real Binance Spot MARKET SELL to close this position, then stop.',
+    infoLabel: 'Close order',
+    info: [
+      'Symbol: ' + symbol,
+      'Side: SELL',
+      'Type: MARKET',
+      'Qty: ' + qty,
+      'Entry order: ' + entryOrderId,
+      'Estimated value: ' + estValue,
+      'Live session: ' + id,
+    ],
+    warnings: [
+      'This uses REAL MONEY. The position is sold at market immediately.',
+      'After the close fills, the worker stops.',
+    ],
+    checkboxLabel: 'I understand this closes my live position with a real-money market sell',
+    confirmLabel: 'Close ' + symbol + ' live position',
+    cancelLabel: 'Cancel',
+    onConfirm: () => _doStopAndCloseSession(id),
+  });
+}
+
+function stopAndCloseSession(sessionId) {
+  const id = sessionId || Fleet.selectedId;
+  if (!id) { window.Toast?.error('No session', 'No session to stop.'); return; }
+  const sess = _fleetSessionFromData(id);
+  // Live close requires the explicit real-money confirmation modal; testnet keeps
+  // the lightweight native confirm. Both end on the same _doStopAndCloseSession.
+  if (_fleetSessionIsLive(sess)) { confirmCloseLivePosition(id); return; }
+  if (!window.confirm('Stop bot and close the open position on session ' + id.slice(0, 12) + '? Worker will MARKET SELL then exit.')) return;
+  _doStopAndCloseSession(id).catch((err) => window.Toast?.error('Stop failed', err.message));
 }
 function clearSelectedStaleSession() {
   const id = Fleet.selectedId;
@@ -6103,15 +6160,29 @@ function renderFleet() {
       + '</div>';
   }
 
+  // Feed simplification (spec UI 1–4): when live mode is active, testnet/paper
+  // sessions that hold no open position are demoted from the primary WORKERS list
+  // into a collapsed "Testnet / Paper sessions" archive so the live cockpit shows
+  // live risk only. Any session with an open position (live OR testnet) always stays
+  // primary — open risk is never hidden. Live audit trail is preserved, just collapsed.
+  const liveModeActive = sessions.some(_fleetSessionIsLive) || liveRunning || liveOpen;
+  const archivedTestnetSessions = liveModeActive
+    ? activeSessions.filter((s) => !_fleetSessionIsLive(s) && _fleetOpenPositionCount(s) === 0)
+    : [];
+  const primaryActiveSessions = archivedTestnetSessions.length
+    ? activeSessions.filter((s) => !archivedTestnetSessions.includes(s))
+    : activeSessions;
+
   // Body: worker list + detail
   html += '<div class="fleet-body">';
-  html += '<div class="fleet-workers"><div class="fleet-col-title">WORKERS (' + activeSessions.length + ')</div>';
-  if (!activeSessions.length) {
+  html += '<div class="fleet-workers"><div class="fleet-col-title">WORKERS (' + primaryActiveSessions.length + ')</div>';
+  if (!primaryActiveSessions.length) {
     html += '<div class="fleet-empty">'
-      + (historySessions.length ? 'No active worker. Last worker exited cleanly — click START BOT to run again.' : 'No active sessions. Click START BOT.')
+      + (liveModeActive ? 'No live worker. Use START LIVE SPOT, or expand the archive below for testnet/paper sessions.'
+        : historySessions.length ? 'No active worker. Last worker exited cleanly — click START BOT to run again.' : 'No active sessions. Click START BOT.')
       + '</div>';
   }
-  for (const s of activeSessions) {
+  for (const s of primaryActiveSessions) {
     const online = s.worker && s.worker.online;
     const openCountRow = Array.isArray(s.openPositions) ? s.openPositions.length : 0;
     const orphanRow = !online && openCountRow > 0;
@@ -6126,6 +6197,19 @@ function renderFleet() {
       + (badge ? '<span class="fleet-worker__badge">' + _esc(badge) + '</span>' : '')
       + '<span class="fleet-worker__meta">' + _esc((s.worker && s.worker.platform) || '—') + ' · ' + _esc(s.status) + '</span>'
       + '</div>';
+  }
+  // Testnet / Paper archive (spec UI 4): collapsed, neutral, out of the live feed.
+  if (archivedTestnetSessions.length) {
+    html += '<details class="fleet-history fleet-archive"><summary>Testnet / Paper sessions (' + archivedTestnetSessions.length + ')</summary>';
+    for (const s of archivedTestnetSessions.slice(0, 12)) {
+      const onlineA = _fleetWorkerOnline(s);
+      const note = onlineA ? 'online' : (_fleetStaleLabel(s) || s.status || 'idle');
+      html += '<div class="fleet-history__row fleet-history__row--btn" onclick="selectFleetSession(\'' + _esc(s.sessionId) + '\')">'
+        + '<span class="fleet-dot" style="background:' + (onlineA ? '#00ff80' : '#5a6b7a') + '"></span>'
+        + '<span>' + _esc((s.sessionId || '').slice(0, 12)) + '</span>'
+        + '<b>' + _esc(note) + '</b></div>';
+    }
+    html += '</details>';
   }
   // History / Stopped Sessions: collapsed, neutral (never red), out of the way.
   const historyCount = historySessions.length + clearedSessions.length;
@@ -6218,13 +6302,21 @@ function renderFleet() {
       + '</div>';
 
     const canStop = !(sel.status === 'stopped' || sel.status === 'expired');
+    // STOP BOT disambiguation (spec 1/2): when this session holds an open position,
+    // STOP BOT is NOT the primary control — the red CLOSE … POSITION panel above is.
+    // Disable STOP BOT here with an explicit "close first" message so the operator is
+    // never offered an ambiguous STOP that looks like it closes the position. (If it
+    // is ever clicked, stopBotSession() still delegates to the same close command.)
+    const closeFirst = openCountDetail > 0;
+    const closeFirstMsg = 'Close the ' + (selLive ? 'live' : 'open') + ' position first';
     html += '<div class="fleet-detail-actions">'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="stopBotSession()"' + (canStop ? '' : ' disabled') + '>STOP BOT</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="stopBotSession()"' + ((canStop && !closeFirst) ? '' : ' disabled') + (closeFirst ? ' title="' + _esc(closeFirstMsg) + '"' : '') + '>STOP BOT' + (closeFirst ? ' (close position first)' : '') + '</button>'
       + (selStale && openCountDetail === 0 ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearSelectedStaleSession()">CLEAR STALE SESSION</button>' : '')
       + '<button type="button" class="paperbot-control-btn" onclick="pauseBotEntries()"' + (sel.pauseRequested || !canStop ? ' disabled' : '') + '>PAUSE ENTRIES</button>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="resumeBotEntries()"' + (sel.pauseRequested && canStop ? '' : ' disabled') + '>RESUME ENTRIES</button>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyCloseTestnet()"' + (canStop ? '' : ' disabled') + '>EMERGENCY CLOSE ' + _fleetModeLabel(sel) + '</button>'
-      + '</div>';
+      + '</div>'
+      + (closeFirst ? '<div class="fleet-smoke__note">' + _esc(closeFirstMsg) + ' — use the red CLOSE ' + _esc((sel.openPositions && sel.openPositions[0] && sel.openPositions[0].symbol) || '') + ' ' + _fleetModeLabel(sel) + ' POSITION button above.</div>' : '');
 
     // ── Entry actions: testnet smoke OR live micro order (never both) ──
     // Visible only when this session has an online worker, is running, has zero
