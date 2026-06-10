@@ -1206,10 +1206,17 @@ function liveReadiness(fleet, identity) {
   // consent flag, flipped on by the confirmed live-start modal — it is NOT part
   // of canStartLive, so the button stays clickable to drive the unlock flow.
   const readyToConfirm = state === 'LIVE READY - MICRO CAPS' && isAdmin(identity) && identity.verified === true;
+  const daily = liveDailyCounters(fleet);
   return {
     state,
     caps,
     env,
+    // Fleet-wide live daily usage (UTC day) so the cockpit can show
+    // dailyTradesUsed / maxDailyTrades and dailyLoss / maxDailyLoss.
+    dailyTradesUsed: daily.trades,
+    dailyTradesRemaining: Math.max(0, caps.maxDailyTrades - daily.trades),
+    dailyLossUsd: daily.realizedLoss,
+    dailyRealizedPnl: daily.realizedPnl,
     durable: storeInfo.durable,
     preflightFresh,
     preflightPassed: preflightFresh,
@@ -1222,6 +1229,72 @@ function liveReadiness(fleet, identity) {
     // True when readiness is fully met but the user has not yet consented
     // (allowLive=false): the modal will both enable live trading and start.
     requiresConsent: readyToConfirm && userConfig.allowLive !== true,
+  };
+}
+
+// ── Autonomous trader status (DORMANT by default) ───────────────────────────
+// Mirrors scripts/auto/auto-env.mjs. Autonomous LIVE execution is impossible
+// unless every flag below is explicitly set; the default env yields OFF / locked.
+// This surfaces status to the cockpit only — no execution loop is wired here, so
+// reading the fleet can never trigger an autonomous trade.
+const AUTO_LIVE_REQUIRED_FLAGS = [
+  ['AUTO_TRADER_ENABLED', 'true'],
+  ['AUTO_TRADER_MODE', 'live_spot'],
+  ['AUTO_LIVE_TRADING_ENABLED', 'true'],
+  ['BOT_LIVE_TRADING_ENABLED', 'true'],
+  ['BOT_ALLOW_REAL_ORDERS', 'true'],
+  ['LOCAL_WORKER_LIVE_CONFIRM', 'true'],
+  ['LIVE_SPOT_ACK', LIVE_SPOT_ACK_TEXT],
+];
+const AUTO_LIVE_CONFIRM_PHRASE = 'I UNDERSTAND AUTONOMOUS LIVE SPOT USES REAL MONEY';
+function autoLiveExecutionGate() {
+  const missing = AUTO_LIVE_REQUIRED_FLAGS
+    .filter(([k, v]) => String(process.env[k] == null ? '' : process.env[k]) !== v)
+    .map(([k]) => k);
+  return { allowed: missing.length === 0, missing };
+}
+function autoTraderStatus(fleet) {
+  const persisted = (fleet && fleet.autoTrader) || {};
+  const requestedMode = String(persisted.requestedMode || '').toLowerCase();
+  const envEnabled = process.env.AUTO_TRADER_ENABLED === 'true';
+  const enabled = requestedMode && requestedMode !== 'off' ? true : envEnabled;
+  const modeRaw = requestedMode && requestedMode !== 'off' ? requestedMode : (process.env.AUTO_TRADER_MODE || 'shadow');
+  const mode = ['shadow', 'paper', 'live_spot'].includes(modeRaw) ? modeRaw : 'shadow';
+  const gate = autoLiveExecutionGate();
+  let effectiveMode = 'off';
+  if (enabled) effectiveMode = mode === 'live_spot' ? (gate.allowed ? 'live_spot' : 'live_locked') : mode;
+  const statusLabel = { off: 'OFF', shadow: 'SHADOW', paper: 'PAPER', live_locked: 'LIVE LOCKED', live_spot: 'LIVE ACTIVE' }[effectiveMode];
+  const caps = liveRiskCaps();
+  const daily = liveDailyCounters(fleet);
+  const paperEvidence = Number(persisted.paperTradeCount) || 0;
+  return {
+    enabled,
+    mode,
+    requestedMode: requestedMode || (enabled ? mode : 'off'),
+    liveEnabled: process.env.AUTO_LIVE_TRADING_ENABLED === 'true',
+    effectiveMode,
+    status: statusLabel,
+    candidate: persisted.candidate || null,
+    score: Number.isFinite(Number(persisted.score)) ? Number(persisted.score) : null,
+    reasons: Array.isArray(persisted.reasons) ? persisted.reasons : [],
+    riskBlocks: Array.isArray(persisted.riskBlocks) ? persisted.riskBlocks : [],
+    liveExecutionAllowed: gate.allowed,
+    liveGateMissing: gate.missing,
+    liveAllowedSymbols: caps.allowedSymbols,
+    dailyTradesUsed: daily.trades,
+    maxDailyTrades: caps.maxDailyTrades,
+    dailyTradesRemaining: Math.max(0, caps.maxDailyTrades - daily.trades),
+    dailyLossUsd: daily.realizedLoss,
+    maxDailyLossUsd: caps.maxDailyLossUsd,
+    dailyLossRemainingUsd: Math.max(0, caps.maxDailyLossUsd - daily.realizedLoss),
+    evalIntervalSec: Number(process.env.AUTO_TRADER_EVAL_SEC) || 60,
+    lastDecision: persisted.lastDecision || null,
+    nextEvaluationAt: persisted.nextEvaluationAt || null,
+    positionState: persisted.positionState || null,
+    paperTradeCount: paperEvidence,
+    confirmationPhrase: AUTO_LIVE_CONFIRM_PHRASE,
+    // Live promotion requires the env gate to pass AND evidence (paper round-trips).
+    canPromoteLive: gate.allowed && paperEvidence > 0,
   };
 }
 
@@ -1446,6 +1519,41 @@ function sessionClosedTrades(fleet, sessionId) {
     .filter((p) => p && CLOSED_POSITION_STATUSES.has(p.status))
     .map(mapClosedTrade)
     .filter(Boolean);
+}
+
+function utcDayStartMs(now = Date.now()) {
+  const d = new Date(now);
+  d.setUTCHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+// Live daily counters across ALL live_spot sessions for the current UTC day.
+//
+// BUG FIX: the live daily-trade cap was previously computed from a SINGLE session's
+// closed trades (sessionClosedTrades(fleet, sessionId)). Since each live round-trip
+// runs in a NEW session, the per-session counter always saw 0 trades and the cap
+// (e.g. 2) was never reached across multiple live sessions in one day. The count is
+// now fleet-wide and live-only: paper/testnet trades are excluded, and it is derived
+// from the durable positionResults store so it survives reloads.
+function liveDailyCounters(fleet, now = Date.now()) {
+  const dayStartMs = utcDayStartMs(now);
+  const sessions = (fleet && fleet.botSessions) || {};
+  let trades = 0;
+  let realizedLoss = 0;
+  let realizedPnl = 0;
+  for (const [sid, session] of Object.entries(sessions)) {
+    if (!session || session.mode !== 'live_spot') continue;
+    for (const t of sessionClosedTrades(fleet, sid)) {
+      if (t.mode !== 'live_spot') continue; // never count paper/testnet
+      const ts = new Date(t.timeClosed || 0).getTime();
+      if (!(Number.isFinite(ts) && ts >= dayStartMs)) continue;
+      trades += 1;
+      const pnl = Number(t.realizedPnl) || 0;
+      realizedPnl += pnl;
+      realizedLoss += Math.max(0, -pnl);
+    }
+  }
+  return { trades, realizedLoss, realizedPnl, dayStartMs };
 }
 
 function normalizeOpenPositionsSummary(input, sessionId) {
@@ -2109,6 +2217,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       identity: { userId: identity.userId, email: identity.email, orgId: identity.orgId, verified: identity.verified, authMode: identity.authMode },
       sessions,
       liveReadiness: liveReadiness(fleet, identity),
+      autoTrader: autoTraderStatus(fleet),
       liveAuditEvents: (fleet.liveAuditEvents || []).filter((e) => isAdmin(identity) || e.who === identity.email || e.who === identity.userId).slice(0, 50),
       globalKillSwitchActive: process.env.BOT_GLOBAL_KILL_SWITCH === 'true' || fleet.globalKillSwitch === true,
       // Echo the open-position session ids so the client can preserve them across
@@ -2120,6 +2229,38 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       productionReady: false,
       realOrderSubmitted: false,
     });
+  }
+
+  // POST /api/bot/auto-trader/mode — set the OPERATOR-REQUESTED autonomous mode.
+  //
+  // SAFETY: this only persists an operator preference (off/shadow/paper/live_spot).
+  // It NEVER executes a trade. Promotion to live_spot additionally requires the env
+  // live-execution gate to pass, evidence (≥1 paper round-trip), and an explicit
+  // confirm flag — and even then, no order is placed by this endpoint.
+  if (base === 'auto-trader') {
+    const action = segments[1] || '';
+    if (action !== 'mode') return json(req, { ok: false, error: 'Not found' }, 404);
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    if (!isAdmin(identity) || identity.verified !== true) return json(req, { ok: false, error: 'Admin verification required.' }, 403);
+    const requested = String((body && body.mode) || '').toLowerCase();
+    if (!['off', 'shadow', 'paper', 'live_spot'].includes(requested)) {
+      return json(req, { ok: false, error: 'mode must be off|shadow|paper|live_spot' }, 400);
+    }
+    const fleet = await loadFleet();
+    if (requested === 'live_spot') {
+      const gate = autoLiveExecutionGate();
+      const evidence = Number((fleet.autoTrader || {}).paperTradeCount) || 0;
+      if (!gate.allowed) return json(req, { ok: false, error: `Live auto-trading gate not satisfied: missing ${gate.missing.join(', ')}`, autoTrader: autoTraderStatus(fleet) }, 409);
+      if (evidence <= 0) return json(req, { ok: false, error: 'Promotion to live requires paper-trading evidence first.', autoTrader: autoTraderStatus(fleet) }, 409);
+      if (String(body.confirmLivePhrase || '') !== AUTO_LIVE_CONFIRM_PHRASE) {
+        return json(req, { ok: false, error: 'Explicit autonomous live confirmation phrase required.', requiredPhrase: AUTO_LIVE_CONFIRM_PHRASE, autoTrader: autoTraderStatus(fleet) }, 409);
+      }
+    }
+    fleet.autoTrader = { ...(fleet.autoTrader || {}), requestedMode: requested, requestedAt: new Date().toISOString(), requestedBy: identity.email || identity.userId };
+    liveAudit(fleet, identity, 'AUTO_TRADER_MODE_REQUESTED', { requestedMode: requested });
+    fevent(fleet, 'AUTO_TRADER_MODE_REQUESTED', 'info', `Auto-trader mode requested: ${requested} by ${identity.email || identity.userId}.`, { ownerUserId: identity.userId });
+    await saveFleet(fleet);
+    return json(req, { ok: true, requestedMode: requested, autoTrader: autoTraderStatus(fleet) });
   }
 
   // GET/POST /api/bot/config (per user)
@@ -2520,10 +2661,11 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     const config = completeBotConfig(session.config || getUserConfig(fleet, identity.userId));
     const maxUsd = Math.min(config.maxTradeUsd, caps.maxPositionUsd);
     const positionUsd = Number.isFinite(requestedUsd) && requestedUsd > 0 ? requestedUsd : maxUsd;
-    const closed = sessionClosedTrades(fleet, sessionId);
-    const todayStart = new Date(); todayStart.setUTCHours(0, 0, 0, 0);
-    const todayTrades = closed.filter((t) => new Date(t.timeClosed || 0).getTime() >= todayStart.getTime());
-    const todayLoss = todayTrades.reduce((n, t) => n + Math.max(0, -(Number(t.realizedPnl) || 0)), 0);
+    // Daily caps are fleet-wide and live-only across ALL live sessions for the UTC
+    // day — NOT per-session — so a fresh session per round-trip can't reset them.
+    const liveDaily = liveDailyCounters(fleet);
+    const todayTradeCount = liveDaily.trades;
+    const todayLoss = liveDaily.realizedLoss;
     // Reject before creating the intent when the live account does not hold enough
     // free quote balance (USDC/USDT) to fund this spend. Source is the fresh worker
     // preflight account snapshot — the control plane never holds Binance keys.
@@ -2541,7 +2683,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       { ok: !liveSafetyLockActive(fleet), reason: 'live entries locked after a failed live close — reconcile the open position first' },
       { ok: sessionOpenPositions(fleet, sessionId).length < caps.maxOpenPositions, reason: `max open live positions (${caps.maxOpenPositions}) reached` },
       { ok: todayLoss < caps.maxDailyLossUsd, reason: `daily realized loss cap reached (${todayLoss}/${caps.maxDailyLossUsd})` },
-      { ok: todayTrades.length < caps.maxDailyTrades, reason: `daily trade cap reached (${todayTrades.length}/${caps.maxDailyTrades})` },
+      { ok: todayTradeCount < caps.maxDailyTrades, reason: `daily trade cap reached (${todayTradeCount}/${caps.maxDailyTrades})` },
       { ok: !(fleet.lastRegime && fleet.lastRegime.regime === 'CRASH' && config.pauseOnMarketCrash), reason: 'entries blocked by market regime (CRASH)' },
     ];
     const failed = checks.find((x) => !x.ok);
@@ -2947,7 +3089,7 @@ async function handleWorkerPair(req) {
 }
 
 const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result']);
-const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'start-live-session', 'live-emergency-stop', 'global-kill-switch', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-live-execution-intent', 'create-worker-pairing-code']);
+const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'start-live-session', 'live-emergency-stop', 'global-kill-switch', 'auto-trader', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-live-execution-intent', 'create-worker-pairing-code']);
 
 function isWorkerRoute(route) {
   return route === 'execution-intent';

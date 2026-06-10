@@ -4797,6 +4797,8 @@ function _renderBotConfirmModal() {
   const info = _botConfirmList(cfg.info);
   const effects = _botConfirmList(cfg.effects);
   const warnings = _botConfirmList(cfg.warnings);
+  const phraseExpected = cfg.phraseExpected ? String(cfg.phraseExpected) : '';
+  const phraseBlocked = phraseExpected && String(cfg.phraseValue || '') !== phraseExpected;
   const ackBlocked = !!cfg.checkboxLabel && cfg.checkboxChecked !== true;
   modal.innerHTML = '<div class="bot-confirm bot-confirm--' + _esc(sev) + '" role="dialog" aria-modal="true" aria-labelledby="bot-confirm-title">'
     + '<div class="bot-confirm__head">'
@@ -4809,11 +4811,12 @@ function _renderBotConfirmModal() {
     + (effects.length ? '<div class="bot-confirm__section"><div class="bot-confirm__label">Effects</div><ul>' + effects.map((x) => '<li>' + _esc(x) + '</li>').join('') + '</ul></div>' : '')
     + (warnings.length ? '<div class="bot-confirm__section bot-confirm__section--warning"><div class="bot-confirm__label">Warnings</div><ul>' + warnings.map((x) => '<li>' + _esc(x) + '</li>').join('') + '</ul></div>' : '')
     + (cfg.checkboxLabel ? '<label class="bot-confirm__ack"><input id="bot-confirm-ack" type="checkbox" onchange="toggleBotConfirmAck(this.checked)"' + (cfg.checkboxChecked ? ' checked' : '') + (cfg.busy ? ' disabled' : '') + '> <span>' + _esc(cfg.checkboxLabel) + '</span></label>' : '')
+    + (phraseExpected ? '<div class="bot-confirm__section"><div class="bot-confirm__label">' + _esc(cfg.phraseLabel || 'Confirmation phrase') + '</div><div class="bot-confirm__phrase">' + _esc(phraseExpected) + '</div><input id="bot-confirm-phrase" class="bot-confirm__input" value="' + _esc(cfg.phraseValue || '') + '" oninput="updateBotConfirmPhrase(this.value)"' + (cfg.busy ? ' disabled' : '') + ' autocomplete="off" spellcheck="false"></div>' : '')
     + (cfg.error ? '<div class="bot-confirm__error">' + _esc(cfg.error) + '</div>' : '')
     + '</div>'
     + '<div class="bot-confirm__actions">'
     + '<button type="button" class="paperbot-control-btn" onclick="closeBotConfirmModal()"' + (cfg.busy ? ' disabled' : '') + '>' + _esc(cfg.cancelLabel || 'Cancel') + '</button>'
-    + '<button id="bot-confirm-continue" type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="confirmBotConfirmModal()"' + (cfg.busy || ackBlocked ? ' disabled' : '') + '>'
+    + '<button id="bot-confirm-continue" type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="confirmBotConfirmModal()"' + (cfg.busy || ackBlocked || phraseBlocked ? ' disabled' : '') + '>'
     + _esc(cfg.busy ? 'Working...' : (cfg.confirmLabel || 'Continue')) + '</button>'
     + '</div>'
     + '</div>';
@@ -4830,6 +4833,9 @@ function openBotConfirmModal(opts) {
     warnings: _botConfirmList(opts && opts.warnings),
     checkboxLabel: (opts && opts.checkboxLabel) || null,
     checkboxChecked: false,
+    phraseExpected: opts && opts.phraseExpected,
+    phraseLabel: opts && opts.phraseLabel,
+    phraseValue: '',
     confirmLabel: opts && opts.confirmLabel,
     cancelLabel: opts && opts.cancelLabel,
     onConfirm: opts && opts.onConfirm,
@@ -4846,6 +4852,18 @@ function toggleBotConfirmAck(checked) {
   _renderBotConfirmModal();
 }
 
+function updateBotConfirmPhrase(value) {
+  const cfg = Fleet.botConfirm;
+  if (!cfg || cfg.busy) return;
+  cfg.phraseValue = String(value || '');
+  _renderBotConfirmModal();
+  const input = document.getElementById('bot-confirm-phrase');
+  if (input) {
+    input.focus();
+    try { input.setSelectionRange(input.value.length, input.value.length); } catch {}
+  }
+}
+
 function closeBotConfirmModal() {
   if (Fleet.botConfirm && Fleet.botConfirm.busy) return;
   Fleet.botConfirm = null;
@@ -4856,6 +4874,7 @@ function confirmBotConfirmModal() {
   const cfg = Fleet.botConfirm;
   if (!cfg || cfg.busy || typeof cfg.onConfirm !== 'function') return;
   if (cfg.checkboxLabel && cfg.checkboxChecked !== true) return;
+  if (cfg.phraseExpected && String(cfg.phraseValue || '') !== String(cfg.phraseExpected)) return;
   cfg.busy = true;
   cfg.error = null;
   _renderBotConfirmModal();
@@ -5111,6 +5130,50 @@ function activateGlobalKillSwitch() {
     cancelLabel: 'Cancel',
     onConfirm: () => _fleetFetch('POST', '/api/bot/global-kill-switch/activate', {}).then(() => {
       try { window.Toast?.error('Global kill switch active', 'New entries are blocked; close-only commands remain allowed.'); } catch {}
+      refreshFleet();
+    }),
+  });
+}
+
+function setAutoTraderMode(mode) {
+  _fleetFetch('POST', '/api/bot/auto-trader/mode', { mode }).then((payload) => {
+    if (Fleet.data && payload.autoTrader) Fleet.data.autoTrader = payload.autoTrader;
+    try { window.Toast?.info('Auto trader updated', 'Requested mode: ' + String(mode || 'off').toUpperCase()); } catch {}
+    refreshFleet();
+  }).catch((err) => {
+    try { window.Toast?.error('Auto trader update failed', err.message); } catch {}
+  });
+}
+
+function openPromoteAutoLiveModal() {
+  const auto = (Fleet.data && Fleet.data.autoTrader) || {};
+  const phrase = auto.confirmationPhrase || 'I UNDERSTAND AUTONOMOUS LIVE SPOT USES REAL MONEY';
+  openBotConfirmModal({
+    title: 'Promote Auto Trader To Live Spot?',
+    severity: 'danger',
+    summary: 'Autonomous live Spot is locked by default. This request can only succeed when every live and auto-live gate already passes.',
+    infoLabel: 'Required gates',
+    info: [
+      'Mode request: live_spot',
+      'Live enabled: ' + (auto.liveEnabled ? 'yes' : 'no'),
+      'Live gate: ' + (auto.liveExecutionAllowed ? 'passed' : 'missing ' + ((auto.liveGateMissing || []).join(', ') || 'unknown')),
+      'Daily trades: ' + (auto.dailyTradesUsed != null ? auto.dailyTradesUsed : 0) + '/' + (auto.maxDailyTrades != null ? auto.maxDailyTrades : '--'),
+    ],
+    warnings: [
+      'This does not submit an order by itself.',
+      'Worker execution still requires explicit backend intents and the live Spot worker gates.',
+    ],
+    checkboxLabel: 'I understand autonomous live Spot can use real money',
+    phraseLabel: 'Type this exact phrase',
+    phraseExpected: phrase,
+    confirmLabel: 'Request Live Auto',
+    cancelLabel: 'Cancel',
+    onConfirm: () => _fleetFetch('POST', '/api/bot/auto-trader/mode', {
+      mode: 'live_spot',
+      confirmLivePhrase: phrase,
+    }).then((payload) => {
+      if (Fleet.data && payload.autoTrader) Fleet.data.autoTrader = payload.autoTrader;
+      try { window.Toast?.success('Live auto requested', 'Status will remain locked unless every gate passes.'); } catch {}
       refreshFleet();
     }),
   });
@@ -6110,6 +6173,7 @@ function renderFleet() {
   // Backend authority on whether new sessions/orders are permitted (durability gate).
   const newEntriesAllowed = data.newEntriesAllowed !== false;
   const live = data.liveReadiness || {};
+  const auto = data.autoTrader || {};
   const liveCaps = live.caps || {};
   const liveState = live.state || 'TESTNET MODE';
   const globalKillActive = data.globalKillSwitchActive === true || live.globalKillSwitchActive === true;
@@ -6209,6 +6273,42 @@ function renderFleet() {
     + '</div>'
     + (globalKillActive ? '<div class="fleet-live-readiness__kill">GLOBAL KILL SWITCH ACTIVE</div><div class="fleet-smoke__note">Entries are blocked because global kill switch is active.</div>' : '')
     + adminLiveControls
+    + '</div>';
+
+  const autoCandidate = auto.candidate || {};
+  const autoReasons = (Array.isArray(auto.reasons) && auto.reasons.length ? auto.reasons : (autoCandidate.reasons || [])).slice(0, 4);
+  const autoBlocks = (Array.isArray(auto.riskBlocks) ? auto.riskBlocks : []).slice(0, 5);
+  const autoNextMs = auto.nextEvaluationAt ? (new Date(auto.nextEvaluationAt).getTime() - Date.now()) : null;
+  const autoNextText = Number.isFinite(autoNextMs) && autoNextMs > 0 ? Math.ceil(autoNextMs / 1000) + 's' : (auto.nextEvaluationAt ? 'due' : '--');
+  const autoCanPromoteLive = auto.canPromoteLive === true && auto.liveExecutionAllowed === true;
+  const autoPromoteTitle = autoCanPromoteLive ? 'Promote to live Spot' : ('Live auto locked: ' + ((auto.liveGateMissing || []).join(', ') || 'gates/evidence missing'));
+  html += '<div class="fleet-auto-trader">'
+    + '<div class="fleet-auto-trader__head">'
+    + '<div><div class="fleet-auto-trader__kicker">AUTO TRADER</div><div class="fleet-auto-trader__state">' + _esc(auto.status || 'OFF') + '</div></div>'
+    + '<div class="fleet-auto-trader__mode">' + _esc(auto.effectiveMode || auto.mode || 'off') + '</div>'
+    + '</div>'
+    + '<div class="fleet-auto-trader__copy">Dormant by default. Shadow observes only; paper cannot create live intents; live stays locked until every live Spot gate passes.</div>'
+    + '<div class="fleet-live-readiness__caps fleet-auto-trader__grid">'
+    + '<div><span>Candidate</span><b>' + _esc(autoCandidate.symbol || '--') + '</b></div>'
+    + '<div><span>Score</span><b>' + (auto.score != null ? _esc(auto.score) : (autoCandidate.score != null ? _esc(autoCandidate.score) : '--')) + '</b></div>'
+    + '<div><span>Daily trades</span><b>' + _esc((auto.dailyTradesUsed != null ? auto.dailyTradesUsed : (live.dailyTradesUsed || 0)) + '/' + (auto.maxDailyTrades != null ? auto.maxDailyTrades : (liveCaps.maxDailyTrades || '--'))) + '</b></div>'
+    + '<div><span>Remaining</span><b>' + _esc(auto.dailyTradesRemaining != null ? auto.dailyTradesRemaining : (live.dailyTradesRemaining != null ? live.dailyTradesRemaining : '--')) + '</b></div>'
+    + '<div><span>Last decision</span><b>' + _esc(auto.lastDecision || '--') + '</b></div>'
+    + '<div><span>Next eval</span><b>' + _esc(autoNextText) + '</b></div>'
+    + '<div><span>Position mgmt</span><b>' + _esc(auto.positionState || 'flat / idle') + '</b></div>'
+    + '<div><span>Live lock</span><b>' + _esc(auto.liveExecutionAllowed ? 'gate passed' : 'locked') + '</b></div>'
+    + '</div>'
+    + '<div class="fleet-auto-trader__cols">'
+    + '<div><span>Reasons</span>' + (autoReasons.length ? '<ul>' + autoReasons.map((r) => '<li>' + _esc(r) + '</li>').join('') + '</ul>' : '<p>--</p>') + '</div>'
+    + '<div><span>Risk blocks</span>' + (autoBlocks.length ? '<ul>' + autoBlocks.map((b) => '<li>' + _esc((b.code ? b.code + ': ' : '') + (b.reason || b)) + '</li>').join('') + '</ul>' : '<p>none reported</p>') + '</div>'
+    + '</div>'
+    + (auto.liveExecutionAllowed ? '' : '<div class="fleet-auto-trader__locked">Autonomous live locked: missing ' + _esc((auto.liveGateMissing || []).join(', ') || 'required gates') + '</div>')
+    + (data.isAdmin ? '<div class="fleet-live-readiness__confirm">'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="setAutoTraderMode(\'shadow\')">Enable Shadow Auto</button>'
+      + '<button type="button" class="paperbot-control-btn" onclick="setAutoTraderMode(\'off\')">Disable Auto</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="setAutoTraderMode(\'paper\')">Promote to Paper</button>'
+      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openPromoteAutoLiveModal()"' + (autoCanPromoteLive ? '' : ' disabled title="' + _esc(autoPromoteTitle) + '"') + '>Promote to Live</button>'
+      + '</div>' : '')
     + '</div>';
 
   if (!newEntriesAllowed) {

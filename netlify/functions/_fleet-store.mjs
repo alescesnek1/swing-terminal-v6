@@ -49,6 +49,7 @@ function emptyFleet() {
     globalKillSwitch: false,
     liveSafetyLock: null,  // { active, sessionId, reason, since } — set after a failed live close, cleared on reconciliation
 
+    autoTrader: null,      // operator-requested autonomous mode/status; no secrets, no order execution
     lastRegime: null,     // { regime, entriesAllowed, reason[], metrics, updatedAt }
     updatedAt: null,
   };
