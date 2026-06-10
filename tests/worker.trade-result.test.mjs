@@ -56,6 +56,19 @@ test('worker-sizing: market BUY sizing uses the quote amount (USDC) without USDT
   assert.equal(computeBuyQuantity(0.1, 50000, '0.00001'), 0);
 });
 
+test('worker-minNotional: a $5 spend can round under minNotional (rejected); the $6 buffer clears it', () => {
+  // Reproduces the live bug: at a realistic BTC price + LOT_SIZE step, $5 floors
+  // below Binance minNotional (5), which the worker rejects at execution via
+  // `qty * price < minNotional`. The $6 buffered minimum clears it.
+  const price = 68000;
+  const step = '0.00001';
+  const minNotional = 5;
+  const qty5 = computeBuyQuantity(5, price, step); // 0.00007 → 4.76 notional
+  assert.ok(qty5 * price < minNotional, `expected $5 notional ${qty5 * price} < ${minNotional}`);
+  const qty6 = computeBuyQuantity(6, price, step); // 0.00008 → 5.44 notional
+  assert.ok(qty6 * price >= minNotional, `expected $6 notional ${qty6 * price} >= ${minNotional}`);
+});
+
 test('worker-3: residual dust is bought minus sold, never negative', () => {
   approx(residualDustQty('0.00015000', '0.00014000'), 0.00001);
   assert.equal(residualDustQty('0.00010000', '0.00010000'), 0);

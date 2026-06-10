@@ -1112,6 +1112,7 @@ function liveRiskCaps() {
     .slice(0, maxSymbols);
   return {
     maxPositionUsd: envNumber('LIVE_MAX_POSITION_USD', envNumber('BOT_MAX_POSITION_USD', 10)),
+    minPositionUsd: liveMinSpendUsd(),
     maxDailyLossUsd: envNumber('LIVE_MAX_DAILY_LOSS_USD', 5),
     maxDailyTrades: envNumber('LIVE_MAX_DAILY_TRADES', 3),
     maxOpenPositions: envNumber('LIVE_MAX_OPEN_POSITIONS', 1),
@@ -1121,6 +1122,31 @@ function liveRiskCaps() {
     allowMarketSell: process.env.LIVE_ALLOW_MARKET_SELL !== 'false',
     allowLimitOrders: process.env.LIVE_ALLOW_LIMIT_ORDERS === 'true',
   };
+}
+
+// minNotional safety buffer.
+//
+// Binance enforces a per-symbol MIN_NOTIONAL (≈ $5 for BTCUSDC/BTCUSDT spot). A
+// MARKET BUY sized at exactly $5 can round DOWN through the LOT_SIZE step and land
+// just under minNotional (e.g. 4.87), so the worker rightly rejects it. The
+// control plane usually has no exchangeInfo, so v1 keeps a conservative, env-
+// tunable floor instead of fetching filters: require spend ≥ ceil(minNotional ×
+// (1 + buffer%)). With the defaults (minNotional 5, buffer 10%) that is
+// ceil(5.50) = $6. The worker still independently re-checks the real minNotional.
+const LIVE_ASSUMED_MIN_NOTIONAL_USD = 5;
+function liveMinNotionalBufferPct() {
+  const raw = process.env.LIVE_MIN_NOTIONAL_BUFFER_PCT;
+  if (raw === undefined || raw === null || raw === '') return 10;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 10;
+}
+function liveBufferedMinNotionalUsd() {
+  const minNotional = envNumber('LIVE_ASSUMED_MIN_NOTIONAL', LIVE_ASSUMED_MIN_NOTIONAL_USD);
+  return minNotional * (1 + liveMinNotionalBufferPct() / 100);
+}
+// Enforced v1 minimum live spend: whole-dollar ceiling of the buffered minNotional.
+function liveMinSpendUsd() {
+  return Math.ceil(liveBufferedMinNotionalUsd());
 }
 
 function liveEnvStatus() {
@@ -2446,6 +2472,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       { ok: config.allowLive === true, reason: 'user config allowLive=true is required' },
       { ok: session.liveModeConfirmed === true, reason: 'session liveModeConfirmed=true is required' },
       { ok: caps.allowedSymbols.includes(symbol), reason: 'symbol is not allowlisted' },
+      { ok: positionUsd >= caps.minPositionUsd, reason: `positionUsd ${positionUsd} below live minimum ${caps.minPositionUsd} (minNotional ${LIVE_ASSUMED_MIN_NOTIONAL_USD} + ${liveMinNotionalBufferPct()}% buffer)` },
       { ok: positionUsd > 0 && positionUsd <= maxUsd, reason: `positionUsd exceeds live cap ${maxUsd}` },
       { ok: sessionOpenPositions(fleet, sessionId).length < caps.maxOpenPositions, reason: `max open live positions (${caps.maxOpenPositions}) reached` },
       { ok: todayLoss < caps.maxDailyLossUsd, reason: `daily realized loss cap reached (${todayLoss}/${caps.maxDailyLossUsd})` },

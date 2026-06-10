@@ -15,7 +15,8 @@ process.env.LIVE_SPOT_ACK = 'I_UNDERSTAND_REAL_MONEY_RISK';
 process.env.LOCAL_WORKER_LIVE_CONFIRM = 'true';
 process.env.BOT_ADMIN_EMAILS = 'admin@example.com';
 process.env.SUPABASE_JWT_SECRET = 'unit-test-secret';
-process.env.LIVE_MAX_POSITION_USD = '5';
+process.env.LIVE_MAX_POSITION_USD = '6';
+process.env.LIVE_MIN_NOTIONAL_BUFFER_PCT = '10';
 process.env.LIVE_MAX_DAILY_LOSS_USD = '5';
 process.env.LIVE_MAX_DAILY_TRADES = '3';
 process.env.LIVE_MAX_OPEN_POSITIONS = '1';
@@ -109,19 +110,34 @@ test('setup: fresh preflight + confirmed live start creates a live session with 
   assert.equal(hb.status, 200);
 });
 
+test('liveReadiness exposes the buffered minimum live spend', async () => {
+  const fleet = await call(adminReq('GET', '/api/bot/fleet'));
+  // minNotional 5 + 10% buffer => ceil(5.5) = 6.
+  assert.equal(fleet.json.liveReadiness.caps.minPositionUsd, 6);
+  assert.equal(fleet.json.liveReadiness.caps.maxPositionUsd, 6);
+});
+
 test('live intent rejects a non-admin', async () => {
   const res = await call(nonAdminReq('POST', '/api/bot/create-live-execution-intent', {
-    sessionId: SID, symbol: 'BTCUSDC', positionUsd: 5,
+    sessionId: SID, symbol: 'BTCUSDC', positionUsd: 6,
   }));
   assert.equal(res.status, 403);
 });
 
 test('live intent rejects a symbol that is not allowlisted', async () => {
   const res = await call(adminReq('POST', '/api/bot/create-live-execution-intent', {
-    sessionId: SID, symbol: 'ETHUSDC', positionUsd: 5,
+    sessionId: SID, symbol: 'ETHUSDC', positionUsd: 6,
   }));
   assert.equal(res.status, 409);
   assert.match(res.json.error, /allowlist/i);
+});
+
+test('live intent rejects positionUsd=5 as below the live minNotional buffer', async () => {
+  const res = await call(adminReq('POST', '/api/bot/create-live-execution-intent', {
+    sessionId: SID, symbol: 'BTCUSDC', positionUsd: 5,
+  }));
+  assert.equal(res.status, 409);
+  assert.match(res.json.error, /below live minimum 6/i);
 });
 
 test('live intent rejects an amount over the live cap', async () => {
@@ -132,16 +148,16 @@ test('live intent rejects an amount over the live cap', async () => {
   assert.match(res.json.error, /cap/i);
 });
 
-test('live intent success creates exactly one BTCUSDC/$5 MARKET BUY intent', async () => {
+test('live intent success creates exactly one BTCUSDC/$6 MARKET BUY intent under the cap', async () => {
   const res = await call(adminReq('POST', '/api/bot/create-live-execution-intent', {
-    sessionId: SID, symbol: 'BTCUSDC', side: 'BUY', type: 'MARKET', positionUsd: 5, mode: 'live_spot', realProductionOrder: true,
+    sessionId: SID, symbol: 'BTCUSDC', side: 'BUY', type: 'MARKET', positionUsd: 6, mode: 'live_spot', realProductionOrder: true,
   }));
   assert.equal(res.status, 200);
   const intent = res.json.intent;
   assert.equal(intent.symbol, 'BTCUSDC');
   assert.equal(intent.side, 'BUY');
   assert.equal(intent.type, 'MARKET');
-  assert.equal(intent.positionUsd, 5);
+  assert.equal(intent.positionUsd, 6);
   assert.equal(intent.mode, 'live_spot');
   assert.equal(intent.realProductionOrder, true);
   assert.equal(intent.testnet, false);
@@ -149,7 +165,7 @@ test('live intent success creates exactly one BTCUSDC/$5 MARKET BUY intent', asy
 
   // Idempotent: a second click returns the SAME pending intent, never a duplicate.
   const again = await call(adminReq('POST', '/api/bot/create-live-execution-intent', {
-    sessionId: SID, symbol: 'BTCUSDC', positionUsd: 5,
+    sessionId: SID, symbol: 'BTCUSDC', positionUsd: 6,
   }));
   assert.equal(again.status, 200);
   assert.equal(again.json.existing, true);
@@ -164,7 +180,7 @@ test('live intent rejects when an open position already exists, then allows afte
   assert.equal(open.status, 200);
 
   const blocked = await call(adminReq('POST', '/api/bot/create-live-execution-intent', {
-    sessionId: SID, symbol: 'BTCUSDC', positionUsd: 5,
+    sessionId: SID, symbol: 'BTCUSDC', positionUsd: 6,
   }));
   assert.equal(blocked.status, 409);
   assert.match(blocked.json.error, /open live positions|open position/i);
@@ -180,7 +196,7 @@ test('live intent rejects when live preflight is not fresh', async () => {
   const pf = await postPreflight(false);
   assert.equal(pf.status, 200);
   const res = await call(adminReq('POST', '/api/bot/create-live-execution-intent', {
-    sessionId: SID, symbol: 'BTCUSDC', positionUsd: 5,
+    sessionId: SID, symbol: 'BTCUSDC', positionUsd: 6,
   }));
   assert.equal(res.status, 409);
   assert.match(res.json.error, /PREFLIGHT|READY|LOCKED|PAUSED/);
@@ -190,7 +206,7 @@ test('live intent rejects when live preflight is not fresh', async () => {
 
 test('live intent rejects a session that is not live_spot', async () => {
   const res = await call(adminReq('POST', '/api/bot/create-live-execution-intent', {
-    sessionId: 'session_does_not_exist', symbol: 'BTCUSDC', positionUsd: 5,
+    sessionId: 'session_does_not_exist', symbol: 'BTCUSDC', positionUsd: 6,
   }));
   assert.equal(res.status, 404);
 });
@@ -202,6 +218,7 @@ test('create-live-execution-intent source enforces durable store, allowLive, and
   assert.match(block, /fleetStoreInfo\(\)\.durable/);
   assert.match(block, /allowLive === true/);
   assert.match(block, /liveModeConfirmed === true/);
+  assert.match(block, /below live minimum/);
   assert.match(block, /side: 'BUY'/);
   assert.match(block, /type: 'MARKET'/);
   assert.match(block, /realProductionOrder: true/);

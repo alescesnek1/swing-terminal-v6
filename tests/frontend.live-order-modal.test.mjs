@@ -60,7 +60,7 @@ function loadLiveOrderHarness(fetchImpl) {
           canStartLive: true,
           preflightPassed: true,
           allowLive: true,
-          caps: { allowedSymbols: ['BTCUSDC'], maxPositionUsd: 5, maxDailyLossUsd: 5, maxDailyTrades: 3 },
+          caps: { allowedSymbols: ['BTCUSDC'], maxPositionUsd: 6, minPositionUsd: 6, maxDailyLossUsd: 5, maxDailyTrades: 3 },
         },
         sessions: [{ sessionId: 'live_session_42', mode: 'live_spot', openPositions: [] }],
       },
@@ -110,7 +110,7 @@ test('live button opens the persistent Create Live Micro Order modal with the or
   assert.match(modal.innerHTML, /Symbol: BTCUSDC/);
   assert.match(modal.innerHTML, /Side: BUY/);
   assert.match(modal.innerHTML, /Type: MARKET/);
-  assert.match(modal.innerHTML, /Max spend: \$5 USDC/);
+  assert.match(modal.innerHTML, /Max spend: \$6 USDC/);
   assert.match(modal.innerHTML, /Quote asset: USDC/);
   assert.match(modal.innerHTML, /Live session: live_session_42/);
   assert.match(modal.innerHTML, /click STOP to close the position immediately/i);
@@ -133,7 +133,7 @@ test('checkbox gates the live order submit', async () => {
   assert.equal(calls.length, 1, 'checked confirm submits');
 });
 
-test('submit creates exactly one live intent with the explicit BTCUSDC/$5 payload', async () => {
+test('submit creates exactly one live intent with the explicit BTCUSDC/$6 payload', async () => {
   const { context, calls } = loadLiveOrderHarness();
   context.openCreateLiveMicroOrderModal();
   context.toggleBotConfirmAck(true);
@@ -147,9 +147,23 @@ test('submit creates exactly one live intent with the explicit BTCUSDC/$5 payloa
   assert.equal(b.symbol, 'BTCUSDC');
   assert.equal(b.side, 'BUY');
   assert.equal(b.type, 'MARKET');
-  assert.equal(b.positionUsd, 5);
+  assert.equal(b.positionUsd, 6);
   assert.equal(b.mode, 'live_spot');
   assert.equal(b.realProductionOrder, true);
+});
+
+test('modal shows the configured cap as max spend (env-driven, not hardcoded)', () => {
+  const { context, document } = loadLiveOrderHarness();
+  // A different env cap (e.g. 8) flows straight through to the modal.
+  context.Fleet.data.liveReadiness.caps.maxPositionUsd = 8;
+  context.openCreateLiveMicroOrderModal();
+  assert.match(document.getElementById('bot-confirm-modal').innerHTML, /Max spend: \$8 USDC/);
+});
+
+test('live button is hidden when the live cap is below the buffered minimum spend', () => {
+  // Source-level guard: a $5 cap under a $6 minimum must not offer the button.
+  assert.match(terminalJs, /liveMin > 0 && liveCap < liveMin/);
+  assert.match(terminalJs, /below the minimum live spend/);
 });
 
 test('live order modal survives fleet polling rerenders', () => {

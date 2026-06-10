@@ -5469,7 +5469,9 @@ function openCreateLiveMicroOrderModal() {
   const caps = live.caps || {};
   const allowed = caps.allowedSymbols || [];
   const symbol = allowed.length === 1 ? allowed[0] : (allowed[0] || 'BTCUSDC');
-  const spend = Number(caps.maxPositionUsd) || 5;
+  // Spend is the configured live cap. Never default below the buffered minimum
+  // notional (a $5 spend can round under Binance minNotional 5 and be rejected).
+  const spend = Number(caps.maxPositionUsd) || Number(caps.minPositionUsd) || 6;
   const quote = symbol.endsWith('USDC') ? 'USDC' : 'USDT';
   const sid = sel.sessionId;
   openBotConfirmModal({
@@ -6236,6 +6238,7 @@ function renderFleet() {
       const allowedSymbols = caps.allowedSymbols || [];
       const liveSymbol = allowedSymbols.length === 1 ? allowedSymbols[0] : null;
       const liveCap = Number(caps.maxPositionUsd);
+      const liveMin = Number(caps.minPositionUsd) || 0;
       const preflightOk = live.preflightPassed === true || live.preflightFresh === true;
       const liveAllowed = live.allowLive === true || (data.config && data.config.allowLive === true);
       let liveBlockedReason = '';
@@ -6251,6 +6254,7 @@ function renderFleet() {
       else if (!entriesAllowed) liveBlockedReason = 'Live order hidden: market regime blocks entries.';
       else if (!liveSymbol) liveBlockedReason = 'Live order hidden: exactly one allowed symbol is required.';
       else if (!(liveCap > 0)) liveBlockedReason = 'Live order hidden: live position cap is not set.';
+      else if (liveMin > 0 && liveCap < liveMin) liveBlockedReason = 'Live order hidden: live cap $' + liveCap + ' is below the minimum live spend $' + liveMin + ' (raise BOT_MAX_POSITION_USD / LIVE_MAX_POSITION_USD).';
       if (!liveBlockedReason) {
         const quote = liveSymbol.endsWith('USDC') ? 'USDC' : 'USDT';
         html += '<div class="fleet-smoke fleet-live-order">'

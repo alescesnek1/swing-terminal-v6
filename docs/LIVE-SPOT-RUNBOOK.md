@@ -9,13 +9,27 @@ process that may sign Spot orders.
 - Spot only.
 - No futures, margin, leverage, borrow/repay, SAPI, DAPI, FAPI, or withdrawals.
 - Initial live caps are micro caps:
-  - `LIVE_MAX_POSITION_USD=10`
+  - `LIVE_MAX_POSITION_USD=6` (and `BOT_MAX_POSITION_USD=6` as the deployed
+    fallback) — see the minNotional buffer note below for why this is 6, not 5
   - `LIVE_MAX_DAILY_LOSS_USD=5`
   - `LIVE_MAX_DAILY_TRADES=3`
   - `LIVE_MAX_OPEN_POSITIONS=1`
   - `LIVE_MAX_SYMBOLS=1`
   - `LIVE_ALLOWED_SYMBOLS=BTCUSDT` (USDT-quoted) **or** `LIVE_ALLOWED_SYMBOLS=BTCUSDC`
     (USDC-quoted — keep funds in USDC and trade BTCUSDC)
+  - `LIVE_MIN_NOTIONAL_BUFFER_PCT=10` (optional; default 10)
+
+### minNotional safety buffer
+
+Binance enforces a per-symbol `MIN_NOTIONAL` (≈ $5 for BTCUSDC/BTCUSDT spot). A
+MARKET BUY sized at exactly $5 can round **down** through the `LOT_SIZE` step and
+land just under minNotional (e.g. 4.87), which the worker rightly rejects
+(`Order size 4.87 < minNotional 5`). The control plane has no exchangeInfo, so it
+enforces a conservative floor instead: minimum live spend = `ceil(minNotional ×
+(1 + LIVE_MIN_NOTIONAL_BUFFER_PCT/100))`. With the defaults (minNotional 5, buffer
+10%) that is `ceil(5.50) = $6`. Set `BOT_MAX_POSITION_USD=6` / `LIVE_MAX_POSITION_USD=6`
+so the single allowed spend ($6) clears the buffer. The worker still independently
+re-checks the real minNotional at execution.
 
 ### Single-symbol live policy
 
@@ -49,12 +63,15 @@ BOT_LIVE_TRADING_ENABLED=true
 BOT_ALLOW_REAL_ORDERS=true
 LIVE_SPOT_ACK=I_UNDERSTAND_REAL_MONEY_RISK
 LOCAL_WORKER_LIVE_CONFIRM=true
-# Ceiling is 10; start at 5 for the first live runs.
-LIVE_MAX_POSITION_USD=5
+# Ceiling is 10. Use 6 for the first live runs: $5 can round under Binance
+# minNotional, so the minimum buffered spend is $6 (see minNotional safety buffer).
+LIVE_MAX_POSITION_USD=6
 LIVE_MAX_DAILY_LOSS_USD=5
 LIVE_MAX_DAILY_TRADES=3
 LIVE_MAX_OPEN_POSITIONS=1
 LIVE_MAX_SYMBOLS=1
+# Optional; default 10. Buffer over Binance minNotional for live order sizing.
+LIVE_MIN_NOTIONAL_BUFFER_PCT=10
 # Exactly one symbol: BTCUSDT (USDT-quoted) or BTCUSDC (USDC-quoted).
 LIVE_ALLOWED_SYMBOLS=BTCUSDC
 LIVE_ALLOW_MARKET_BUY=true
@@ -72,6 +89,13 @@ BOT_ALLOW_REAL_ORDERS=true
 LIVE_SPOT_ACK=I_UNDERSTAND_REAL_MONEY_RISK
 LOCAL_WORKER_LIVE_CONFIRM=true
 BOT_ADMIN_EMAILS=<verified admin email>
+# Live caps (LIVE_* preferred; BOT_* are deployed fallbacks the readiness panel
+# and gates also read). Keep $6 so the order clears the minNotional buffer.
+LIVE_MAX_POSITION_USD=6
+BOT_MAX_POSITION_USD=6
+LIVE_ALLOWED_SYMBOLS=BTCUSDC
+BOT_ALLOWED_SYMBOLS=BTCUSDC
+LIVE_MIN_NOTIONAL_BUFFER_PCT=10
 ```
 
 Durable Netlify Blobs must be active. Memory fallback is close-only and cannot
