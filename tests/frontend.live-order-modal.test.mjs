@@ -166,6 +166,18 @@ test('live button is hidden when the live cap is below the buffered minimum spen
   assert.match(terminalJs, /below the minimum live spend/);
 });
 
+test('a dust-closed session shows no open position (no CLOSE REQUIRED) and a dust card', () => {
+  // CLOSE REQUIRED is driven by _fleetOpenPositionCount > 0; a dust close leaves 0.
+  const fn = vm.runInNewContext(`${extractFunctionSource('_fleetOpenPositionCount')}; _fleetOpenPositionCount`);
+  assert.equal(fn({ openPositions: [] }), 0, 'no open position after a dust close → no CLOSE REQUIRED panel');
+  assert.equal(fn({ openPositions: [{ symbol: 'BTCUSDC' }] }), 1);
+  // The closed-trade card surfaces the dust explicitly instead of CLOSE REQUIRED.
+  assert.match(terminalJs, /'CLOSED \(dust left\)'/);
+  assert.match(terminalJs, /Residual dust/);
+  // The CLOSE REQUIRED panel is gated on an open-position session, not on history.
+  assert.match(terminalJs, /openPosSession[\s\S]{0,400}CLOSE REQUIRED/);
+});
+
 test('live order modal survives fleet polling rerenders', () => {
   const { context, document } = loadLiveOrderHarness();
   context.openCreateLiveMicroOrderModal();

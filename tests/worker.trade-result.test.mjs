@@ -24,7 +24,7 @@ const worker = await import('../scripts/local-binance-worker.mjs');
 const {
   workerState, getOpenPositions, hydrateOpenPositionsFromBackend, closeAllPositions,
   avgPriceFromFills, residualDustQty, isResidualSellable, computeCloseMetrics,
-  quoteAssetForSymbol, computeBuyQuantity,
+  quoteAssetForSymbol, computeBuyQuantity, computeLiveClosePlan,
 } = worker;
 
 function reset() { workerState.positions.length = 0; }
@@ -67,6 +67,41 @@ test('worker-minNotional: a $5 spend can round under minNotional (rejected); the
   assert.ok(qty5 * price < minNotional, `expected $5 notional ${qty5 * price} < ${minNotional}`);
   const qty6 = computeBuyQuantity(6, price, step); // 0.00008 → 5.44 notional
   assert.ok(qty6 * price >= minNotional, `expected $6 notional ${qty6 * price} >= ${minNotional}`);
+});
+
+test('worker-liveclose: closeQty uses ACTUAL free base balance, not boughtQty', () => {
+  // The reported live bug: BUY executedQty 0.00009, but fee leaves free 0.00008991.
+  // Selling 0.00009 fails ("insufficient balance"); the plan must size off free.
+  const plan = computeLiveClosePlan({
+    boughtQty: '0.00009000', freeBase: 0.00008991, stepSize: '0.00001000', minNotional: 5, price: 61200,
+  });
+  // min(0.00009, 0.00008991) floored to 0.00001 step => 0.00008.
+  assert.equal(plan.sellQty, 0.00008);
+  // 0.00008 * 61200 = 4.896 < minNotional 5 => not sellable, dust only.
+  assert.ok(plan.notional < 5);
+  assert.equal(plan.sellable, false);
+  assert.equal(plan.dustOnly, true);
+  assert.equal(plan.residualDust, 0.00008991);
+});
+
+test('worker-liveclose: a sellable free balance floors to the available step qty', () => {
+  // Free balance clears minNotional at a higher price; sell the floored available.
+  const plan = computeLiveClosePlan({
+    boughtQty: '0.00012000', freeBase: 0.00011988, stepSize: '0.00001000', minNotional: 5, price: 61200,
+  });
+  // floor(0.00011988 / 0.00001) = 0.00011 => 0.00011 * 61200 = 6.732 >= 5.
+  assert.equal(plan.sellQty, 0.00011);
+  assert.ok(plan.notional >= 5);
+  assert.equal(plan.sellable, true);
+  assert.equal(plan.dustOnly, false);
+});
+
+test('worker-liveclose: never sells more than the free balance even if bought is larger', () => {
+  const plan = computeLiveClosePlan({
+    boughtQty: '1.0', freeBase: 0.00008991, stepSize: '0.00001000', minNotional: 5, price: 61200,
+  });
+  assert.ok(plan.sellQty <= 0.00008991);
+  assert.equal(plan.sellQty, 0.00008);
 });
 
 test('worker-3: residual dust is bought minus sold, never negative', () => {

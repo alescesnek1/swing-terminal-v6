@@ -1967,16 +1967,25 @@ async function handleFleetWorker(req, base, body) {
       if (!fleet.positionResults[sessionId]) fleet.positionResults[sessionId] = [];
       fleet.positionResults[sessionId] = [record, ...fleet.positionResults[sessionId]].slice(0, 30);
     }
-    const sev = record.status === 'WORKER_CLOSE_FAILED' ? 'warn' : 'info';
-    const eventType = CLOSED_POSITION_STATUSES.has(record.status) ? 'WORKER_POSITION_CLOSED'
+    // Dust-only live close (no SELL was possible: free base below minNotional after
+    // fee/step rounding). Surfaced as a distinct event so the operator sees WHY the
+    // position closed with dust instead of a normal sell.
+    const dustOnly = record.mode === 'live_spot'
+      && record.status === 'CLOSED_WITH_DUST'
+      && (body.closeReason === 'DUST_ONLY_CLOSE_NOT_POSSIBLE' || (record.closeOrderId == null && Number(record.soldQty) === 0));
+    const sev = record.status === 'WORKER_CLOSE_FAILED' ? 'warn' : dustOnly ? 'warn' : 'info';
+    const eventType = dustOnly ? 'LIVE_POSITION_DUSTED'
+      : CLOSED_POSITION_STATUSES.has(record.status) ? 'WORKER_POSITION_CLOSED'
       : record.status === 'WORKER_CLOSE_FAILED' ? 'WORKER_CLOSE_FAILED'
       : 'WORKER_POSITION_OPEN';
-    fevent(fleet, eventType, sev,
-      `${record.status} ${record.symbol} (session ${sessionId.slice(0, 12)})`, { sessionId, ownerUserId: session.ownerUserId });
+    const eventMsg = dustOnly
+      ? `CLOSE_NOT_POSSIBLE_MIN_NOTIONAL: ${record.symbol} closed with dust ${record.residualDust} (session ${sessionId.slice(0, 12)})`
+      : `${record.status} ${record.symbol} (session ${sessionId.slice(0, 12)})`;
+    fevent(fleet, eventType, sev, eventMsg, { sessionId, ownerUserId: session.ownerUserId });
     if (record.mode === 'live_spot') {
-      liveAudit(fleet, null, CLOSED_POSITION_STATUSES.has(record.status) ? 'LIVE_POSITION_CLOSED' : eventType, {
+      liveAudit(fleet, null, dustOnly ? 'LIVE_POSITION_DUSTED' : CLOSED_POSITION_STATUSES.has(record.status) ? 'LIVE_POSITION_CLOSED' : eventType, {
         sessionId, symbol: record.symbol, qty: record.executedQty, orderId: record.closeOrderId || record.orderId,
-        result: record.error || record.status, workerId: body.workerId,
+        result: record.error || (dustOnly ? 'DUST_ONLY_CLOSE_NOT_POSSIBLE' : record.status), workerId: body.workerId,
       });
     }
     return json(req, { ok: true });

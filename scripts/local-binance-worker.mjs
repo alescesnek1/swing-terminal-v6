@@ -413,6 +413,44 @@ function computeCloseMetrics(pos, closeOrder, opts = {}) {
   };
 }
 
+// Live close planning (REAL MONEY).
+//
+// The BUY fee on a live Spot order is taken in the BASE asset, so the free base
+// balance after a $6 BTCUSDC buy is LESS than the reported executedQty (e.g. buy
+// 0.00009 BTC, fee leaves 0.00008991 free). Selling executedQty blindly fails
+// with "insufficient balance". This computes the *actually sellable* quantity:
+//   closeQty = floor(min(executedQty, freeBaseBalance) / stepSize) * stepSize
+// and decides whether that quantity clears MIN_NOTIONAL at the current price. If
+// not, the leftover is permanent dust and there is NO actionable sell — the
+// caller must close-with-dust instead of retrying an impossible order.
+function computeLiveClosePlan({ boughtQty, freeBase, stepSize, minNotional, price }) {
+  const bought = Number(boughtQty);
+  const free = Number(freeBase);
+  const step = Number(stepSize) || 0;
+  const mn = Number(minNotional);
+  const px = Number(price);
+  const cappedFree = Number.isFinite(free) && free > 0 ? free : 0;
+  // Never sell more than the account actually holds free, and never more than
+  // what was bought for this position.
+  let sellQty = Math.min(Number.isFinite(bought) && bought > 0 ? bought : 0, cappedFree);
+  if (!(sellQty > 0)) sellQty = 0;
+  if (step > 0) sellQty = Math.floor(sellQty / step) * step;
+  const precision = stepPrecision(stepSize);
+  sellQty = Number(sellQty.toFixed(precision));
+  const notional = (Number.isFinite(px) && px > 0 ? px : 0) * sellQty;
+  const meetsNotional = !(Number.isFinite(mn) && mn > 0) || notional >= mn;
+  const sellable = sellQty > 0 && meetsNotional;
+  return {
+    sellQty,
+    notional,
+    sellable,
+    dustOnly: !sellable,
+    // When unsellable, the whole free base balance is permanent dust.
+    residualDust: cappedFree,
+    precision,
+  };
+}
+
 // Lifecycle: starting | running | paused | stopping | stopped
 let currentState = 'starting';
 let stopping = false;
@@ -762,6 +800,28 @@ async function getTickerPrice(symbol) {
   return parseFloat(data.price);
 }
 
+// Read the ACTUAL free balance of a base asset from the live account. Used before
+// every live close so we never try to sell more than the account holds (the BUY
+// fee is taken in base asset, leaving free < executedQty).
+async function getFreeBaseBalance(baseAsset) {
+  const data = await binanceFetch('/v3/account', { signed: true });
+  const bal = (data && Array.isArray(data.balances) ? data.balances : []).find((b) => b && b.asset === baseAsset);
+  const free = bal ? Number(bal.free) : 0;
+  return Number.isFinite(free) && free > 0 ? free : 0;
+}
+
+// Deterministic close errors that must NOT trigger the retry loop: the same SELL
+// will keep failing. Insufficient balance (fee ate the base) and minNotional are
+// resolved by reconciling against the account and closing-with-dust instead.
+function isDeterministicCloseError(err) {
+  const msg = String((err && err.message) || '').toLowerCase();
+  return msg.includes('insufficient balance')
+    || msg.includes('insufficient_balance')
+    || msg.includes('min_notional')
+    || msg.includes('minnotional')
+    || msg.includes('notional');
+}
+
 function validateLiveIntentGate(intent, config, riskState, session, control) {
   const env = liveEnvGateSnapshot();
   const caps = liveRiskCaps();
@@ -894,23 +954,42 @@ async function closeAllPositions(context) {
       let stepSize = pos.stepSize;
       let minQty = pos.minQty;
       let minNotional = pos.minNotional;
-      // Only hit the network when we lack the lot step (preserves the offline path);
-      // when we do fetch it, opportunistically capture the dust thresholds too.
-      if (!stepSize) {
+      let baseAsset = pos.baseAsset;
+      // Hit the network when we lack the lot step OR (for live) any dust threshold
+      // / base asset needed to size the close safely. Capture all of them at once.
+      if (!stepSize || (isLiveSpot && (minNotional == null || !baseAsset))) {
         const info = await getSymbolInfo(pos.symbol);
         const lot = info.filters.find((f) => f.filterType === 'LOT_SIZE');
-        stepSize = lot ? lot.stepSize : '0.00000001';
+        if (!stepSize) stepSize = lot ? lot.stepSize : '0.00000001';
         if (minQty == null && lot) minQty = lot.minQty;
         if (minNotional == null) {
           const n = info.filters.find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
           if (n) minNotional = n.minNotional;
         }
+        if (!baseAsset) baseAsset = info.baseAsset;
       }
-      const precision = stepPrecision(stepSize);
+      let precision = stepPrecision(stepSize);
       const stepNum = parseFloat(stepSize) || 0;
       let sellQty = parseFloat(pos.executedQty);
-      if (stepNum > 0) sellQty = Math.floor(sellQty / stepNum) * stepNum;
-      if (!(sellQty > 0)) throw new Error(`Computed sell qty not positive for ${pos.symbol}`);
+
+      if (isLiveSpot) {
+        // LIVE: never sell executedQty blindly. Read the ACTUAL free base balance
+        // (the BUY fee is taken in base asset) and only sell what is held and
+        // clears minNotional after LOT_SIZE rounding.
+        const freeBase = await getFreeBaseBalance(baseAsset);
+        const price = await getTickerPrice(pos.symbol);
+        const plan = computeLiveClosePlan({ boughtQty: pos.executedQty, freeBase, stepSize, minNotional, price });
+        if (plan.dustOnly) {
+          // Deterministic: nothing sellable. Close-with-dust, no SELL, no retry.
+          await closeLivePositionAsDust(context, pos, { freeBase, price, minNotional, quoteAsset: pos.quoteAsset || quoteAssetForSymbol(pos.symbol) });
+          continue;
+        }
+        sellQty = plan.sellQty;
+        precision = plan.precision;
+      } else {
+        if (stepNum > 0) sellQty = Math.floor(sellQty / stepNum) * stepNum;
+        if (!(sellQty > 0)) throw new Error(`Computed sell qty not positive for ${pos.symbol}`);
+      }
 
       const modeLabel = isLiveSpot ? 'LIVE SPOT REAL MONEY' : 'TESTNET';
       console.log(`[${context}][CLOSE] Submitting ${modeLabel} SELL MARKET ${sellQty} ${pos.symbol} (close of order ${pos.orderId})...`);
@@ -939,12 +1018,60 @@ async function closeAllPositions(context) {
       });
       console.log(`[${context}][CLOSE] Reported ${metrics.status} ${pos.symbol} to backend.`);
     } catch (err) {
+      // Deterministic live close failures (fee-reduced balance / minNotional) must
+      // NOT spin the retry loop with the same impossible SELL. Reconcile against the
+      // account: if only unsellable dust remains, close-with-dust and move on.
+      if (isLiveSpot && isDeterministicCloseError(err)) {
+        try {
+          const info = await getSymbolInfo(pos.symbol);
+          const lot = info.filters.find((f) => f.filterType === 'LOT_SIZE');
+          const notionalFilter = info.filters.find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
+          const stepSize = pos.stepSize || (lot ? lot.stepSize : '0.00000001');
+          const minNotional = pos.minNotional != null ? pos.minNotional : (notionalFilter ? notionalFilter.minNotional : null);
+          const baseAsset = pos.baseAsset || info.baseAsset;
+          const freeBase = await getFreeBaseBalance(baseAsset);
+          const price = await getTickerPrice(pos.symbol);
+          const plan = computeLiveClosePlan({ boughtQty: pos.executedQty, freeBase, stepSize, minNotional, price });
+          if (plan.dustOnly) {
+            console.log(`[${context}][CLOSE] Deterministic close error "${err.message}"; reconciled to unsellable dust (free ${freeBase}). Closing with dust, no retry.`);
+            await closeLivePositionAsDust(context, pos, { freeBase, price, minNotional, quoteAsset: pos.quoteAsset || quoteAssetForSymbol(pos.symbol) });
+            continue;
+          }
+        } catch (recErr) {
+          console.log(`[${context}][CLOSE] Reconciliation after close error failed: ${recErr.message}.`);
+        }
+      }
       allClosed = false;
       console.log(`[${context}][ERROR] Close result FAILED for ${pos.symbol}: ${err.message}. Worker stays alive; position remains open.`);
       await reportPosition({ symbol: pos.symbol, baseAsset: pos.baseAsset, executedQty: pos.executedQty, orderId: pos.orderId, status: 'WORKER_CLOSE_FAILED', error: err.message });
     }
   }
   return allClosed;
+}
+
+// Close a live position that has only unsellable dust left (notional < minNotional
+// after flooring the actual free balance). No SELL is placed; the position is
+// recorded CLOSED_WITH_DUST so openPositions drops to 0, the closed-trade ledger
+// keeps the residual dust, and STOP/EMERGENCY can exit 0 (nothing actionable).
+async function closeLivePositionAsDust(context, pos, opts) {
+  const { freeBase, price, minNotional, quoteAsset } = opts;
+  const closedAt = new Date().toISOString();
+  const dust = Number(freeBase) || 0;
+  const notional = (Number(price) || 0) * dust;
+  const entryAvgPrice = (pos.entryAvgPrice != null && Number.isFinite(Number(pos.entryAvgPrice))) ? Number(pos.entryAvgPrice) : null;
+  console.log(`[${context}][CLOSE][DUST] ${pos.symbol}: free ${dust} ${pos.baseAsset || ''} (~${notional.toFixed(2)} ${quoteAsset}) < minNotional ${minNotional}. No sellable quantity — marking CLOSED_WITH_DUST without a SELL.`);
+  markPositionClosed(pos.orderId, null, { status: 'CLOSED_WITH_DUST', residualDust: dust, realizedPnl: null });
+  await reportPosition({
+    symbol: pos.symbol, baseAsset: pos.baseAsset, executedQty: '0',
+    orderId: pos.orderId, closeOrderId: null, status: 'CLOSED_WITH_DUST',
+    entryOrderId: pos.orderId, openedAt: pos.openedAt || null, closedAt,
+    entryAvgPrice, closeAvgPrice: null,
+    boughtQty: Number(pos.executedQty) || 0, soldQty: 0, residualDust: dust,
+    realizedPnl: null, realizedPnlPct: null,
+    feesAvailable: false, fees: [], feeAsset: null, feeAmount: null, netPnl: null, pnlIsNet: false,
+    closeReason: 'DUST_ONLY_CLOSE_NOT_POSSIBLE',
+  });
+  console.log(`[${context}][CLOSE][DUST] Reported CLOSED_WITH_DUST (dust ${dust}) — LIVE_POSITION_DUSTED. openPositions now ${getOpenPositions().length}.`);
 }
 
 async function emergencyReconcileAndClose() {
@@ -1339,6 +1466,7 @@ export {
   residualDustQty,
   isResidualSellable,
   computeCloseMetrics,
+  computeLiveClosePlan,
   assertSpotOnlyRequest,
   validateLiveIntentGate,
   liveRiskCaps,

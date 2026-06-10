@@ -191,6 +191,32 @@ test('live intent rejects when an open position already exists, then allows afte
   }));
 });
 
+test('a dust-only live close (no SELL) clears the open position and records LIVE_POSITION_DUSTED', async () => {
+  const dustOrderId = 'live-dust-ord-1';
+  // Open a live position, then report the dust-only close (no closeOrderId, soldQty 0).
+  await call(workerReq('POST', '/api/bot/position-result', {
+    sessionId: SID, symbol: 'BTCUSDC', baseAsset: 'BTC', executedQty: '0.00009000', orderId: dustOrderId, status: 'open', mode: 'live_spot',
+  }));
+  let fleet = await call(adminReq('GET', '/api/bot/fleet'));
+  let sess = fleet.json.sessions.find((s) => s.sessionId === SID);
+  assert.ok(sess.openPositions.length >= 1, 'live position is open before the dust close');
+
+  const dust = await call(workerReq('POST', '/api/bot/position-result', {
+    sessionId: SID, symbol: 'BTCUSDC', baseAsset: 'BTC', executedQty: '0', orderId: dustOrderId, entryOrderId: dustOrderId,
+    closeOrderId: null, status: 'CLOSED_WITH_DUST', mode: 'live_spot',
+    boughtQty: 0.00009, soldQty: 0, residualDust: 0.00008991, closeReason: 'DUST_ONLY_CLOSE_NOT_POSSIBLE',
+  }));
+  assert.equal(dust.status, 200);
+
+  fleet = await call(adminReq('GET', '/api/bot/fleet'));
+  sess = fleet.json.sessions.find((s) => s.sessionId === SID);
+  assert.equal(sess.openPositions.length, 0, 'dust close drops openPositions to 0 (no more CLOSE REQUIRED)');
+  const dustTrade = (sess.closedTrades || []).find((t) => t.status === 'CLOSED_WITH_DUST' && t.entryOrderId === dustOrderId);
+  assert.ok(dustTrade, 'closed-trade ledger records the dust close');
+  assert.equal(dustTrade.residualDust, 0.00008991, 'residual dust recorded');
+  assert.ok((fleet.json.liveAuditEvents || []).some((e) => e.action === 'LIVE_POSITION_DUSTED'), 'LIVE_POSITION_DUSTED audit recorded');
+});
+
 test('live intent rejects when live preflight is not fresh', async () => {
   // A failed/stale preflight drops readiness below LIVE READY - MICRO CAPS.
   const pf = await postPreflight(false);

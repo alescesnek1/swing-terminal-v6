@@ -31,6 +31,16 @@ enforces a conservative floor instead: minimum live spend = `ceil(minNotional ×
 so the single allowed spend ($6) clears the buffer. The worker still independently
 re-checks the real minNotional at execution.
 
+> ⚠️ **Round-trip warning — size for the SELL, not just the BUY.** The BUY fee is
+> taken in the base asset, so the free BTC after the buy is slightly *less* than the
+> filled quantity (e.g. buy 0.00009 BTC → free 0.00008991). On close, the worker
+> sells `min(boughtQty, freeBaseBalance)` floored to `LOT_SIZE`, and that quantity's
+> notional can fall below `MIN_NOTIONAL` — in which case it is **unsellable dust**:
+> the position is closed as `CLOSED_WITH_DUST` (no SELL) and the dust stays in the
+> account. To guarantee a clean full round-trip close, **prefer $8–$10 for BTCUSDC**
+> so the post-fee, post-rounding sell quantity comfortably clears minNotional. $6 is
+> the absolute minimum to *open*; it does not guarantee a sellable close.
+
 ### Single-symbol live policy
 
 A live run trades exactly one symbol. `LIVE_ALLOWED_SYMBOLS` must be **exactly**
