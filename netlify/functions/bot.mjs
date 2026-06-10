@@ -3,6 +3,7 @@ import { getIdentity, isAdmin, canControlSession } from './_auth.mjs';
 import { loadFleet, saveFleet, mutateFleet, fleetBackend, fleetStoreInfo } from './_fleet-store.mjs';
 import { computeMarketRegime } from './_market-regime.mjs';
 import { evaluateAutoTrader } from '../../scripts/auto/auto-trader.mjs';
+import { fetchBinancePublicUniverse } from '../../scripts/auto/binance-public.mjs';
 
 const DEFAULT_STATE = {
   status: 'safety',
@@ -2256,7 +2257,23 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     const nextEvalMs = new Date((fleet.autoTrader && fleet.autoTrader.nextEvaluationAt) || 0).getTime();
     if (autoStatus.effectiveMode === 'shadow' && nowMs >= nextEvalMs && isAdmin(identity)) {
       try {
-        const markets = await fetchMarkets(req);
+        let markets = await fetchMarkets(req);
+        let dataSource = markets.length > 0 ? 'scanner' : 'empty';
+        let fetchError = null;
+
+        if (markets.length === 0 && autoStatus.effectiveMode === 'shadow') {
+          try {
+            const publicMarkets = await fetchBinancePublicUniverse();
+            if (publicMarkets && publicMarkets.length > 0) {
+              markets = publicMarkets;
+              dataSource = 'binance_public';
+            }
+          } catch (err) {
+            console.error('Public binance fetch failed', err);
+            fetchError = err.message;
+          }
+        }
+
         const regime = computeMarketRegime(markets);
         const config = getUserConfig(fleet, identity.userId);
         const caps = liveRiskCaps(config);
@@ -2287,6 +2304,8 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
           caps,
           fleet: autoFleetState,
           threshold: 1,
+          dataSource,
+          fetchError,
         });
 
         if (!fleet.autoTrader) fleet.autoTrader = {};

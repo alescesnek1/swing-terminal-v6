@@ -6346,18 +6346,22 @@ function renderFleet() {
     + '</div>';
     
   let diagnosticsHtml = '';
-  if (auto.universeDiagnostics && (auto.universeDiagnostics.dataSource === 'fallback' || auto.universeDiagnostics.universeTotal === 0)) {
+  if (auto.universeDiagnostics) {
     const ud = auto.universeDiagnostics;
+    const isFallback = ud.fallbackUsed || ud.dataSource === 'fallback';
+    const fetchErrorHtml = ud.fetchError ? '<li style="color:var(--rd);">Fetch Error: ' + _esc(ud.fetchError) + '</li>' : '';
+    
     diagnosticsHtml = '<div><span>Diagnostics</span><ul>'
-      + '<li>Total: ' + ud.universeTotal + ' (' + ud.dataSource + ')</li>'
-      + '<li>Post-leverage: ' + ud.afterLeverageFilter + '</li>'
-      + '<li>Post-quote: ' + ud.afterQuoteFilter + '</li>'
-      + '<li>Post-liquidity: ' + ud.afterLiquidityFilter + '</li>'
-      + '<li>Post-spread: ' + ud.afterSpreadFilter + '</li>'
-      + '<li>Post-allowlist: ' + ud.afterAllowlistFilter + '</li>'
+      + '<li>Source: <b>' + _esc(ud.dataSource) + '</b>' + (isFallback ? ' <span style="color:var(--rd);">(FALLBACK)</span>' : '') + '</li>'
+      + fetchErrorHtml
+      + '<li>Fetched: ' + ud.fetchedSymbols + '</li>'
+      + '<li>USDC: ' + ud.usdcSymbols + '</li>'
+      + '<li>Liquid: ' + ud.liquidSymbols + '</li>'
+      + '<li>Spread OK: ' + ud.spreadPassed + '</li>'
+      + '<li>Allowlist OK: ' + ud.allowlistPassed + '</li>'
       + '</ul></div>';
       
-    if (autoReasons.length > 0 && autoReasons[0].indexOf('no candidate') !== -1) {
+    if (isFallback && autoReasons.length > 0 && autoReasons[0].indexOf('no candidate') !== -1) {
        autoReasons[0] = 'No candidate because scanner universe was fully filtered (see diagnostics).';
     }
   }

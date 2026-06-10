@@ -13,6 +13,7 @@ import { evaluateEntryGates } from '../scripts/auto/auto-risk.mjs';
 import { evaluateExit } from '../scripts/auto/auto-exit-manager.mjs';
 import { decideEntry, buildEntryIntent } from '../scripts/auto/auto-strategy.mjs';
 import { evaluateAutoTrader } from '../scripts/auto/auto-trader.mjs';
+import { fetchBinancePublicUniverse } from '../scripts/auto/binance-public.mjs';
 
 const FULL_LIVE_ENV = {
   AUTO_TRADER_ENABLED: 'true',
@@ -105,7 +106,7 @@ test('3b. shadow tick with empty scanner data falls back to BTCUSDC with FALLBAC
   assert.ok(out.candidate.riskFlags.includes('FALLBACK_ALLOWLIST_SYMBOL'), 'fallback risk flag is set');
   assert.ok(out.diagnostics, 'diagnostics object is returned');
   assert.equal(out.diagnostics.dataSource, 'fallback', 'dataSource indicates fallback');
-  assert.equal(out.diagnostics.universeTotal, 0, 'original scanner universe was 0');
+  assert.equal(out.diagnostics.fetchedSymbols, 0, 'original scanner universe was 0');
 });
 
 // 4. paper mode cannot create a live intent
@@ -221,7 +222,7 @@ test('16. live safety lock blocks an auto buy', () => {
 
 // 17. no futures/margin/leverage endpoints introduced anywhere in the auto layer
 test('17. the autonomous layer introduces no futures/margin/leverage/borrow endpoints', () => {
-  const files = ['auto-env', 'auto-universe', 'auto-scorer', 'auto-strategy', 'auto-risk', 'auto-exit-manager', 'auto-trader'];
+  const files = ['auto-env', 'auto-universe', 'auto-scorer', 'auto-strategy', 'auto-risk', 'auto-exit-manager', 'auto-trader', 'binance-public'];
   const forbidden = [/\/fapi\//, /\/dapi\//, /\/sapi\//, /futures/i, /marginType/, /sideEffectType/, /\bleverage=/, /\/margin\/order/, /\/borrow/, /\/repay/, /\/withdraw/];
   for (const name of files) {
     const src = fs.readFileSync(new URL(`../scripts/auto/${name}.mjs`, import.meta.url), 'utf8');
@@ -243,4 +244,53 @@ test('20. autonomous live is impossible with the default dormant env', () => {
   const out = evaluateAutoTrader({ env: def, markets, caps: CAPS, fleet: HEALTHY_FLEET, threshold: 1, sessionId: 's' });
   assert.equal(out.decision, 'OFF');
   assert.equal(out.intent, null);
+});
+
+// 21. public binance fetcher only uses public v3 endpoints and maps universe
+test('21. binance-public fetcher uses only allowed endpoints and builds correct universe', async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url, options) => {
+    calls.push({ url, headers: options?.headers });
+    if (url.includes('exchangeInfo')) {
+      return { ok: true, json: async () => ({ symbols: [
+        { symbol: 'BTCUSDC', status: 'TRADING', baseAsset: 'BTC', quoteAsset: 'USDC' },
+        { symbol: 'ETHUSDC', status: 'TRADING', baseAsset: 'ETH', quoteAsset: 'USDC' },
+        { symbol: 'BADUSDC', status: 'BREAK', baseAsset: 'BAD', quoteAsset: 'USDC' }
+      ] }) };
+    }
+    if (url.includes('ticker/24hr')) {
+      return { ok: true, json: async () => ([
+        { symbol: 'BTCUSDC', priceChangePercent: '5.0', quoteVolume: '10000000' },
+        { symbol: 'ETHUSDC', priceChangePercent: '-1.0', quoteVolume: '5000000' }
+      ]) };
+    }
+    if (url.includes('ticker/bookTicker')) {
+      return { ok: true, json: async () => ([
+        { symbol: 'BTCUSDC', bidPrice: '100', askPrice: '101' },
+        { symbol: 'ETHUSDC', bidPrice: '10', askPrice: '11' }
+      ]) };
+    }
+    return { ok: false, status: 404 };
+  };
+
+  try {
+    const pubMarkets = await fetchBinancePublicUniverse();
+    
+    assert.equal(calls.length, 3);
+    for (const c of calls) {
+      assert.doesNotMatch(c.url, /\/order|\/fapi|\/dapi|\/sapi/);
+      assert.ok(c.url.includes('/api/v3/'));
+      assert.ok(!c.headers?.['X-MBX-APIKEY'], 'no API key header sent');
+    }
+
+    assert.equal(pubMarkets.length, 2);
+    const btc = pubMarkets.find(m => m.symbol === 'BTCUSDC');
+    assert.ok(btc);
+    assert.equal(btc.status, 'TRADING');
+    assert.equal(btc.volume24hUsd, 10000000);
+    assert.equal(btc.spreadPct, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
 });

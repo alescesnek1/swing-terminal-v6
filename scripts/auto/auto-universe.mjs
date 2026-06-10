@@ -37,6 +37,8 @@ export function buildUniverse({
   mode = 'shadow',
   liveAllowedSymbols = ['BTCUSDC'],
   filters = {},
+  dataSource = null,
+  fetchError = null,
 } = {}) {
   const f = { ...DEFAULT_UNIVERSE_FILTERS, ...filters };
   const requireQuote = String(f.requireQuote || 'USDC').toUpperCase();
@@ -46,13 +48,15 @@ export function buildUniverse({
   const reject = (symbol, reason) => rejected.push({ symbol, reason });
   
   const diagnostics = {
-    universeTotal: markets.length,
-    afterQuoteFilter: 0,
-    afterLiquidityFilter: 0,
-    afterSpreadFilter: 0,
-    afterLeverageFilter: 0,
-    afterAllowlistFilter: 0,
-    dataSource: markets.length > 0 ? 'scanner' : 'empty',
+    dataSource: dataSource || (markets.length > 0 ? 'scanner' : 'empty'),
+    fetchError: fetchError || null,
+    fetchedSymbols: markets.length,
+    usdcSymbols: 0,
+    liquidSymbols: 0,
+    spreadPassed: 0,
+    allowlistPassed: 0,
+    fallbackUsed: false,
+    fallbackReason: null,
   };
 
   for (const m of markets) {
@@ -72,20 +76,20 @@ export function buildUniverse({
 
     // Quote asset gate (live MUST be USDC).
     if (quote !== requireQuote) { reject(symbol, `quote ${quote || '?'} != ${requireQuote}`); continue; }
-    diagnostics.afterQuoteFilter++;
+    diagnostics.usdcSymbols++;
 
     // Liquidity / spread.
     const vol = Number(m && (m.volume24hUsd != null ? m.volume24hUsd : m.quoteVolume24h));
     if (!(Number.isFinite(vol) && vol >= f.minVolume24hUsd)) { reject(symbol, `low volume (${Number.isFinite(vol) ? vol : 'n/a'} < ${f.minVolume24hUsd})`); continue; }
-    diagnostics.afterLiquidityFilter++;
+    diagnostics.liquidSymbols++;
     
     const spread = Number(m && m.spreadPct);
     if (Number.isFinite(spread) && spread > f.maxSpreadPct) { reject(symbol, `wide spread (${spread} > ${f.maxSpreadPct})`); continue; }
-    diagnostics.afterSpreadFilter++;
+    diagnostics.spreadPassed++;
 
     // Live allowlist intersection — the hard symbol boundary for live trading.
     if (mode === 'live_spot' && !allow.has(symbol)) { reject(symbol, 'not in live allowlist'); continue; }
-    diagnostics.afterAllowlistFilter++;
+    diagnostics.allowlistPassed++;
 
     universe.push({ ...m, symbol, baseAsset: base, quoteAsset: quote, volume24hUsd: vol, spreadPct: Number.isFinite(spread) ? spread : null });
   }
@@ -93,6 +97,8 @@ export function buildUniverse({
   if (universe.length === 0 && mode === 'shadow' && allow.size > 0) {
     const fallbackSymbol = Array.from(allow)[0]; // e.g. BTCUSDC
     diagnostics.dataSource = 'fallback';
+    diagnostics.fallbackUsed = true;
+    diagnostics.fallbackReason = 'scanner universe was fully filtered or missing';
     universe.push({
       symbol: fallbackSymbol,
       baseAsset: fallbackSymbol.replace(requireQuote, ''),

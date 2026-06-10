@@ -40,6 +40,8 @@ export function evaluateAutoTrader({
   cooldownUntil = 0,
   sessionId = null,
   now = Date.now(),
+  dataSource = null,
+  fetchError = null,
 } = {}) {
   const a = readAutoEnv(env);
   const mode = a.mode;
@@ -66,7 +68,7 @@ export function evaluateAutoTrader({
   if (!a.enabled) return { ...baseline, reasons: ['auto trader disabled (AUTO_TRADER_ENABLED!=true)'] };
 
   // Universe + scoring (used for entries and for the candidate display).
-  const { universe, diagnostics } = buildUniverse({ markets, mode, liveAllowedSymbols, filters });
+  const { universe, diagnostics } = buildUniverse({ markets, mode, liveAllowedSymbols, filters, dataSource, fetchError });
   const scored = scoreUniverse(universe, { regime, blacklist, cooldowns, now, caps });
   const candidate = scored[0] || null;
 
