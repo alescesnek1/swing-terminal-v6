@@ -4914,11 +4914,11 @@ async function refreshFleet() {
       if (settled && (Date.now() - Fleet.emergency.requestedAt) > 12000) Fleet.emergency = null;
     }
     const visibleSessions = (Fleet.data.sessions || []).filter((s) => s.status !== 'cleared');
-    // Prefer to keep the operator on the open-position session; never silently jump.
-    if (!Fleet.selectedId || !visibleSessions.some((s) => s.sessionId === Fleet.selectedId)) {
-      const openFirst = visibleSessions.find((s) => _fleetOpenPositionCount(s) > 0);
-      Fleet.selectedId = (openFirst && openFirst.sessionId) || (visibleSessions[0] ? visibleSessions[0].sessionId : null);
-    }
+    // Live-first default selection (spec 1/2): when live mode is active, never
+    // auto-land on a stale testnet/paper session — resolve to the live default.
+    // Explicit operator selections (userSelected) are honored so an archived
+    // testnet/paper item can be opened with its archive banner.
+    Fleet.selectedId = _fleetResolveSelectedId(visibleSessions, Fleet.selectedId, Fleet.userSelected === true);
     renderFleet();
   } catch (err) {
     // Do NOT wipe Fleet.data — keep the last stable snapshot on screen.
@@ -4931,7 +4931,17 @@ async function refreshFleet() {
   }
 }
 
-function selectFleetSession(id) { Fleet.selectedId = id; renderFleet(); }
+// Explicit operator selection: pins the choice so the live-first auto-resolver
+// won't override it on the next poll (lets an archived testnet/paper item stay
+// open with its archive banner). _fleetClearUserSelection() drops back to the
+// live-first default.
+function selectFleetSession(id) { Fleet.selectedId = id; Fleet.userSelected = true; renderFleet(); }
+function _fleetClearUserSelection() {
+  Fleet.userSelected = false;
+  const visible = ((Fleet.data && Fleet.data.sessions) || []).filter((s) => s.status !== 'cleared');
+  Fleet.selectedId = _fleetResolveSelectedId(visible, null, false);
+  renderFleet();
+}
 
 function startBotSession() {
   const btn = document.getElementById('fleet-start-btn');
@@ -4939,7 +4949,7 @@ function startBotSession() {
   Fleet.launchNotice = null;
   if (btn) { btn.disabled = true; btn.textContent = 'LAUNCHING…'; }
   _fleetFetch('POST', '/api/bot/start-session', {}).then((payload) => {
-    if (payload.session) Fleet.selectedId = payload.session.sessionId;
+    if (payload.session) { Fleet.selectedId = payload.session.sessionId; Fleet.userSelected = true; }
     if (payload.existing && payload.launchUrl) {
       Fleet.retryLaunchUrl = payload.launchUrl;
       Fleet.launchNotice = 'Existing recent launch found. Retry Open Worker Terminal if the terminal did not appear.';
@@ -4959,6 +4969,7 @@ function startBotSession() {
     if (p && p.conflict === 'open_position') {
       const id = p.openPositionSessionId || p.sessionId || null;
       Fleet.selectedId = id || Fleet.selectedId;
+      Fleet.userSelected = true;
       Fleet.openPositionSessionId = id;
       Fleet.retryLaunchUrl = p.launchUrl || _fleetLaunchUrl(id);
       Fleet.launchNotice = 'Open position exists. Reconnect worker to this session or Emergency Close.';
@@ -5026,7 +5037,7 @@ function openStartLiveSpotModal() {
       liveModeConfirmed: true,
       confirmationPhrase: 'I UNDERSTAND THIS USES REAL MONEY',
     }).then((payload) => {
-      if (payload.session) Fleet.selectedId = payload.session.sessionId;
+      if (payload.session) { Fleet.selectedId = payload.session.sessionId; Fleet.userSelected = true; }
       Fleet.retryLaunchUrl = payload.launchUrl || null;
       try { window.Toast?.success('Live Spot session requested', 'Open the local worker terminal with live env enabled.'); } catch {}
       if (payload.launchUrl) { try { window.location.href = payload.launchUrl; } catch (e) { console.warn('[Fleet] live launch failed:', e.message); } }
@@ -5313,6 +5324,7 @@ function _fleetModeLabel(s) { return _fleetSessionIsLive(s) ? 'LIVE' : 'TESTNET'
 // This is the SINGLE close command both the CLOSE button and STOP BOT converge on.
 function _doStopAndCloseSession(id) {
   Fleet.selectedId = id;
+  Fleet.userSelected = true; // keep the operator on the closing session across polls
   Fleet.emergency = { sessionId: id, kind: 'stop', requestedAt: Date.now() };
   renderFleet(); // show CLOSE REQUESTED immediately (do not wait for the next poll)
   const sess = _fleetSessionFromData(id);
@@ -5441,6 +5453,7 @@ function reconnectWorkerToSession(sessionId) {
   const id = sessionId || Fleet.openPositionSessionId || Fleet.selectedId;
   if (!id) { window.Toast?.error('No session', 'No open-position session to reconnect.'); return; }
   Fleet.selectedId = id;
+  Fleet.userSelected = true;
   Fleet.retryLaunchUrl = _fleetLaunchUrl(id);
   Fleet.launchNotice = 'Reconnecting the local worker to the open-position session (no new session created).';
   try { LiveFeed.push('Reconnecting worker to open-position session ' + id.slice(0, 12), 'info', { source: 'Bot Fleet' }); } catch {}
@@ -5456,6 +5469,7 @@ function emergencyCloseSession(sessionId) {
   if (!id) { window.Toast?.error('No session selected', 'Select a worker first.'); return; }
   if (!window.confirm('Emergency close ALL open ' + _fleetModeLabel(_fleetSessionFromData(id)).toLowerCase() + ' positions for session ' + id.slice(0, 12) + '? The worker stays alive.')) return;
   Fleet.selectedId = id;
+  Fleet.userSelected = true;
   Fleet.emergency = { sessionId: id, kind: 'emergency', requestedAt: Date.now() };
   renderFleet(); // show CLOSE REQUESTED immediately
   const sess = _fleetSessionFromData(id);
@@ -5936,6 +5950,16 @@ function _fleetClosedTradeCardHtml(t, _e, opts) {
   const dust = Number(t.residualDust) > 0;
   const statusLabel = t.status === 'CLOSED_WITH_DUST' ? 'CLOSED (dust left)' : 'CLOSED';
   const showStart = opts && opts.showStartAgain;
+  // Spec 6: in live mode the closed card must NOT offer "START BOT AGAIN" (that
+  // starts a TESTNET session). Offer START LIVE SPOT when live start is safe,
+  // otherwise no start button at all.
+  const liveMode = !!(opts && opts.liveMode);
+  const canStartLive = !!(opts && opts.canStartLive);
+  const startBtn = liveMode
+    ? (canStartLive
+        ? '<div class="fleet-action-row"><button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openStartLiveSpotModal()">START LIVE SPOT</button></div>'
+        : '')
+    : (showStart ? '<div class="fleet-action-row"><button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT AGAIN</button></div>' : '');
   const feeText = Array.isArray(t.fees) && t.fees.length
     ? t.fees.map((f) => _fmtQty(f.amount) + ' ' + (f.asset || '')).join(', ')
     : (t.feesAvailable ? 'available' : 'unavailable / testnet');
@@ -5957,8 +5981,53 @@ function _fleetClosedTradeCardHtml(t, _e, opts) {
     + '<div><span>Fees</span><b>' + _esc(feeText) + '</b></div>'
     + '<div><span>PnL basis</span><b>' + _esc(netText) + '</b></div>'
     + '</div>'
-    + (showStart ? '<div class="fleet-action-row"><button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT AGAIN</button></div>' : '')
+    + startBtn
     + '</div>';
+}
+
+function _fleetSessionTs(s) {
+  const t = new Date((s && (s.updatedAt || s.createdAt)) || 0).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
+// Live mode is "active" whenever a live_spot session exists at all (or a live
+// worker/position is present). Drives the live-first cockpit: default selection,
+// the testnet/paper archive, and the closed-card start action.
+function _fleetLiveModeActive(sessions) {
+  const list = sessions || [];
+  return list.some(_fleetSessionIsLive);
+}
+
+// Default live selection priority (spec 1): a) live_spot with an open position,
+// b) live_spot with worker online, c) most recent live_spot, else null (which
+// renders the live cockpit summary instead of a testnet/paper detail panel).
+function _fleetDefaultLiveSelectedId(sessions) {
+  const live = (sessions || []).filter(_fleetSessionIsLive);
+  if (!live.length) return null;
+  const openPos = live.find((s) => _fleetOpenPositionCount(s) > 0);
+  if (openPos) return openPos.sessionId;
+  const online = live.find(_fleetWorkerOnline);
+  if (online) return online.sessionId;
+  const recent = live.slice().sort((a, b) => _fleetSessionTs(b) - _fleetSessionTs(a))[0];
+  return recent ? recent.sessionId : null;
+}
+
+// Resolve which session the cockpit shows. Live mode NEVER auto-selects a
+// testnet/paper session (spec 1/2): a stale prior selection is dropped in favor of
+// the live default. An EXPLICIT operator selection (userSelected) is always honored
+// so an archived testnet/paper item can be opened — it renders with an archive
+// banner. Non-live mode keeps the legacy "keep current, else open-position-first".
+function _fleetResolveSelectedId(sessions, currentId, userSelected) {
+  const list = sessions || [];
+  const current = list.find((s) => s.sessionId === currentId) || null;
+  if (userSelected && current) return current.sessionId;
+  if (_fleetLiveModeActive(list)) {
+    if (current && _fleetSessionIsLive(current)) return current.sessionId;
+    return _fleetDefaultLiveSelectedId(list);
+  }
+  if (current) return current.sessionId;
+  const openFirst = list.find((s) => _fleetOpenPositionCount(s) > 0);
+  return (openFirst && openFirst.sessionId) || (list[0] ? list[0].sessionId : null);
 }
 
 function renderFleet() {
@@ -5999,6 +6068,9 @@ function renderFleet() {
   const globalKillActive = data.globalKillSwitchActive === true || live.globalKillSwitchActive === true;
   const liveRunning = sessions.some((s) => s.mode === 'live_spot' && _fleetWorkerOnline(s));
   const liveOpen = sessions.some((s) => s.mode === 'live_spot' && _fleetOpenPositionCount(s) > 0);
+  // Live mode is active whenever any live_spot session exists. Drives the live-first
+  // cockpit: default selection, the testnet/paper archive, and the closed-card start.
+  const liveModeActive = _fleetLiveModeActive(sessions);
   const liveStopping = sessions.some((s) => s.mode === 'live_spot' && (s.stopRequested || s.status === 'stopping' || s.status === 'stop_requested'));
   const liveClosed = sessions.some((s) => s.mode === 'live_spot' && (s.status === 'stopped' || s.status === 'expired') && _fleetOpenPositionCount(s) === 0);
   const liveDisplayState = globalKillActive ? 'LIVE PAUSED'
@@ -6126,13 +6198,18 @@ function renderFleet() {
   }
 
   // ── TRADE CLOSED result card (spec A.4 / state 5) ──
-  // Shown ONLY when no position is open anywhere: the operator gets a clean trade
-  // result (PnL, entry→exit, dust, duration) and START BOT AGAIN as the primary
-  // action — never a red panel after a successful close.
+  // Shown ONLY when no position is open anywhere. In live mode the card reflects the
+  // latest LIVE close and offers START LIVE SPOT (never "START BOT AGAIN", which
+  // would start a testnet session — spec 6).
   if (!anyOpenPosition) {
-    const latestClosed = _fleetLatestClosedTrade(sessions);
+    const closedScope = liveModeActive ? sessions.filter(_fleetSessionIsLive) : sessions;
+    const latestClosed = _fleetLatestClosedTrade(closedScope);
     if (latestClosed) {
-      html += _fleetClosedTradeCardHtml(latestClosed, _e, { showStartAgain: newEntriesAllowed });
+      html += _fleetClosedTradeCardHtml(latestClosed, _e, {
+        showStartAgain: newEntriesAllowed,
+        liveMode: liveModeActive,
+        canStartLive: !!(live && live.canStartLive),
+      });
     }
   }
 
@@ -6165,7 +6242,6 @@ function renderFleet() {
   // into a collapsed "Testnet / Paper sessions" archive so the live cockpit shows
   // live risk only. Any session with an open position (live OR testnet) always stays
   // primary — open risk is never hidden. Live audit trail is preserved, just collapsed.
-  const liveModeActive = sessions.some(_fleetSessionIsLive) || liveRunning || liveOpen;
   const archivedTestnetSessions = liveModeActive
     ? activeSessions.filter((s) => !_fleetSessionIsLive(s) && _fleetOpenPositionCount(s) === 0)
     : [];
@@ -6233,8 +6309,20 @@ function renderFleet() {
   // Detail
   html += '<div class="fleet-detail">';
   if (!sel) {
-    html += '<div class="fleet-empty">Select a worker to see details.</div>';
+    // Live mode with no live session selected → live cockpit summary, never a
+    // testnet/paper detail by default (spec 2/5).
+    html += liveModeActive
+      ? '<div class="fleet-empty fleet-live-summary">Live cockpit active. The live readiness, worker status, open live position and latest live close are shown above. Testnet/paper sessions are in the archive — open one to inspect it.</div>'
+      : '<div class="fleet-empty">Select a worker to see details.</div>';
   } else {
+    // Archive banner (spec 4): the operator explicitly opened a non-live session
+    // while live mode is active — make it unmistakable this is NOT the live cockpit.
+    if (liveModeActive && !_fleetSessionIsLive(sel)) {
+      html += '<div class="fleet-archive-banner">'
+        + '<b>ARCHIVED TESTNET/PAPER SESSION — not live.</b> You are viewing a testnet/paper session for reference. '
+        + '<button type="button" class="fleet-archive-banner__back" onclick="_fleetClearUserSelection()">Back to live cockpit</button>'
+        + '</div>';
+    }
     const online = sel.worker && sel.worker.online;
     const openCountDetail = sel.openPositions ? sel.openPositions.length : 0;
     const orphanOpen = !online && openCountDetail > 0; // worker gone, position still open
