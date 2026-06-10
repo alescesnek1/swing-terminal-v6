@@ -115,10 +115,91 @@ test('with 2/2 live trades today, a NEW live intent is rejected by the daily tra
   assert.match(res.json.error, /daily trade cap reached \(2\/2\)/);
 });
 
-test('auto trader status exposes the exhausted live daily cap as a risk block', async () => {
+test('auto trader status exposes the exhausted live daily cap as a risk block before a raise', async () => {
   const fleet = await call(adminReq('GET', '/api/bot/fleet'));
   const blocks = fleet.json.autoTrader.riskBlocks || [];
   assert.ok(blocks.some((b) => b.code === 'DAILY_TRADES_CAP' && /Daily live trade cap exhausted: 2\/2 used/.test(b.reason)));
+});
+
+test('config cap raise above 3 requires phrase, audits the change, and unlocks live intent', async () => {
+  const baseConfig = {
+    minTradeUsd: 5,
+    maxTradeUsd: 6,
+    maxDailyLossUsd: 3,
+    maxDailyTrades: 5,
+    maxOpenPositions: 1,
+    stopLossPct: 3,
+    takeProfitPct: 15,
+    pauseOnMarketCrash: true,
+    allowTestnet: true,
+    allowLive: true,
+  };
+  const missingPhrase = await call(adminReq('POST', '/api/bot/config', baseConfig));
+  assert.equal(missingPhrase.status, 409);
+  assert.equal(missingPhrase.json.requiredPhrase, "I UNDERSTAND THIS RAISES TODAY'S LIVE TRADE LIMIT");
+
+  const saved = await call(adminReq('POST', '/api/bot/config', {
+    ...baseConfig,
+    confirmLiveDailyTradesPhrase: "I UNDERSTAND THIS RAISES TODAY'S LIVE TRADE LIMIT",
+  }));
+  assert.equal(saved.status, 200);
+  assert.equal(saved.json.config.maxDailyTrades, 5);
+
+  const fleet = await call(adminReq('GET', '/api/bot/fleet'));
+  assert.equal(fleet.json.liveReadiness.dailyTradesUsed, 2);
+  assert.equal(fleet.json.liveReadiness.caps.maxDailyTrades, 5);
+  assert.equal(fleet.json.liveReadiness.dailyTradesRemaining, 3);
+  const audit = fleet.json.liveAuditEvents.find((e) => e.action === 'LIVE_DAILY_TRADES_CAP_CHANGED');
+  assert.ok(audit, 'cap change audit event exists');
+  assert.equal(audit.oldValue, 2);
+  assert.equal(audit.newValue, 5);
+  assert.equal(audit.source, 'live_caps_config');
+  assert.equal(audit.actor, 'admin@example.com');
+  assert.ok(audit.timestamp, 'audit event has timestamp');
+
+  const intent = await call(adminReq('POST', '/api/bot/create-live-execution-intent', { sessionId: SID_B, symbol: 'BTCUSDC', positionUsd: 6 }));
+  assert.equal(intent.status, 200);
+  assert.equal(intent.json.intent.configSnapshot.maxDailyTrades, 5);
+  assert.equal(intent.json.liveReadiness.dailyTradesRemaining, 3);
+});
+
+test('config validation rejects non-integer daily caps and caps above the hard cap', async () => {
+  const invalidInteger = await call(adminReq('POST', '/api/bot/config', {
+    minTradeUsd: 5,
+    maxTradeUsd: 6,
+    maxDailyLossUsd: 3,
+    maxDailyTrades: 5.5,
+    maxOpenPositions: 1,
+    stopLossPct: 3,
+    takeProfitPct: 15,
+    pauseOnMarketCrash: true,
+    allowTestnet: true,
+    allowLive: true,
+  }));
+  assert.equal(invalidInteger.status, 400);
+  assert.ok(invalidInteger.json.errors.some((e) => /maxDailyTrades must be an integer/.test(e)));
+
+  const tooHigh = await call(adminReq('POST', '/api/bot/config', {
+    minTradeUsd: 5,
+    maxTradeUsd: 6,
+    maxDailyLossUsd: 3,
+    maxDailyTrades: 11,
+    maxOpenPositions: 1,
+    stopLossPct: 3,
+    takeProfitPct: 15,
+    pauseOnMarketCrash: true,
+    allowTestnet: true,
+    allowLive: true,
+    confirmLiveDailyTradesPhrase: "I UNDERSTAND THIS RAISES TODAY'S LIVE TRADE LIMIT",
+  }));
+  assert.equal(tooHigh.status, 400);
+  assert.ok(tooHigh.json.errors.some((e) => /maxDailyTrades must be <= LIVE_MAX_DAILY_TRADES_HARD_CAP \(10\)/.test(e)));
+});
+
+test('auto trader status clears the daily cap risk block after an explicit raise', async () => {
+  const fleet = await call(adminReq('GET', '/api/bot/fleet'));
+  const blocks = fleet.json.autoTrader.riskBlocks || [];
+  assert.ok(!blocks.some((b) => b.code === 'DAILY_TRADES_CAP'), 'raised 5-trade cap clears the exhausted risk block at 2/5');
 });
 
 test('the counter survives a durable-store reload', async () => {

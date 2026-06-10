@@ -5667,6 +5667,7 @@ function openCreateLiveMicroOrderModal() {
 
 // ── Config form: built ONCE, backed by a draft so polling never clobbers edits ──
 const FLEET_CONFIG_DEFAULTS = { minTradeUsd: 5, maxTradeUsd: 10, maxDailyLossUsd: 3, maxDailyTrades: 5, maxOpenPositions: 1, stopLossPct: 3, takeProfitPct: 15, pauseOnMarketCrash: true, allowTestnet: true, allowLive: false };
+const LIVE_DAILY_TRADES_RAISE_PHRASE = "I UNDERSTAND THIS RAISES TODAY'S LIVE TRADE LIMIT";
 const FLEET_CONFIG_FIELDS = [
   { name: 'minTradeUsd', label: 'Min trade $', min: 1, step: 0.01 },
   { name: 'maxTradeUsd', label: 'Max trade $', min: 1, max: 10, step: 0.01 },
@@ -5689,7 +5690,7 @@ function _fleetCompleteConfig(cfg) {
   for (const f of FLEET_CONFIG_FIELDS) out[f.name] = _fleetNum(src[f.name], FLEET_CONFIG_DEFAULTS[f.name]);
   out.pauseOnMarketCrash = src.pauseOnMarketCrash !== false;
   out.allowTestnet = true;
-  out.allowLive = false;
+  out.allowLive = src.allowLive === true;
   return out;
 }
 
@@ -5714,7 +5715,8 @@ function _fleetReadConfigFromForm() {
   const crash = document.getElementById('cfg-pauseOnMarketCrash');
   out.pauseOnMarketCrash = crash ? !!crash.checked : true;
   out.allowTestnet = true;
-  out.allowLive = false;
+  const currentConfig = (Fleet.data && Fleet.data.config) || window.__botFleetConfigDraft || FLEET_CONFIG_DEFAULTS;
+  out.allowLive = currentConfig.allowLive === true;
   return out;
 }
 
@@ -5806,12 +5808,11 @@ async function _fleetInitConfig() {
   }
 }
 
-function saveBotConfig() {
-  const body = _fleetReadConfigFromForm();
+function _postBotConfig(body) {
   const errEl = document.getElementById('fleet-cfg-error');
   if (errEl) errEl.textContent = '';
   _fleetSetConfigStatus('Saving…', 'dirty');
-  _fleetFetch('POST', '/api/bot/config', body).then((payload) => {
+  return _fleetFetch('POST', '/api/bot/config', body).then((payload) => {
     _fleetApplyConfigToForm(payload.config);
     try { window.Toast?.success('CONFIG SAVED', 'Applies to your next session.'); } catch {}
     refreshFleet();
@@ -5821,6 +5822,29 @@ function saveBotConfig() {
     if (errEl) errEl.textContent = err.message;
     window.Toast?.error('Config invalid', err.message);
   });
+}
+
+function saveBotConfig() {
+  const body = _fleetReadConfigFromForm();
+  const oldMax = Number(Fleet.data && Fleet.data.config && Fleet.data.config.maxDailyTrades);
+  const newMax = Number(body.maxDailyTrades);
+  if (Number.isFinite(newMax) && newMax > 3 && (!Number.isFinite(oldMax) || newMax > oldMax)) {
+    openBotConfirmModal({
+      title: 'Raise Daily Live Trade Cap',
+      summary: 'This raises today\'s maximum number of live entries. Backend live gates remain enforced.',
+      info: [
+        ['Current cap', Number.isFinite(oldMax) ? oldMax : 'unknown'],
+        ['New cap', newMax],
+        ['Source', 'live_caps_config'],
+      ],
+      checkboxLabel: 'I understand this raises today\'s live trade limit.',
+      phraseExpected: LIVE_DAILY_TRADES_RAISE_PHRASE,
+      confirmLabel: 'Save raised cap',
+      onConfirm: () => _postBotConfig({ ...body, confirmLiveDailyTradesPhrase: LIVE_DAILY_TRADES_RAISE_PHRASE }),
+    });
+    return;
+  }
+  _postBotConfig(body);
 }
 
 function revertBotConfig() {

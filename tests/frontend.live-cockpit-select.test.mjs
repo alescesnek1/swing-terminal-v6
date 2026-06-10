@@ -126,5 +126,5 @@ test('explicitly opened testnet/paper session shows the archive banner with a ba
 test('the live closed card scopes to live sessions and passes live-mode opts', () => {
   assert.match(terminalJs, /const closedScope = liveModeActive \? sessions\.filter\(_fleetSessionIsLive\) : sessions;/);
   assert.match(terminalJs, /liveMode: liveModeActive,/);
-  assert.match(terminalJs, /canStartLive: !!\(live && live\.canStartLive\),/);
+  assert.match(terminalJs, /canStartLive: !!liveCanStartEntry,/);
 });

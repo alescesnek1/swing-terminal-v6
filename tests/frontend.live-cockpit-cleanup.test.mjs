@@ -98,7 +98,7 @@ test('a genuinely open running session keeps its open row', () => {
 test('live mode never offers a generic START BOT in the top actions', () => {
   // The default-start branch is gated on liveModeActive → START LIVE SPOT or nothing.
   assert.match(terminalJs, /: liveModeActive\s*\n\s*\/\/ Live cockpit \(spec 1\)/);
-  assert.match(terminalJs, /\? \(live\.canStartLive \? '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openStartLiveSpotModal\(\)">START LIVE SPOT<\/button>' : ''\)/);
+  assert.match(terminalJs, /\? \(liveCanStartEntry \? '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openStartLiveSpotModal\(\)">START LIVE SPOT<\/button>' : ''\)/);
   assert.match(terminalJs, /: '<button id="fleet-start-btn"[^>]*onclick="startBotSession\(\)">START BOT<\/button>'\)/);
 });
 

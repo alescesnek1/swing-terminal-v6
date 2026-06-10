@@ -1074,7 +1074,9 @@ const MAX_SESSIONS_PER_USER = 3;
 const TESTNET_MAX_TRADE_USD = 10;
 const LIVE_SPOT_ACK_TEXT = 'I_UNDERSTAND_REAL_MONEY_RISK';
 const LIVE_CONFIRM_PHRASE = 'I UNDERSTAND THIS USES REAL MONEY';
+const LIVE_DAILY_TRADES_RAISE_PHRASE = "I UNDERSTAND THIS RAISES TODAY'S LIVE TRADE LIMIT";
 const LIVE_PREFLIGHT_MAX_AGE_MS = 60 * 60 * 1000;
+const LIVE_MAX_DAILY_TRADES_DEFAULT_HARD_CAP = 10;
 const FLEET_COMMAND_TYPES = new Set(['STOP', 'PAUSE', 'RESUME', 'EMERGENCY_CLOSE']);
 const STALE_SESSION_STATUSES = new Set(['launch_requested', 'launching', 'stopping', 'stop_requested', 'launch_failed']);
 const STALE_LAUNCH_STATUSES = new Set(['launch_requested', 'launching', 'launch_failed']);
@@ -1100,8 +1102,36 @@ const DEFAULT_BOT_CONFIG = {
   allowLive: false,
 };
 
-function liveRiskCaps() {
+function envPositiveInteger(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+function liveMaxDailyTradesHardCap() {
+  return envPositiveInteger('LIVE_MAX_DAILY_TRADES_HARD_CAP', LIVE_MAX_DAILY_TRADES_DEFAULT_HARD_CAP);
+}
+
+function resolveLiveMaxDailyTrades(config) {
+  const hardCap = liveMaxDailyTradesHardCap();
+  const configured = Number(config && config.maxDailyTrades);
+  if (Number.isInteger(configured) && configured > 0) {
+    return { value: Math.min(configured, hardCap), hardCap, source: 'live_caps_config' };
+  }
+  const envConfigured = envPositiveInteger('LIVE_MAX_DAILY_TRADES', DEFAULT_BOT_CONFIG.maxDailyTrades);
+  return { value: Math.min(envConfigured, hardCap), hardCap, source: process.env.LIVE_MAX_DAILY_TRADES ? 'env' : 'default' };
+}
+
+function defaultBotConfig() {
+  const hardCap = liveMaxDailyTradesHardCap();
+  const envConfigured = envPositiveInteger('LIVE_MAX_DAILY_TRADES', DEFAULT_BOT_CONFIG.maxDailyTrades);
+  return { ...DEFAULT_BOT_CONFIG, maxDailyTrades: Math.min(envConfigured, hardCap) };
+}
+
+function liveRiskCaps(config = null) {
   const maxSymbols = envNumber('LIVE_MAX_SYMBOLS', 1);
+  const dailyTrades = resolveLiveMaxDailyTrades(config);
   // LIVE_* vars take precedence; BOT_ALLOWED_SYMBOLS / BOT_MAX_POSITION_USD are
   // the Netlify-deployed fallbacks so the readiness panel and the enforced caps
   // always describe the same configuration (e.g. BTCUSDC / $5).
@@ -1114,7 +1144,9 @@ function liveRiskCaps() {
     maxPositionUsd: envNumber('LIVE_MAX_POSITION_USD', envNumber('BOT_MAX_POSITION_USD', 10)),
     minPositionUsd: liveMinSpendUsd(),
     maxDailyLossUsd: envNumber('LIVE_MAX_DAILY_LOSS_USD', 5),
-    maxDailyTrades: envNumber('LIVE_MAX_DAILY_TRADES', 3),
+    maxDailyTrades: dailyTrades.value,
+    maxDailyTradesHardCap: dailyTrades.hardCap,
+    maxDailyTradesSource: dailyTrades.source,
     maxOpenPositions: envNumber('LIVE_MAX_OPEN_POSITIONS', 1),
     maxSymbols,
     allowedSymbols: symbols.length ? symbols : ['BTCUSDT'],
@@ -1194,8 +1226,8 @@ function liveReadiness(fleet, identity) {
   const storeInfo = fleetStoreInfo();
   const env = liveEnvStatus();
   const preflightFresh = livePreflightFresh(fleet);
-  const caps = liveRiskCaps();
   const userConfig = getUserConfig(fleet, identity.userId);
+  const caps = liveRiskCaps(userConfig);
   const envReady = env.workerMode && env.binanceEnv && env.liveTradingEnabled && env.allowRealOrders && env.liveSpotAck && env.localWorkerLiveConfirm;
   let state = 'TESTNET MODE';
   if (env.globalKillSwitch || fleet.globalKillSwitch) state = 'LIVE PAUSED';
@@ -1253,7 +1285,7 @@ function autoLiveExecutionGate() {
     .map(([k]) => k);
   return { allowed: missing.length === 0, missing };
 }
-function autoTraderStatus(fleet) {
+function autoTraderStatus(fleet, identity = null) {
   const persisted = (fleet && fleet.autoTrader) || {};
   const requestedMode = String(persisted.requestedMode || '').toLowerCase();
   const envEnabled = process.env.AUTO_TRADER_ENABLED === 'true';
@@ -1264,7 +1296,7 @@ function autoTraderStatus(fleet) {
   let effectiveMode = 'off';
   if (enabled) effectiveMode = mode === 'live_spot' ? (gate.allowed ? 'live_spot' : 'live_locked') : mode;
   const statusLabel = { off: 'OFF', shadow: 'SHADOW', paper: 'PAPER', live_locked: 'LIVE LOCKED', live_spot: 'LIVE ACTIVE' }[effectiveMode];
-  const caps = liveRiskCaps();
+  const caps = liveRiskCaps(identity && identity.userId ? getUserConfig(fleet, identity.userId) : null);
   const daily = liveDailyCounters(fleet);
   const paperEvidence = Number(persisted.paperTradeCount) || 0;
   const riskBlocks = Array.isArray(persisted.riskBlocks) ? persisted.riskBlocks.slice() : [];
@@ -1309,6 +1341,7 @@ function liveAudit(fleet, identity, action, extra = {}) {
   const actor = identity && (identity.email || identity.userId) ? (identity.email || identity.userId) : 'worker';
   const ev = {
     who: actor,
+    actor,
     sessionId: extra.sessionId || null,
     mode: 'live_spot',
     action,
@@ -1319,6 +1352,7 @@ function liveAudit(fleet, identity, action, extra = {}) {
     result: extra.result || null,
     timestamp: new Date().toISOString(),
     workerId: extra.workerId || null,
+    ...extra,
   };
   fleet.liveAuditEvents = [ev, ...(fleet.liveAuditEvents || [])].slice(0, 200);
   return ev;
@@ -1328,9 +1362,9 @@ function liveAudit(fleet, identity, action, extra = {}) {
 // Present-but-not-finite (NaN/Infinity/garbage) -> push an error and use fallback.
 function coerceNum(raw, fallback, label, errors, integer) {
   if (raw === undefined || raw === null || raw === '') return fallback;
-  let n = Number(raw);
+  const n = Number(raw);
   if (!Number.isFinite(n)) { errors.push(`${label} must be a finite number`); return fallback; }
-  if (integer) n = Math.floor(n);
+  if (integer && !Number.isInteger(n)) errors.push(`${label} must be an integer`);
   return n;
 }
 
@@ -1356,6 +1390,7 @@ function validateBotConfig(input) {
   if (!(c.minTradeUsd <= c.maxTradeUsd)) errors.push('minTradeUsd must be <= maxTradeUsd');
   if (!(c.maxDailyLossUsd >= 0)) errors.push('maxDailyLossUsd must be >= 0');
   if (!(c.maxDailyTrades >= 1)) errors.push('maxDailyTrades must be >= 1');
+  if (!(c.maxDailyTrades <= liveMaxDailyTradesHardCap())) errors.push(`maxDailyTrades must be <= LIVE_MAX_DAILY_TRADES_HARD_CAP (${liveMaxDailyTradesHardCap()})`);
   if (!(c.maxOpenPositions >= 1 && c.maxOpenPositions <= 5)) errors.push('maxOpenPositions must be between 1 and 5');
   if (c.allowLive && c.maxTradeUsd > liveRiskCaps().maxPositionUsd) errors.push(`maxTradeUsd must be <= LIVE_MAX_POSITION_USD (${liveRiskCaps().maxPositionUsd}) when allowLive is true`);
   if (!(c.stopLossPct > 0 && c.stopLossPct <= 50)) errors.push('stopLossPct must be > 0 (<= 50)');
@@ -1365,12 +1400,12 @@ function validateBotConfig(input) {
 
 function completeBotConfig(input) {
   const v = validateBotConfig(input);
-  return v.ok ? v.config : { ...DEFAULT_BOT_CONFIG };
+  return v.ok ? v.config : defaultBotConfig();
 }
 
 function getUserConfig(fleet, userId) {
   const stored = fleet.botConfigs && fleet.botConfigs[userId];
-  return completeBotConfig(stored || DEFAULT_BOT_CONFIG);
+  return completeBotConfig(stored || defaultBotConfig());
 }
 
 function fevent(fleet, type, severity, message, extra = {}) {
@@ -2224,7 +2259,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       identity: { userId: identity.userId, email: identity.email, orgId: identity.orgId, verified: identity.verified, authMode: identity.authMode },
       sessions,
       liveReadiness: liveReadiness(fleet, identity),
-      autoTrader: autoTraderStatus(fleet),
+      autoTrader: autoTraderStatus(fleet, identity),
       liveAuditEvents: (fleet.liveAuditEvents || []).filter((e) => isAdmin(identity) || e.who === identity.email || e.who === identity.userId).slice(0, 50),
       globalKillSwitchActive: process.env.BOT_GLOBAL_KILL_SWITCH === 'true' || fleet.globalKillSwitch === true,
       // Echo the open-position session ids so the client can preserve them across
@@ -2257,17 +2292,17 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     if (requested === 'live_spot') {
       const gate = autoLiveExecutionGate();
       const evidence = Number((fleet.autoTrader || {}).paperTradeCount) || 0;
-      if (!gate.allowed) return json(req, { ok: false, error: `Live auto-trading gate not satisfied: missing ${gate.missing.join(', ')}`, autoTrader: autoTraderStatus(fleet) }, 409);
-      if (evidence <= 0) return json(req, { ok: false, error: 'Promotion to live requires paper-trading evidence first.', autoTrader: autoTraderStatus(fleet) }, 409);
+      if (!gate.allowed) return json(req, { ok: false, error: `Live auto-trading gate not satisfied: missing ${gate.missing.join(', ')}`, autoTrader: autoTraderStatus(fleet, identity) }, 409);
+      if (evidence <= 0) return json(req, { ok: false, error: 'Promotion to live requires paper-trading evidence first.', autoTrader: autoTraderStatus(fleet, identity) }, 409);
       if (String(body.confirmLivePhrase || '') !== AUTO_LIVE_CONFIRM_PHRASE) {
-        return json(req, { ok: false, error: 'Explicit autonomous live confirmation phrase required.', requiredPhrase: AUTO_LIVE_CONFIRM_PHRASE, autoTrader: autoTraderStatus(fleet) }, 409);
+        return json(req, { ok: false, error: 'Explicit autonomous live confirmation phrase required.', requiredPhrase: AUTO_LIVE_CONFIRM_PHRASE, autoTrader: autoTraderStatus(fleet, identity) }, 409);
       }
     }
     fleet.autoTrader = { ...(fleet.autoTrader || {}), requestedMode: requested, requestedAt: new Date().toISOString(), requestedBy: identity.email || identity.userId };
     liveAudit(fleet, identity, 'AUTO_TRADER_MODE_REQUESTED', { requestedMode: requested });
     fevent(fleet, 'AUTO_TRADER_MODE_REQUESTED', 'info', `Auto-trader mode requested: ${requested} by ${identity.email || identity.userId}.`, { ownerUserId: identity.userId });
     await saveFleet(fleet);
-    return json(req, { ok: true, requestedMode: requested, autoTrader: autoTraderStatus(fleet) });
+    return json(req, { ok: true, requestedMode: requested, autoTrader: autoTraderStatus(fleet, identity) });
   }
 
   // GET/POST /api/bot/config (per user)
@@ -2279,7 +2314,30 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     if (req.method === 'POST') {
       const v = validateBotConfig(body);
       if (!v.ok) return json(req, { ok: false, error: 'Invalid config', errors: v.errors }, 400);
+      const previousConfig = getUserConfig(fleet, identity.userId);
+      if (v.config.maxDailyTrades > 3 && v.config.maxDailyTrades > previousConfig.maxDailyTrades && String((body && body.confirmLiveDailyTradesPhrase) || '') !== LIVE_DAILY_TRADES_RAISE_PHRASE) {
+        return json(req, {
+          ok: false,
+          error: 'Explicit live daily trade cap raise confirmation phrase required.',
+          requiredPhrase: LIVE_DAILY_TRADES_RAISE_PHRASE,
+        }, 409);
+      }
       fleet.botConfigs[identity.userId] = v.config;
+      if (Number(previousConfig.maxDailyTrades) !== Number(v.config.maxDailyTrades)) {
+        liveAudit(fleet, identity, 'LIVE_DAILY_TRADES_CAP_CHANGED', {
+          source: 'live_caps_config',
+          oldValue: previousConfig.maxDailyTrades,
+          newValue: v.config.maxDailyTrades,
+          oldMaxDailyTrades: previousConfig.maxDailyTrades,
+          newMaxDailyTrades: v.config.maxDailyTrades,
+        });
+        fevent(fleet, 'LIVE_DAILY_TRADES_CAP_CHANGED', 'warn', `Live daily trade cap changed from ${previousConfig.maxDailyTrades} to ${v.config.maxDailyTrades} by ${identity.email || identity.userId}.`, {
+          ownerUserId: identity.userId,
+          source: 'live_caps_config',
+          oldValue: previousConfig.maxDailyTrades,
+          newValue: v.config.maxDailyTrades,
+        });
+      }
       fevent(fleet, 'BOT_CONFIG_UPDATED', 'info', `Config updated by ${identity.email || identity.userId}.`, { ownerUserId: identity.userId });
       await saveFleet(fleet);
       return json(req, { ok: true, config: v.config });
@@ -2657,20 +2715,28 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     const requestedUsd = Number(body && body.positionUsd);
     if (!sessionId) return json(req, { ok: false, error: 'sessionId is required' }, 400);
     const fleet = await loadFleet();
-    const readiness = liveReadiness(fleet, identity);
-    const caps = readiness.caps;
+    const baseReadiness = liveReadiness(fleet, identity);
     const session = fleet.botSessions[sessionId];
     if (!session || session.mode !== 'live_spot') return json(req, { ok: false, error: 'Live Spot session not found.' }, 404);
     if (!canControlFleetSession(identity, session, fleet)) return json(req, { ok: false, error: 'Forbidden' }, 403);
     const entryBlock = entryBlockState(fleet, session);
     const blocked = entryBlockedResponse(req, entryBlock);
     if (blocked) return blocked;
-    const config = completeBotConfig(session.config || getUserConfig(fleet, identity.userId));
+    const config = completeBotConfig({ ...(session.config || {}), ...getUserConfig(fleet, identity.userId) });
+    const caps = liveRiskCaps(config);
+    const liveDaily = liveDailyCounters(fleet);
+    const readiness = {
+      ...baseReadiness,
+      caps,
+      dailyTradesUsed: liveDaily.trades,
+      dailyTradesRemaining: Math.max(0, caps.maxDailyTrades - liveDaily.trades),
+      dailyLossUsd: liveDaily.realizedLoss,
+      dailyRealizedPnl: liveDaily.realizedPnl,
+    };
     const maxUsd = Math.min(config.maxTradeUsd, caps.maxPositionUsd);
     const positionUsd = Number.isFinite(requestedUsd) && requestedUsd > 0 ? requestedUsd : maxUsd;
     // Daily caps are fleet-wide and live-only across ALL live sessions for the UTC
     // day — NOT per-session — so a fresh session per round-trip can't reset them.
-    const liveDaily = liveDailyCounters(fleet);
     const todayTradeCount = liveDaily.trades;
     const todayLoss = liveDaily.realizedLoss;
     // Reject before creating the intent when the live account does not hold enough

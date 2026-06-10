@@ -37,6 +37,42 @@ function jsonResponse(obj, status = 200) {
 
 const FORBIDDEN_FRAGMENTS = ['/fapi', '/dapi', '/sapi', 'margin', 'borrow', 'repay', 'leverage', 'withdraw'];
 
+async function runPreflightWithEnv(envPatch) {
+  const realFetch = globalThis.fetch;
+  const realLog = console.log;
+  const oldEnv = {};
+  const logged = [];
+  for (const [key, value] of Object.entries(envPatch || {})) {
+    oldEnv[key] = process.env[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/v3/account')) {
+      return jsonResponse({ canTrade: true, accountType: 'SPOT', permissions: ['SPOT'], balances: [{ asset: 'USDT', free: '20' }, { asset: 'BTC', free: '0' }] });
+    }
+    if (u.includes('/v3/exchangeInfo')) {
+      return jsonResponse({ symbols: [{ baseAsset: 'BTC', isSpotTradingAllowed: true, filters: [{ filterType: 'LOT_SIZE', stepSize: '0.00001', minQty: '0.00001' }, { filterType: 'NOTIONAL', minNotional: '10' }] }] });
+    }
+    if (u.includes('/api/bot/live-preflight-result')) return jsonResponse({ ok: true });
+    return jsonResponse({ ok: true });
+  };
+  console.log = (...args) => { logged.push(args.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')); };
+  try {
+    const code = await runPreflight();
+    return { code, stdout: logged.join('\n') };
+  } finally {
+    globalThis.fetch = realFetch;
+    console.log = realLog;
+    for (const [key, value] of Object.entries(oldEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    try { fs.rmSync(LIVE_PREFLIGHT_FILE, { force: true }); } catch { /* best effort */ }
+  }
+}
+
 // ── In-process PASS path: stub global fetch so no real Binance call is made. ──
 test('live preflight passes on valid gates and uses only the spot /api/v3/account path', async () => {
   const calls = [];
@@ -71,6 +107,35 @@ test('live preflight passes on valid gates and uses only the spot /api/v3/accoun
     globalThis.fetch = realFetch;
     try { fs.rmSync(LIVE_PREFLIGHT_FILE, { force: true }); } catch { /* best effort */ }
   }
+});
+
+test('live preflight accepts max daily trades above 3 up to the default hard cap 10', async () => {
+  const { code, stdout } = await runPreflightWithEnv({ LIVE_MAX_DAILY_TRADES: '5', LIVE_MAX_DAILY_TRADES_HARD_CAP: undefined, LIVE_ALLOWED_SYMBOLS: 'BTCUSDT' });
+  assert.equal(code, 0);
+  assert.match(stdout, /LIVE PREFLIGHT PASS/);
+  assert.match(stdout, /"maxDailyTrades":5/);
+  assert.match(stdout, /"maxDailyTradesHardCap":10/);
+  assert.match(stdout, /daily trades: used=n\/a max=5 remaining=n\/a hardCap=10/);
+});
+
+test('live preflight accepts a larger explicit daily trade hard cap', async () => {
+  const { code, stdout } = await runPreflightWithEnv({ LIVE_MAX_DAILY_TRADES: '15', LIVE_MAX_DAILY_TRADES_HARD_CAP: '20', LIVE_ALLOWED_SYMBOLS: 'BTCUSDT' });
+  assert.equal(code, 0);
+  assert.match(stdout, /LIVE PREFLIGHT PASS/);
+  assert.match(stdout, /"maxDailyTrades":15/);
+  assert.match(stdout, /"maxDailyTradesHardCap":20/);
+});
+
+test('live preflight rejects non-integer and over-hard-cap max daily trades', async () => {
+  const nonInteger = await runPreflightWithEnv({ LIVE_MAX_DAILY_TRADES: '3.5', LIVE_MAX_DAILY_TRADES_HARD_CAP: undefined, LIVE_ALLOWED_SYMBOLS: 'BTCUSDT' });
+  assert.equal(nonInteger.code, 1);
+  assert.match(nonInteger.stdout, /LIVE PREFLIGHT FAIL/);
+  assert.match(nonInteger.stdout, /LIVE_MAX_DAILY_TRADES must be a positive integer <= 10/);
+
+  const tooHigh = await runPreflightWithEnv({ LIVE_MAX_DAILY_TRADES: '11', LIVE_MAX_DAILY_TRADES_HARD_CAP: undefined, LIVE_ALLOWED_SYMBOLS: 'BTCUSDT' });
+  assert.equal(tooHigh.code, 1);
+  assert.match(tooHigh.stdout, /LIVE PREFLIGHT FAIL/);
+  assert.match(tooHigh.stdout, /LIVE_MAX_DAILY_TRADES must be a positive integer <= 10/);
 });
 
 // ── In-process PASS path for USDC-only mode: keep funds in USDC, trade BTCUSDC. ──

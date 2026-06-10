@@ -97,7 +97,7 @@ const LIVE_SPOT_ACK_TEXT = 'I_UNDERSTAND_REAL_MONEY_RISK';
 // pass preflight and then place oversized live orders.
 const LIVE_PREFLIGHT_MAX_POSITION_USD = 10;
 const LIVE_PREFLIGHT_MAX_DAILY_LOSS_USD = 5;
-const LIVE_PREFLIGHT_MAX_DAILY_TRADES = 3;
+const LIVE_PREFLIGHT_DEFAULT_MAX_DAILY_TRADES_HARD_CAP = 10;
 // A live run trades a SINGLE symbol. Two single-symbol configurations are valid:
 // exactly BTCUSDT (USDT-quoted) or exactly BTCUSDC (USDC-quoted, keep funds in USDC).
 // Any multi-symbol list, or any other symbol, FAILS preflight. This is intentionally
@@ -663,17 +663,37 @@ function liveEnvGateSnapshot() {
   };
 }
 
-function liveRiskCaps() {
+function positiveIntegerEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+function liveMaxDailyTradesHardCap() {
+  return positiveIntegerEnv('LIVE_MAX_DAILY_TRADES_HARD_CAP', LIVE_PREFLIGHT_DEFAULT_MAX_DAILY_TRADES_HARD_CAP);
+}
+
+function liveRiskCaps(config = null) {
   const maxSymbols = Number(process.env.LIVE_MAX_SYMBOLS) > 0 ? Math.floor(Number(process.env.LIVE_MAX_SYMBOLS)) : 1;
   const allowed = String(process.env.LIVE_ALLOWED_SYMBOLS || 'BTCUSDT')
     .split(',')
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean)
     .slice(0, maxSymbols);
+  const maxDailyTradesHardCap = liveMaxDailyTradesHardCap();
+  const configuredMaxDailyTrades = Number(config && config.maxDailyTrades);
+  const rawMaxDailyTrades = process.env.LIVE_MAX_DAILY_TRADES;
+  const maxDailyTrades = Number.isInteger(configuredMaxDailyTrades) && configuredMaxDailyTrades > 0
+    ? Math.min(configuredMaxDailyTrades, maxDailyTradesHardCap)
+    : rawMaxDailyTrades === undefined || rawMaxDailyTrades === null || rawMaxDailyTrades === ''
+      ? 3
+      : Number(rawMaxDailyTrades);
   return {
     maxPositionUsd: Number(process.env.LIVE_MAX_POSITION_USD) > 0 ? Number(process.env.LIVE_MAX_POSITION_USD) : 10,
     maxDailyLossUsd: Number(process.env.LIVE_MAX_DAILY_LOSS_USD) > 0 ? Number(process.env.LIVE_MAX_DAILY_LOSS_USD) : 5,
-    maxDailyTrades: Number(process.env.LIVE_MAX_DAILY_TRADES) > 0 ? Math.floor(Number(process.env.LIVE_MAX_DAILY_TRADES)) : 3,
+    maxDailyTrades,
+    maxDailyTradesHardCap,
     maxOpenPositions: Number(process.env.LIVE_MAX_OPEN_POSITIONS) > 0 ? Math.floor(Number(process.env.LIVE_MAX_OPEN_POSITIONS)) : 1,
     maxSymbols,
     allowedSymbols: allowed.length ? allowed : ['BTCUSDT'],
@@ -829,7 +849,7 @@ function isDeterministicCloseError(err) {
 
 function validateLiveIntentGate(intent, config, riskState, session, control) {
   const env = liveEnvGateSnapshot();
-  const caps = liveRiskCaps();
+  const caps = liveRiskCaps(config);
   const preflight = readLivePreflight();
   const posUsd = Number(intent && intent.positionUsd);
   const userMax = Number(config && config.maxTradeUsd);
@@ -1334,7 +1354,7 @@ async function runPreflight() {
         .split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
       if (!(caps.maxPositionUsd > 0 && caps.maxPositionUsd <= LIVE_PREFLIGHT_MAX_POSITION_USD)) missing.push(`LIVE_MAX_POSITION_USD must be > 0 and <= ${LIVE_PREFLIGHT_MAX_POSITION_USD}`);
       if (!(caps.maxDailyLossUsd > 0 && caps.maxDailyLossUsd <= LIVE_PREFLIGHT_MAX_DAILY_LOSS_USD)) missing.push(`LIVE_MAX_DAILY_LOSS_USD must be > 0 and <= ${LIVE_PREFLIGHT_MAX_DAILY_LOSS_USD}`);
-      if (!(caps.maxDailyTrades > 0 && caps.maxDailyTrades <= LIVE_PREFLIGHT_MAX_DAILY_TRADES)) missing.push(`LIVE_MAX_DAILY_TRADES must be > 0 and <= ${LIVE_PREFLIGHT_MAX_DAILY_TRADES}`);
+      if (!(Number.isInteger(caps.maxDailyTrades) && caps.maxDailyTrades > 0 && caps.maxDailyTrades <= caps.maxDailyTradesHardCap)) missing.push(`LIVE_MAX_DAILY_TRADES must be a positive integer <= ${caps.maxDailyTradesHardCap}`);
       if (!(rawAllowedSymbols.length === 1 && LIVE_PREFLIGHT_ALLOWED_SYMBOLS.includes(rawAllowedSymbols[0]))) missing.push(`LIVE_ALLOWED_SYMBOLS must be exactly one of ${LIVE_PREFLIGHT_ALLOWED_SYMBOLS.join(' or ')} (single symbol only)`);
       if (missing.length) {
         const fail = { ok: false, checkedAt: new Date().toISOString(), reason: missing.join('; '), spotOnlyPolicy: true };
@@ -1372,6 +1392,7 @@ async function runPreflight() {
       permissions,
       balances,
       riskCaps: caps,
+      dailyTradeUsage: { used: null, max: caps.maxDailyTrades, remaining: null, hardCap: caps.maxDailyTradesHardCap },
       spotOnlyPolicy: true,
       baseUrl: getBinanceBaseUrl(),
     };
@@ -1384,6 +1405,7 @@ async function runPreflight() {
       console.log('permissions:', JSON.stringify(permissions));
       console.log('balances:', JSON.stringify(balances));
       console.log('risk caps:', JSON.stringify(caps));
+      console.log(`daily trades: used=n/a max=${caps.maxDailyTrades} remaining=n/a hardCap=${caps.maxDailyTradesHardCap}`);
       console.log('spotOnlyPolicy=true');
       return result.ok ? 0 : 1;
     }
