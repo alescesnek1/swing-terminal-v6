@@ -60,6 +60,12 @@ function browserReq(method, path, body) {
   return new Request(`https://ctl.example${path}`, init);
 }
 
+function nonAdminReq(method, path, body) {
+  const init = { method, headers: { Origin: ORIGIN, Authorization: `Bearer ${jwtFor('user@example.com')}`, Accept: 'application/json' } };
+  if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
+  return new Request(`https://ctl.example${path}`, init);
+}
+
 function workerReq(method, path, body) {
   const init = { method, headers: { 'X-BOT-WORKER-TOKEN': WORKER_TOKEN, Accept: 'application/json' } };
   if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
@@ -117,6 +123,52 @@ test('live preflight pass plus exact confirmation creates a live_spot session', 
   assert.equal(start.status, 200);
   assert.equal(start.json.session.mode, 'live_spot');
   assert.equal(start.json.session.liveModeConfirmed, true);
+});
+
+test('confirmed live start atomically enables allowLive when it was locked (modal unlock flow)', async () => {
+  // Lock consent back to allowLive=false to simulate the reported dead-end.
+  const lock = await call(browserReq('POST', '/api/bot/config', { maxTradeUsd: 10, maxDailyLossUsd: 5, maxDailyTrades: 3, maxOpenPositions: 1, allowLive: false }));
+  assert.equal(lock.status, 200);
+  assert.equal(lock.json.config.allowLive, false);
+
+  // Readiness reports ready-to-confirm with requiresConsent=true (preflight still fresh from prior test).
+  const fleet = await call(browserReq('GET', '/api/bot/fleet'));
+  assert.equal(fleet.json.liveReadiness.preflightPassed, true);
+  assert.equal(fleet.json.liveReadiness.allowLive, false);
+  assert.equal(fleet.json.liveReadiness.requiresConsent, true);
+  assert.equal(fleet.json.liveReadiness.canStartLive, true);
+
+  // Non-admin is rejected before any unlock can happen.
+  const nonAdmin = await call(nonAdminReq('POST', '/api/bot/start-live-session', {
+    liveModeConfirmed: true,
+    confirmationPhrase: 'I UNDERSTAND THIS USES REAL MONEY',
+  }));
+  assert.equal(nonAdmin.status, 403);
+
+  // Confirmed admin start (checkbox + exact phrase) unlocks AND creates the session atomically.
+  const start = await call(browserReq('POST', '/api/bot/start-live-session', {
+    liveModeConfirmed: true,
+    confirmationPhrase: 'I UNDERSTAND THIS USES REAL MONEY',
+  }));
+  assert.equal(start.status, 200);
+  assert.equal(start.json.session.mode, 'live_spot');
+  assert.equal(start.json.session.config.allowLive, true);
+
+  // Persisted: the user config now has allowLive=true.
+  const cfg = await call(browserReq('GET', '/api/bot/config'));
+  assert.equal(cfg.json.config.allowLive, true);
+});
+
+test('live start still rejects a wrong/missing confirmation phrase even when unlocking', async () => {
+  const wrong = await call(browserReq('POST', '/api/bot/start-live-session', {
+    liveModeConfirmed: true,
+    confirmationPhrase: 'nope',
+  }));
+  assert.equal(wrong.status, 403);
+  const noFlag = await call(browserReq('POST', '/api/bot/start-live-session', {
+    confirmationPhrase: 'I UNDERSTAND THIS USES REAL MONEY',
+  }));
+  assert.equal(noFlag.status, 403);
 });
 
 test('global live emergency stop sets kill switch and queues close-only commands', async () => {

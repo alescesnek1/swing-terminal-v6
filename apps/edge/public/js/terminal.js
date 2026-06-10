@@ -4995,13 +4995,19 @@ function openStartLiveSpotModal() {
   const live = data.liveReadiness || {};
   const caps = live.caps || {};
   const pf = live.preflight || null;
-  const preflightStatus = live.preflightFresh
+  const preflightPassed = live.preflightPassed === true || live.preflightFresh === true;
+  const preflightStatus = preflightPassed
     ? 'PASSED (fresh' + (pf && pf.checkedAt ? ', checked ' + new Date(pf.checkedAt).toLocaleTimeString() : '') + ')'
     : (pf && pf.ok === false ? 'FAILED' : 'REQUIRED / STALE');
+  // allowLive may come from liveReadiness (preferred) or the echoed user config.
+  const allowLive = live.allowLive === true || (data.config && data.config.allowLive === true);
+  const needsUnlock = !allowLive;
   openBotConfirmModal({
     title: 'Start Live Spot Trading',
     severity: 'danger',
-    summary: 'REAL MONEY SPOT TRADING — this starts a live Spot session that can place real Binance orders within the micro caps below.',
+    summary: needsUnlock
+      ? 'REAL MONEY SPOT TRADING — live trading is not enabled yet. Confirming here will enable live trading (allowLive=true) AND start a live Spot session, within the micro caps below.'
+      : 'REAL MONEY SPOT TRADING — this starts a live Spot session that can place real Binance orders within the micro caps below.',
     infoLabel: 'Live configuration',
     info: [
       'Allowed symbols: ' + (((caps.allowedSymbols || []).join(', ')) || '—'),
@@ -5010,10 +5016,11 @@ function openStartLiveSpotModal() {
       'Max daily trades: ' + (caps.maxDailyTrades != null ? caps.maxDailyTrades : '—'),
       'Live preflight: ' + preflightStatus,
       'Readiness state: ' + (live.state || '—'),
+      'Live trading: ' + (allowLive ? 'enabled (allowLive=true)' : 'locked — will be enabled on confirm'),
     ],
     warnings: ['This uses REAL MONEY. Orders are not simulated and are not testnet.'],
     checkboxLabel: 'I understand this uses real money',
-    confirmLabel: 'Start live spot',
+    confirmLabel: needsUnlock ? 'Enable live trading & start' : 'Start live spot',
     cancelLabel: 'Cancel',
     onConfirm: () => _fleetFetch('POST', '/api/bot/start-live-session', {
       liveModeConfirmed: true,
@@ -5546,7 +5553,7 @@ function _fleetBuildConfigForm(container) {
     + '<span id="fleet-cfg-status" class="fleet-cfg-status">Config saved</span>'
     + '</div>'
     + '<div id="fleet-cfg-error" class="fleet-cfg-error"></div>'
-    + '<span class="fleet-cfg-note">Live trading is locked. allowLive=false.</span>';
+    + '<span class="fleet-cfg-note">This form sets testnet caps only. Live trading (allowLive) is enabled from the Live Readiness panel via START LIVE SPOT — confirm the real-money checkbox there. No phrase typing required.</span>';
   container.innerHTML = html;
   for (const f of FLEET_CONFIG_FIELDS) {
     const el = document.getElementById('cfg-' + f.name);
@@ -5881,12 +5888,24 @@ function renderFleet() {
     : liveRunning && liveOpen ? 'LIVE RUNNING - REAL MONEY'
     : liveClosed ? 'LIVE CLOSED'
     : liveState;
+  // Locked reason: never leave a dead disabled button without an explanation.
+  // When readiness IS met but the user has not consented yet (allowLive=false),
+  // the button stays ENABLED and the modal drives the atomic unlock.
+  const liveLockedReason = !live.canStartLive
+    ? (globalKillActive ? 'Live locked: global kill switch active'
+      : !data.isAdmin ? 'Live locked: admin only'
+      : live.state === 'LIVE PREFLIGHT REQUIRED' ? 'Live locked: run live preflight'
+      : live.state === 'LIVE LOCKED' ? 'Live locked: live env gates not enabled'
+      : live.durable === false ? 'Live locked: control state not durable'
+      : 'Live locked: ' + (live.state || 'not ready'))
+    : (live.requiresConsent || live.allowLive === false ? 'Live locked: confirmation required' : '');
   const adminLiveControls = data.isAdmin ? '<div class="fleet-live-readiness__confirm">'
     + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openStartLiveSpotModal()"' + (live.canStartLive ? '' : ' disabled') + '>START LIVE SPOT</button>'
     + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyStopAllLiveSpot()">EMERGENCY STOP ALL LIVE SPOT</button>'
     + (globalKillActive
         ? '<button id="fleet-clear-gks-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="clearGlobalKillSwitch()">CLEAR GLOBAL KILL SWITCH</button>'
         : '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="activateGlobalKillSwitch()">ACTIVATE GLOBAL KILL SWITCH</button>')
+    + (liveLockedReason ? '<div class="fleet-live-readiness__locked">' + _esc(liveLockedReason) + (live.canStartLive ? ' — click START LIVE SPOT to confirm and enable.' : '') + '</div>' : '')
     + '</div>' : '';
 
   // Risk regime card

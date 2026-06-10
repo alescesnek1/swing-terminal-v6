@@ -1147,21 +1147,31 @@ function liveReadiness(fleet, identity) {
   const env = liveEnvStatus();
   const preflightFresh = livePreflightFresh(fleet);
   const caps = liveRiskCaps();
+  const userConfig = getUserConfig(fleet, identity.userId);
   const envReady = env.workerMode && env.binanceEnv && env.liveTradingEnabled && env.allowRealOrders && env.liveSpotAck && env.localWorkerLiveConfirm;
   let state = 'TESTNET MODE';
   if (env.globalKillSwitch || fleet.globalKillSwitch) state = 'LIVE PAUSED';
   else if (!env.liveTradingEnabled || !env.allowRealOrders || !env.liveSpotAck) state = 'LIVE LOCKED';
   else if (!preflightFresh) state = 'LIVE PREFLIGHT REQUIRED';
   else if (envReady && storeInfo.durable) state = 'LIVE READY - MICRO CAPS';
+  // Readiness is the env/preflight/durability gate. allowLive is the per-user
+  // consent flag, flipped on by the confirmed live-start modal — it is NOT part
+  // of canStartLive, so the button stays clickable to drive the unlock flow.
+  const readyToConfirm = state === 'LIVE READY - MICRO CAPS' && isAdmin(identity) && identity.verified === true;
   return {
     state,
     caps,
     env,
     durable: storeInfo.durable,
     preflightFresh,
+    preflightPassed: preflightFresh,
+    allowLive: userConfig.allowLive === true,
     preflight: fleet.livePreflight || null,
     globalKillSwitchActive: env.globalKillSwitch || fleet.globalKillSwitch === true,
-    canStartLive: state === 'LIVE READY - MICRO CAPS' && isAdmin(identity) && identity.verified === true,
+    canStartLive: readyToConfirm,
+    // True when readiness is fully met but the user has not yet consented
+    // (allowLive=false): the modal will both enable live trading and start.
+    requiresConsent: readyToConfirm && userConfig.allowLive !== true,
   };
 }
 
@@ -2057,10 +2067,30 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     const config = getUserConfig(fleet, identity.userId);
     if (readiness.globalKillSwitchActive) return json(req, { ok: false, error: 'GLOBAL KILL SWITCH ACTIVE' }, 409);
     if (!readiness.canStartLive) return json(req, { ok: false, error: readiness.state, liveReadiness: readiness }, 409);
-    if (config.allowLive !== true) return json(req, { ok: false, error: 'User config allowLive=true is required.' }, 403);
     if (!fleetStoreInfo().durable) return notDurableResponse(req);
     const liveOpen = Object.values(fleet.botSessions || {}).find((s) => s.mode === 'live_spot' && sessionOpenPositions(fleet, s.sessionId).length > 0);
     if (liveOpen) return json(req, { ok: false, conflict: 'open_live_position', error: 'Live Spot open position exists. Close it before starting another live session.', session: publicSessionView(fleet, liveOpen) }, 409);
+
+    // Atomic live unlock: the modal checkbox + the exact confirmation phrase ARE
+    // the explicit consent to enable live trading. Rather than dead-ending when
+    // the stored config still has allowLive=false (with no UI path to flip it),
+    // turn it on — clamped to the live caps — as part of this same fully-gated,
+    // confirmed start. Every gate above (admin+verified, exact phrase, fresh
+    // preflight via canStartLive, durable store, kill switch, no open live
+    // position) must already have passed. The config write and the new session
+    // are persisted together in the single saveFleet() below, so the unlock is
+    // never committed without a live session (and vice versa).
+    const unlockedConfig = {
+      ...config,
+      maxTradeUsd: Math.min(config.maxTradeUsd, readiness.caps.maxPositionUsd),
+      maxOpenPositions: Math.min(config.maxOpenPositions, readiness.caps.maxOpenPositions),
+      allowLive: true,
+    };
+    const v = validateBotConfig(unlockedConfig);
+    if (!v.ok) return json(req, { ok: false, error: 'Invalid live config', errors: v.errors }, 400);
+    const liveConfig = v.config;
+    const allowLiveWasEnabled = config.allowLive !== true;
+    fleet.botConfigs[identity.userId] = liveConfig;
 
     const sessionId = `live_session_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
     const nowIso = new Date().toISOString();
@@ -2079,12 +2109,16 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       pauseRequested: false,
       closePositionsOnStop: true,
       riskState: fleet.lastRegime || null,
-      config: { ...config, maxTradeUsd: Math.min(config.maxTradeUsd, readiness.caps.maxPositionUsd), maxOpenPositions: Math.min(config.maxOpenPositions, readiness.caps.maxOpenPositions), allowLive: true },
+      config: liveConfig,
       liveModeConfirmed: true,
       liveConfirmationAt: nowIso,
       realOrderSubmitted: false,
     };
     fleet.botSessions[sessionId] = session;
+    if (allowLiveWasEnabled) {
+      liveAudit(fleet, identity, 'LIVE_TRADING_ENABLED', { sessionId, result: 'allowLive=true' });
+      fevent(fleet, 'LIVE_TRADING_ENABLED', 'warn', `Live trading enabled (allowLive=true) by ${identity.email || identity.userId} via confirmed live start.`, { ownerUserId: identity.userId, mode: 'live_spot' });
+    }
     liveAudit(fleet, identity, 'LIVE_SESSION_START_REQUESTED', { sessionId, result: 'launch_requested' });
     fevent(fleet, 'LIVE_SESSION_START_REQUESTED', 'warn', `Live Spot session ${sessionId.slice(0, 16)} requested by ${identity.email || identity.userId}.`, { sessionId, ownerUserId: identity.userId, mode: 'live_spot' });
     await saveFleet(fleet);

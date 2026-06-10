@@ -102,15 +102,20 @@ signatures, or full headers.
 ## Starting Live With Micro Caps
 
 1. Confirm the Bot Feed live readiness panel shows `LIVE READY - MICRO CAPS`.
-2. Set the user config `allowLive=true`.
-3. Use an admin account.
-4. Click `START LIVE SPOT`. A confirmation modal ("Start Live Spot Trading")
+   If the panel reads `Live locked: confirmation required`, that is expected —
+   it means readiness is met but `allowLive` is still false; the modal below
+   enables it.
+2. Use an admin account.
+3. Click `START LIVE SPOT`. A confirmation modal ("Start Live Spot Trading")
    opens showing the symbol allowlist, max trade, max daily loss, max daily
-   trades, and current live preflight status.
-5. Tick the checkbox `I understand this uses real money` and click
-   `Start live spot`. (The UI sends the exact backend confirmation phrase
-   `I UNDERSTAND THIS USES REAL MONEY` on your behalf — the API contract is
-   unchanged.)
+   trades, and current live preflight status. You do **not** need to set
+   `allowLive=true` manually first.
+4. Tick the checkbox `I understand this uses real money` and click
+   `Enable live trading & start` (or `Start live spot` if live trading is
+   already enabled). The confirmed checkbox + the exact backend confirmation
+   phrase `I UNDERSTAND THIS USES REAL MONEY` (sent programmatically) atomically
+   flip `allowLive=true` (clamped to the live caps) and create the live session
+   in one fully-gated request. The API contract is unchanged.
 
 The live session is separate from testnet sessions and uses `mode=live_spot`.
 

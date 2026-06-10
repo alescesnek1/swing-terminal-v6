@@ -443,6 +443,7 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .fleet-live-readiness__caps b{font-family:var(--mono);font-size:11px;color:#fff}
 .fleet-live-readiness__kill{margin:7px 0;padding:7px 8px;border:1px solid rgba(255,51,86,.55);background:rgba(255,51,86,.15);color:#ffccd4;font-size:11px;font-weight:900;letter-spacing:.08em}
 .fleet-live-readiness__confirm{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.fleet-live-readiness__locked{flex-basis:100%;margin-top:2px;font-size:11px;font-weight:700;color:#ffb020}
 .fleet-smoke{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px}
 .fleet-smoke__hint{font-size:10px;color:var(--txt2)}
 .fleet-smoke__note{margin-top:10px;font-size:11px;color:#ffb020}

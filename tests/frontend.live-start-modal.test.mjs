@@ -67,6 +67,9 @@ function loadLiveStartHarness(fetchImpl) {
           state: 'LIVE READY - MICRO CAPS',
           canStartLive: true,
           preflightFresh: true,
+          preflightPassed: true,
+          allowLive: true,
+          requiresConsent: false,
           preflight: { ok: true, checkedAt: '2026-06-10T08:00:00.000Z' },
           caps: { allowedSymbols: ['BTCUSDC'], maxPositionUsd: 5, maxDailyLossUsd: 5, maxDailyTrades: 3 },
         },
@@ -218,6 +221,50 @@ test('successful live start calls existing start endpoint once and closes the mo
   assert.equal(context.Fleet.selectedId, 'live_session_1');
   assert.equal(context.window.location.href, 'swingworker://start?session=live_session_1', 'live start flow continues (worker launch)');
   assert.equal(toasts.filter((t) => t[0] === 'success').length, 1);
+});
+
+test('allowLive=false + preflight passed opens the unlock modal (enable live trading)', () => {
+  const { context, document, calls } = loadLiveStartHarness();
+  // Readiness is met (preflight passed) but the user has not consented yet.
+  context.Fleet.data.liveReadiness.allowLive = false;
+  context.Fleet.data.liveReadiness.requiresConsent = true;
+  context.Fleet.data.config = { allowLive: false };
+  context.openStartLiveSpotModal();
+  const modal = document.getElementById('bot-confirm-modal');
+  assert.ok(modal, 'START LIVE SPOT opens the modal even when allowLive=false');
+  assert.match(modal.innerHTML, /will enable live trading/, 'summary explains the unlock');
+  assert.match(modal.innerHTML, /will be enabled on confirm/, 'info line shows live trading is locked');
+  assert.match(modal.innerHTML, /Enable live trading &amp; start/, 'confirm label reflects the unlock');
+  assert.match(modal.innerHTML, /I understand this uses real money/);
+  // Still checkbox-gated.
+  assert.match(modal.innerHTML, /id="bot-confirm-continue"[^>]*disabled/);
+  assert.equal(calls.length, 0);
+});
+
+test('unlock modal: checkbox gates confirm and confirm sends exact backend phrase', async () => {
+  const { context, document, calls } = loadLiveStartHarness();
+  context.Fleet.data.liveReadiness.allowLive = false;
+  context.Fleet.data.liveReadiness.requiresConsent = true;
+  context.openStartLiveSpotModal();
+  context.confirmBotConfirmModal();
+  await flush();
+  assert.equal(calls.length, 0, 'unchecked confirm is ignored in the unlock flow');
+  context.toggleBotConfirmAck(true);
+  context.confirmBotConfirmModal();
+  await flush();
+  assert.equal(calls.length, 1, 'checked confirm submits the unlock+start');
+  assert.equal(calls[0].path, '/api/bot/start-live-session');
+  assert.equal(calls[0].body.liveModeConfirmed, true);
+  assert.equal(calls[0].body.confirmationPhrase, 'I UNDERSTAND THIS USES REAL MONEY');
+});
+
+test('live start button exposes a locked reason instead of a dead disabled button', () => {
+  // Source-level guarantees for the locked-reason UX (requirement #6/#8).
+  assert.match(terminalJs, /liveLockedReason/);
+  assert.match(terminalJs, /Live locked: confirmation required/);
+  assert.match(terminalJs, /fleet-live-readiness__locked/);
+  // The button enable state is driven by readiness (canStartLive), never by allowLive.
+  assert.match(terminalJs, /onclick="openStartLiveSpotModal\(\)"' \+ \(live\.canStartLive \? '' : ' disabled'\)/);
 });
 
 test('live_spot stop and close labels never say testnet', () => {
