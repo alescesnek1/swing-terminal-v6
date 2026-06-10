@@ -1,4 +1,4 @@
-import test from 'node:test';
+﻿import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -97,7 +97,7 @@ const liveOpenSession = () => ({
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-// ── Spec 4: live close confirmation modal ──────────────────────────────────
+// â”€â”€ Spec 4: live close confirmation modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 test('confirmCloseLivePosition opens a real-money MARKET SELL confirmation modal', () => {
   const { context, document, calls } = loadCloseHarness(liveOpenSession());
   context.confirmCloseLivePosition('live_session_42');
@@ -117,7 +117,7 @@ test('confirmCloseLivePosition opens a real-money MARKET SELL confirmation modal
   assert.equal(calls.length, 0, 'opening the modal calls no API');
 });
 
-// ── Spec 4 + 6: checkbox gates the close; clicking close sends the close command ──
+// â”€â”€ Spec 4 + 6: checkbox gates the close; clicking close sends the close command â”€â”€
 test('checkbox gates the live close and confirm sends exactly one /stop close command', async () => {
   const { context, document, calls } = loadCloseHarness(liveOpenSession());
   context.confirmCloseLivePosition('live_session_42');
@@ -135,10 +135,10 @@ test('checkbox gates the live close and confirm sends exactly one /stop close co
   assert.equal(document.getElementById('bot-confirm-modal'), null, 'modal closes after the close is queued');
 });
 
-// ── Spec 5: STOP BOT and the CLOSE button converge on the SAME close command ──
+// â”€â”€ Spec 5: STOP BOT and the CLOSE button converge on the SAME close command â”€â”€
 test('STOP BOT on an open-position session delegates to the same /stop close command', () => {
   const { context, document, calls } = loadCloseHarness(liveOpenSession());
-  // STOP BOT must NOT take a separate stop path while a position is open — it opens
+  // STOP BOT must NOT take a separate stop path while a position is open â€” it opens
   // the same live close confirmation modal the CLOSE button uses (no API yet).
   context.stopBotSession();
   const modal = document.getElementById('bot-confirm-modal');
@@ -179,8 +179,8 @@ test('a live API error keeps the close modal open and shows the message', async 
   assert.match(modal.innerHTML, /live safety lock active/);
 });
 
-// ── Source-level guarantees for the render branches (spec 1/2/3 + UI 1–4) ────
-test('live open position renders CLOSE … LIVE POSITION as the single primary action', () => {
+// â”€â”€ Source-level guarantees for the render branches (spec 1/2/3 + UI 1â€“4) â”€â”€â”€â”€
+test('live open position renders CLOSE â€¦ LIVE POSITION as the single primary action', () => {
   // The global red panel primary button closes via stopAndCloseSession, mode-labelled.
   assert.match(terminalJs, /CLOSE ' \+ _esc\(sym\) \+ ' ' \+ _fleetModeLabel\(openPosSession\) \+ ' POSITION/);
   assert.match(terminalJs, /onclick="stopAndCloseSession\(/);
@@ -201,10 +201,14 @@ test('no CREATE LIVE order is offered while an open position exists', () => {
 });
 
 test('testnet/paper sessions are demoted to a collapsed archive when live mode is active', () => {
-  assert.match(terminalJs, /const liveModeActive = sessions\.some\(_fleetSessionIsLive\) \|\| liveRunning \|\| liveOpen;/);
+  assert.match(terminalJs, /const liveModeActive = _fleetLiveModeActive\(sessions\);/);
+  assert.match(terminalJs, /function _fleetLiveModeActive/);
+  assert.match(terminalJs, /function _fleetDefaultLiveSelectedId/);
+  assert.match(terminalJs, /function _fleetResolveSelectedId/);
   assert.match(terminalJs, /archivedTestnetSessions = liveModeActive/);
   assert.match(terminalJs, /!_fleetSessionIsLive\(s\) && _fleetOpenPositionCount\(s\) === 0/);
   assert.match(terminalJs, /Testnet \/ Paper sessions \(/);
   // The primary WORKERS list renders the demoted set, not the raw active list.
   assert.match(terminalJs, /for \(const s of primaryActiveSessions\)/);
 });
+
