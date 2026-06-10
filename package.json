@@ -10,5 +10,7 @@
     "bot:worker": "node scripts/local-binance-worker.mjs",
     "bot:worker:live-preflight": "node scripts/local-binance-worker.mjs --live-preflight"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@netlify/blobs": "^10.7.9"
+  }
 }
