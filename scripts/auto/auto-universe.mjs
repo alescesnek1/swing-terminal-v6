@@ -44,28 +44,67 @@ export function buildUniverse({
   const universe = [];
   const rejected = [];
   const reject = (symbol, reason) => rejected.push({ symbol, reason });
+  
+  const diagnostics = {
+    universeTotal: markets.length,
+    afterQuoteFilter: 0,
+    afterLiquidityFilter: 0,
+    afterSpreadFilter: 0,
+    afterLeverageFilter: 0,
+    afterAllowlistFilter: 0,
+    dataSource: markets.length > 0 ? 'scanner' : 'empty',
+  };
 
   for (const m of markets) {
     const symbol = String((m && m.symbol) || '').toUpperCase();
     if (!symbol) { reject('', 'missing symbol'); continue; }
     const quote = quoteAssetOf(m);
     const base = baseAssetOf(m);
+    
     // Spot-only / non-leveraged.
     if (LEVERAGE_TOKEN_RE.test(base) || LEVERAGE_TOKEN_RE.test(symbol)) { reject(symbol, 'leveraged token'); continue; }
     if (m && (m.leveraged === true || m.isLeveraged === true)) { reject(symbol, 'leveraged token'); continue; }
+    diagnostics.afterLeverageFilter++;
+
     // Delisted / not trading.
     if (m && m.delisted === true) { reject(symbol, 'delisted'); continue; }
     if (m && m.status && String(m.status).toUpperCase() !== 'TRADING') { reject(symbol, 'not trading'); continue; }
+
     // Quote asset gate (live MUST be USDC).
     if (quote !== requireQuote) { reject(symbol, `quote ${quote || '?'} != ${requireQuote}`); continue; }
+    diagnostics.afterQuoteFilter++;
+
     // Liquidity / spread.
     const vol = Number(m && (m.volume24hUsd != null ? m.volume24hUsd : m.quoteVolume24h));
     if (!(Number.isFinite(vol) && vol >= f.minVolume24hUsd)) { reject(symbol, `low volume (${Number.isFinite(vol) ? vol : 'n/a'} < ${f.minVolume24hUsd})`); continue; }
+    diagnostics.afterLiquidityFilter++;
+    
     const spread = Number(m && m.spreadPct);
     if (Number.isFinite(spread) && spread > f.maxSpreadPct) { reject(symbol, `wide spread (${spread} > ${f.maxSpreadPct})`); continue; }
+    diagnostics.afterSpreadFilter++;
+
     // Live allowlist intersection — the hard symbol boundary for live trading.
     if (mode === 'live_spot' && !allow.has(symbol)) { reject(symbol, 'not in live allowlist'); continue; }
+    diagnostics.afterAllowlistFilter++;
+
     universe.push({ ...m, symbol, baseAsset: base, quoteAsset: quote, volume24hUsd: vol, spreadPct: Number.isFinite(spread) ? spread : null });
   }
-  return { universe, rejected };
+
+  if (universe.length === 0 && mode === 'shadow' && allow.size > 0) {
+    const fallbackSymbol = Array.from(allow)[0]; // e.g. BTCUSDC
+    diagnostics.dataSource = 'fallback';
+    universe.push({
+      symbol: fallbackSymbol,
+      baseAsset: fallbackSymbol.replace(requireQuote, ''),
+      quoteAsset: requireQuote,
+      volume24hUsd: f.minVolume24hUsd * 2, // arbitrary passing volume
+      spreadPct: 0.01,
+      _isFallback: true, // Internal flag to identify fallback
+      riskFlags: ['FALLBACK_ALLOWLIST_SYMBOL'],
+    });
+  }
+
+  diagnostics.rejectedSamples = rejected.slice(0, 50);
+
+  return { universe, rejected, diagnostics };
 }

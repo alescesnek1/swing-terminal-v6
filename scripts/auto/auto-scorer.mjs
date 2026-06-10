@@ -76,6 +76,9 @@ export function scoreCandidate({
   if ((blacklist || []).map((s) => String(s).toUpperCase()).includes(symbol)) riskFlags.push('blacklisted');
   const cd = Number(cooldowns && cooldowns[symbol]);
   if (Number.isFinite(cd) && now < cd) riskFlags.push('cooldown');
+  if (market && market._isFallback) {
+    riskFlags.push('FALLBACK_ALLOWLIST_SYMBOL');
+  }
 
   const raw = w.momentum * momentum
     + w.volume * volumeScore

@@ -1339,6 +1339,7 @@ function autoTraderStatus(fleet, identity = null) {
     confirmationPhrase: AUTO_LIVE_CONFIRM_PHRASE,
     // Live promotion requires the env gate to pass AND evidence (paper round-trips).
     canPromoteLive: gate.allowed && paperEvidence > 0,
+    universeDiagnostics: persisted.universeDiagnostics || null,
   };
 }
 
@@ -2311,6 +2312,14 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
         }
         fleet.autoTrader.lastDecision = out.decision;
         fleet.autoTrader.riskBlocks = out.blocks || [];
+        fleet.autoTrader.universeDiagnostics = out.diagnostics || null;
+        
+        if (out.diagnostics && out.diagnostics.universeTotal === 0) {
+           const ev = event('AUTO_UNIVERSE_EMPTY', 'warn', 'Scanner universe returned empty. Evaluated fallback candidate for shadow mode.', out.diagnostics);
+           fleet.events = fleet.events || [];
+           fleet.events.unshift(ev);
+           if (fleet.events.length > 500) fleet.events.length = 500;
+        }
         
         await saveFleet(fleet);
       } catch (err) {

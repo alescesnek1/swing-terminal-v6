@@ -60,12 +60,13 @@ export function evaluateAutoTrader({
     intent: null,
     reasons: [],
     positionOpen: !!position,
+    diagnostics: null,
   };
 
   if (!a.enabled) return { ...baseline, reasons: ['auto trader disabled (AUTO_TRADER_ENABLED!=true)'] };
 
   // Universe + scoring (used for entries and for the candidate display).
-  const { universe } = buildUniverse({ markets, mode, liveAllowedSymbols, filters });
+  const { universe, diagnostics } = buildUniverse({ markets, mode, liveAllowedSymbols, filters });
   const scored = scoreUniverse(universe, { regime, blacklist, cooldowns, now, caps });
   const candidate = scored[0] || null;
 
@@ -85,13 +86,14 @@ export function evaluateAutoTrader({
         ? { type: 'CLOSE', sessionId, mode, endpoint: `/api/bot/session/${sessionId}/stop`, reason: exit.reason, source: 'auto-trader' }
         : null,
       reasons: [exit.reason],
+      diagnostics,
     };
   }
 
   // ── Flat → consider an entry ──
   const entry = decideEntry({ scored, threshold, regime, allowEntries: true });
   if (entry.action !== 'BUY') {
-    return { ...baseline, candidate: candidateView(candidate), universeSize: universe.length, entry, decision: 'NONE', reasons: entry.reasons };
+    return { ...baseline, candidate: candidateView(candidate), universeSize: universe.length, entry, decision: 'NONE', reasons: entry.reasons, diagnostics };
   }
 
   const risk = evaluateEntryGates({
@@ -121,11 +123,11 @@ export function evaluateAutoTrader({
 
   // shadow ALWAYS resolves to a hypothetical (no intent), regardless of gates.
   if (mode === 'shadow') {
-    return { ...baseline, candidate: candidateView(candidate), universeSize: universe.length, entry, blocks: risk.blocks, decision: 'SHADOW_BUY', intent: null, reasons: entry.reasons };
+    return { ...baseline, candidate: candidateView(candidate), universeSize: universe.length, entry, blocks: risk.blocks, decision: 'SHADOW_BUY', intent: null, reasons: entry.reasons, diagnostics };
   }
 
   if (!risk.allowed) {
-    return { ...baseline, candidate: candidateView(candidate), universeSize: universe.length, entry, blocks: risk.blocks, decision: 'BLOCKED', intent: null, reasons: risk.blocks.map((b) => b.reason) };
+    return { ...baseline, candidate: candidateView(candidate), universeSize: universe.length, entry, blocks: risk.blocks, decision: 'BLOCKED', intent: null, reasons: risk.blocks.map((b) => b.reason), diagnostics };
   }
 
   const intent = buildEntryIntent(entry, { sessionId, mode });
@@ -138,5 +140,6 @@ export function evaluateAutoTrader({
     decision: mode === 'live_spot' ? 'LIVE_INTENT' : 'PAPER_INTENT',
     intent,
     reasons: entry.reasons,
+    diagnostics,
   };
 }

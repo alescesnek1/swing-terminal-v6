@@ -27,6 +27,8 @@ test('UI exposes shadow, disable, paper and live promotion controls, and hides/d
   assert.ok(terminalJs.includes("setAutoTraderMode(\\'paper\\')"));
   assert.match(terminalJs, /auto\.effectiveMode === 'shadow' \? ' disabled title="Shadow Auto is already active"' : ''/);
   assert.match(terminalJs, /Shadow observation active/);
+  assert.match(terminalJs, /Diagnostics/);
+  assert.match(terminalJs, /auto\.universeDiagnostics/);
 });
 
 test('live auto promotion uses explicit modal phrase confirmation', () => {

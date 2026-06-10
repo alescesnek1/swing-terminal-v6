@@ -6343,10 +6343,29 @@ function renderFleet() {
     + '<div><span>Next eval</span><b>' + _esc(autoNextText) + '</b></div>'
     + '<div><span>Position mgmt</span><b>' + _esc(auto.positionState || 'flat / idle') + '</b></div>'
     + '<div><span>Live lock</span><b>' + _esc(auto.liveExecutionAllowed ? 'gate passed' : 'locked') + '</b></div>'
-    + '</div>'
-    + '<div class="fleet-auto-trader__cols">'
+    + '</div>';
+    
+  let diagnosticsHtml = '';
+  if (auto.universeDiagnostics && (auto.universeDiagnostics.dataSource === 'fallback' || auto.universeDiagnostics.universeTotal === 0)) {
+    const ud = auto.universeDiagnostics;
+    diagnosticsHtml = '<div><span>Diagnostics</span><ul>'
+      + '<li>Total: ' + ud.universeTotal + ' (' + ud.dataSource + ')</li>'
+      + '<li>Post-leverage: ' + ud.afterLeverageFilter + '</li>'
+      + '<li>Post-quote: ' + ud.afterQuoteFilter + '</li>'
+      + '<li>Post-liquidity: ' + ud.afterLiquidityFilter + '</li>'
+      + '<li>Post-spread: ' + ud.afterSpreadFilter + '</li>'
+      + '<li>Post-allowlist: ' + ud.afterAllowlistFilter + '</li>'
+      + '</ul></div>';
+      
+    if (autoReasons.length > 0 && autoReasons[0].indexOf('no candidate') !== -1) {
+       autoReasons[0] = 'No candidate because scanner universe was fully filtered (see diagnostics).';
+    }
+  }
+
+  html += '<div class="fleet-auto-trader__cols">'
     + '<div><span>Reasons</span>' + (autoReasons.length ? '<ul>' + autoReasons.map((r) => '<li>' + _esc(r) + '</li>').join('') + '</ul>' : '<p>--</p>') + '</div>'
     + '<div><span>Risk blocks</span>' + (autoBlocksView.length ? '<ul>' + autoBlocksView.map((b) => '<li>' + _esc((b.code ? b.code + ': ' : '') + (b.reason || b)) + '</li>').join('') + '</ul>' : '<p>none reported</p>') + '</div>'
+    + diagnosticsHtml
     + '</div>'
     + (auto.liveExecutionAllowed ? '' : '<div class="fleet-auto-trader__locked">' + (auto.effectiveMode === 'shadow' ? 'Shadow observation active. Live promotion locked: missing ' : (auto.mode === 'live_spot' ? 'Live auto locked: missing ' : 'Live promotion locked: missing ')) + _esc((auto.liveGateMissing || []).join(', ') || 'required gates') + '</div>')
     + (data.isAdmin ? '<div class="fleet-live-readiness__confirm">'

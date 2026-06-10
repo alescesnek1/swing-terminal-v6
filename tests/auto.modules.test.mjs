@@ -86,6 +86,28 @@ test('3. shadow mode never creates any execution intent and evaluates despite da
   assert.equal(buildEntryIntent({ action: 'BUY', symbol: 'BTCUSDC', positionUsd: 6 }, { sessionId: 's', mode: 'shadow' }), null);
 });
 
+test('3b. shadow tick with empty scanner data falls back to BTCUSDC with FALLBACK_ALLOWLIST_SYMBOL', () => {
+  const out = evaluateAutoTrader({
+    env: { AUTO_TRADER_ENABLED: 'true', AUTO_TRADER_MODE: 'shadow' },
+    markets: [], // empty scanner data
+    caps: CAPS,
+    fleet: HEALTHY_FLEET,
+    threshold: 0, // ensure score > threshold passes even if score is 0
+    sessionId: 'sess_1',
+    regime: { regime: 'RISK_ON', entriesAllowed: true },
+    liveAllowedSymbols: ['BTCUSDC']
+  });
+  
+  assert.equal(out.mode, 'shadow');
+  assert.equal(out.decision, 'SHADOW_BUY');
+  assert.ok(out.candidate, 'fallback candidate is generated');
+  assert.equal(out.candidate.symbol, 'BTCUSDC', 'fallback uses allowed symbol');
+  assert.ok(out.candidate.riskFlags.includes('FALLBACK_ALLOWLIST_SYMBOL'), 'fallback risk flag is set');
+  assert.ok(out.diagnostics, 'diagnostics object is returned');
+  assert.equal(out.diagnostics.dataSource, 'fallback', 'dataSource indicates fallback');
+  assert.equal(out.diagnostics.universeTotal, 0, 'original scanner universe was 0');
+});
+
 // 4. paper mode cannot create a live intent
 test('4. paper mode only ever creates a paper/testnet intent, never live', () => {
   const out = evaluateAutoTrader({ env: { AUTO_TRADER_ENABLED: 'true', AUTO_TRADER_MODE: 'paper' }, markets, caps: CAPS, fleet: HEALTHY_FLEET, threshold: 1, sessionId: 'sess_paper', regime: { regime: 'RISK_ON', entriesAllowed: true } });
