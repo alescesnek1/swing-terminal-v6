@@ -24,6 +24,7 @@ function loadPrimaryState() {
   const context = {
     _fleetWorkerOnline: (s) => !!(s && s.worker && s.worker.online),
     _fleetOpenPositionCount: (s) => Array.isArray(s && s.openPositions) ? s.openPositions.length : 0,
+    _fleetSessionIsLive: (s) => !!s && s.mode === 'live_spot',
   };
   vm.createContext(context);
   vm.runInContext(`${extractFunctionSource('_fleetPrimaryState')}; this.fn = _fleetPrimaryState;`, context);

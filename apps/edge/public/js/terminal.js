@@ -5798,14 +5798,41 @@ function _fleetOpenPositionCount(s) {
   return Array.isArray(s && s.openPositions) ? s.openPositions.length : 0;
 }
 
+// Position rows to render, with stale/duplicate "open" rows removed (spec 3). A
+// position result is treated as closed when it has a closeOrderId or a closed/dust/
+// close-failed status. An "open" row is suppressed when (a) a closed record exists
+// for the same orderId, or (b) the backend authoritatively reports zero open
+// positions — so a closed/stopped session can never show a phantom open row.
+function _fleetPositionRowClosed(p) {
+  return !!(p && (p.closeOrderId
+    || p.status === 'closed' || p.status === 'CLOSED'
+    || p.status === 'CLOSED_WITH_DUST' || p.status === 'WORKER_CLOSE_FAILED'));
+}
+function _fleetVisiblePositionRows(s) {
+  const rows = Array.isArray(s && s.positionResults) ? s.positionResults : [];
+  const backendOpen = _fleetOpenPositionCount(s);
+  const closedOrderIds = new Set(rows.filter(_fleetPositionRowClosed).map((p) => p.orderId).filter(Boolean));
+  return rows.filter((p) => {
+    if (_fleetPositionRowClosed(p)) return true; // keep closed/terminal history rows
+    // p is an open-ish row: drop it if it duplicates a closed record, or the
+    // backend says nothing is open (authoritative — never show a phantom open).
+    if (p && p.orderId && closedOrderIds.has(p.orderId)) return false;
+    if (backendOpen === 0) return false;
+    return true;
+  });
+}
+
 // Exactly ONE primary state per session, by strict priority (spec A). Returns
 // { text, color }. Never produces contradictory combinations.
 function _fleetPrimaryState(s) {
   if (!s) return { text: 'READY / NO SESSION', color: '#8899aa' };
   const online = _fleetWorkerOnline(s);
   const openCount = _fleetOpenPositionCount(s);
+  const isLive = _fleetSessionIsLive(s);
   const closeFailed = (s.positionResults || []).some((p) => p.status === 'WORKER_CLOSE_FAILED');
   const stopping = s.stopRequested === true || s.status === 'stopping' || s.status === 'stop_requested';
+  const terminal = s.status === 'stopped' || s.status === 'expired';
+  const closedText = isLive ? 'LIVE SESSION CLOSED' : 'BOT STOPPED';
   const paused = s.pauseRequested === true || s.status === 'paused' || (s.worker && s.worker.currentState === 'paused') || s.entryBlockedReason === 'session_paused' || s.entryBlockedReason === 'global_kill_switch';
   // 1. EMERGENCY / CLOSE FAILED / MANUAL ATTENTION
   if (closeFailed) return { text: 'CLOSE FAILED — MANUAL ATTENTION REQUIRED', color: '#ff4a4a' };
@@ -5813,15 +5840,19 @@ function _fleetPrimaryState(s) {
   if (openCount > 0 && !online) return { text: 'WORKER OFFLINE — POSITION OPEN', color: '#ff4a4a' };
   // 3. OPEN POSITION EXISTS — WORKER ONLINE
   if (openCount > 0 && online && !stopping) return { text: 'OPEN POSITION EXISTS — WORKER ONLINE', color: '#ffaa00' };
-  // 4. STOPPING — CLOSING POSITIONS
-  if (stopping) return { text: 'STOPPING — CLOSING POSITIONS', color: '#ffaa00' };
+  // 4. STOPPING — only while a position still needs closing. Once the session is
+  //    flat (openCount === 0) it is CLOSED, never "STOPPING — CLOSING POSITIONS"
+  //    (spec 2: a stopped, flat live session must read as closed, not stopping).
+  if (stopping && openCount > 0) return { text: 'STOPPING — CLOSING POSITIONS', color: '#ffaa00' };
+  if (terminal && openCount === 0) return { text: closedText, color: '#8899aa' };
+  if (stopping && openCount === 0) return { text: isLive ? closedText : 'WORKER STOPPED — NO OPEN POSITIONS', color: '#8899aa' };
   // 5. LOCAL WORKER ONLINE — BOT RUNNING
   if (online && paused) return { text: 'LOCAL WORKER ONLINE — ENTRIES PAUSED', color: '#ffaa00' };
   if (paused) return { text: 'ENTRIES PAUSED', color: '#ffaa00' };
   if (online) return { text: 'LOCAL WORKER ONLINE — BOT RUNNING', color: '#00ff80' };
   // 6. LAUNCHING — WAITING FOR HEARTBEAT
   if (s.status === 'launch_requested' || s.status === 'launching') return { text: 'LAUNCHING — WAITING FOR HEARTBEAT', color: '#ffaa00' };
-  if (s.status === 'stopped' || s.status === 'expired') return { text: 'BOT STOPPED', color: '#8899aa' };
+  if (terminal) return { text: closedText, color: '#8899aa' };
   // 7. LOCAL WORKER OFFLINE
   return { text: 'LOCAL WORKER OFFLINE', color: '#ff6666' };
 }
@@ -6122,13 +6153,20 @@ function renderFleet() {
         : !newEntriesAllowed
           // Non-durable store → START disabled (close-only mode).
           ? '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" disabled title="Disabled: control state not durable">START BOT (disabled: store not durable)</button>'
-          : '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT</button>')
+          : liveModeActive
+            // Live cockpit (spec 1): never show a generic testnet-looking START BOT.
+            // START LIVE SPOT lives in the Live Readiness panel below; surface it here
+            // only when live start is safe, otherwise hide it entirely.
+            ? (live.canStartLive ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openStartLiveSpotModal()">START LIVE SPOT</button>' : '')
+            : '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT</button>')
     + (staleSessions.length > 1 && !anyOpenPosition ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearStaleSessions()">CLEAR STALE SESSIONS</button>' : '')
     + (Fleet.retryLaunchUrl ? '<button type="button" class="paperbot-control-btn" onclick="retryOpenWorkerTerminal()">Retry Open Worker Terminal</button>' : '')
     + '</div>'
     + '<div id="fleet-conn" class="fleet-conn">' + (durable ? 'durable store (durable_blobs) · ' : 'in-memory store (memory_fallback) · ') + (data.isAdmin ? 'admin' : 'user') + ' · ' + _esc(data.identity && data.identity.email || '') + '</div>'
     + (Fleet.launchNotice ? '<div class="fleet-notice">' + _esc(Fleet.launchNotice) + '</div>' : '')
-    + (anyOpenPosition ? '' : '<div class="fleet-hint">First time on this computer? Click <b>Install Worker</b>. After that, the entire testnet lifecycle is button-driven — no terminal needed.</div>')
+    + (anyOpenPosition ? '' : '<div class="fleet-hint">' + (liveModeActive
+        ? 'First time on this computer? Click <b>Install Worker</b>, then use <b>START LIVE SPOT</b> in the Live Readiness panel.'
+        : 'First time on this computer? Click <b>Install Worker</b>. After that, the entire testnet lifecycle is button-driven — no terminal needed.') + '</div>')
     + '</div>'
     + '</div>';
 
@@ -6343,8 +6381,11 @@ function renderFleet() {
     const detailProgress = _fleetCloseProgress(sel);
     if (detailProgress) html += '<div class="fleet-progress">' + _esc(detailProgress) + '</div>';
     // Neutral (not red) confirmation for a worker that finished and exited (spec B.5).
+    // Mode-aware: a closed live session points to START LIVE SPOT, not testnet START BOT.
     if (_fleetExitedCleanly(sel)) {
-      html += '<div class="fleet-clean-exit">Last worker exited cleanly — no open position. START BOT to run again.</div>';
+      html += '<div class="fleet-clean-exit">' + (_fleetSessionIsLive(sel)
+        ? 'Live session closed — no open position. Use START LIVE SPOT to trade again.'
+        : 'Last worker exited cleanly — no open position. START BOT to run again.') + '</div>';
     }
     const selLive = _fleetSessionIsLive(sel);
     const selEmergencyLabel = 'Emergency Close ' + (selLive ? 'Live' : 'Testnet');
@@ -6533,7 +6574,12 @@ function renderFleet() {
 
     // Positions table
     html += '<div class="fleet-section-title">POSITIONS</div>';
-    const positions = sel.positionResults || [];
+    // Clear flat-state line (spec 3/5): when the backend reports no open position,
+    // say so explicitly instead of letting a stale "open" row imply risk remains.
+    if (openCountDetail === 0) {
+      html += '<div class="fleet-no-open-pos">No open ' + (selLive ? 'live' : '') + ' position.</div>';
+    }
+    const positions = _fleetVisiblePositionRows(sel);
     if (!positions.length) html += '<div class="fleet-empty">No positions reported.</div>';
     else {
       html += '<table class="fleet-table"><thead><tr><th>Symbol</th><th>Qty</th><th>Status</th><th>Order</th><th>Close</th></tr></thead><tbody>';
@@ -6544,11 +6590,13 @@ function renderFleet() {
       html += '</tbody></table>';
     }
 
-    // ── Closed-trade ledger (spec C) ──
-    // Latest closed trade as a result card, full history in the table below.
+    // ── Closed-trade ledger (spec 4) ──
+    // The latest closed trade already shows ONCE as the top cockpit card, so the
+    // detailed per-session card + full ledger table live in a collapsed "Trade
+    // details" drawer — no duplicate primary card in the default cockpit.
     const ledger = _fleetClosedTrades(sel);
     if (ledger.length) {
-      html += '<div class="fleet-section-title">CLOSED TRADES (' + ledger.length + ')</div>';
+      html += '<details class="fleet-history fleet-trade-details"><summary>Trade details (' + ledger.length + ')</summary>';
       const latest = ledger.slice().sort((a, b) => new Date(b.timeClosed || 0) - new Date(a.timeClosed || 0))[0];
       html += _fleetClosedTradeCardHtml(latest, _e, { showStartAgain: false });
       html += '<table class="fleet-table fleet-ledger"><thead><tr>'
@@ -6572,6 +6620,7 @@ function renderFleet() {
           + '</tr>';
       }
       html += '</tbody></table>';
+      html += '</details>';
     }
   }
   html += '</div></div>'; // detail + body
@@ -6580,10 +6629,22 @@ function renderFleet() {
   // container (#bot-fleet-config) so this poll-driven re-render never touches it.
   html += '<div class="fleet-bottom"><div class="fleet-events"><div class="fleet-section-title">EVENT FEED</div>';
   const events = data.events || [];
-  if (!events.length) html += '<div class="fleet-empty">No events.</div>';
-  else for (const ev of events.slice(0, 30)) {
+  const _eventRow = (ev) => {
     const sc = ev.severity === 'warn' ? '#ffaa00' : ev.severity === 'error' ? '#ff4a4a' : '#8899aa';
-    html += '<div class="fleet-event"><span style="color:' + sc + '">' + _esc(ev.type) + '</span> ' + _esc(ev.message) + '</div>';
+    return '<div class="fleet-event"><span style="color:' + sc + '">' + _esc(ev.type) + '</span> ' + _esc(ev.message) + '</div>';
+  };
+  if (!events.length) html += '<div class="fleet-empty">No events.</div>';
+  else {
+    // Default cockpit shows only the latest 5 events (spec 6). The full audit/
+    // testnet/debug log is collapsed under "Advanced event log".
+    const recent = events.slice(0, 5);
+    for (const ev of recent) html += _eventRow(ev);
+    const rest = events.slice(5, 50);
+    if (rest.length) {
+      html += '<details class="fleet-history fleet-event-log"><summary>Advanced event log (' + rest.length + ' more)</summary>';
+      for (const ev of rest) html += _eventRow(ev);
+      html += '</details>';
+    }
   }
   html += '</div></div>';
 
