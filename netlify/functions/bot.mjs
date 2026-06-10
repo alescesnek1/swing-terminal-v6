@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { getIdentity, isAdmin, canControlSession } from './_auth.mjs';
 import { loadFleet, saveFleet, mutateFleet, fleetBackend, fleetStoreInfo } from './_fleet-store.mjs';
 import { computeMarketRegime } from './_market-regime.mjs';
+import { evaluateAutoTrader } from '../../scripts/auto/auto-trader.mjs';
 
 const DEFAULT_STATE = {
   status: 'safety',
@@ -1296,6 +1297,10 @@ function autoTraderStatus(fleet, identity = null) {
   let effectiveMode = 'off';
   if (enabled) effectiveMode = mode === 'live_spot' ? (gate.allowed ? 'live_spot' : 'live_locked') : mode;
   const statusLabel = { off: 'OFF', shadow: 'SHADOW', paper: 'PAPER', live_locked: 'LIVE LOCKED', live_spot: 'LIVE ACTIVE' }[effectiveMode];
+  
+  if (effectiveMode === 'shadow') {
+    gate.missing = gate.missing.filter(g => g !== 'AUTO_TRADER_ENABLED' && g !== 'AUTO_TRADER_MODE');
+  }
   const caps = liveRiskCaps(identity && identity.userId ? getUserConfig(fleet, identity.userId) : null);
   const daily = liveDailyCounters(fleet);
   const paperEvidence = Number(persisted.paperTradeCount) || 0;
@@ -2243,6 +2248,77 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     const myEvents = (fleet.events || []).filter((e) => !e.ownerUserId || e.ownerUserId === identity.userId || isAdmin(identity)).slice(0, 50);
     const backend = fleetBackend();
     const storeInfo = fleetStoreInfo();
+
+    // --- Opportunistic Shadow Tick ---
+    const autoStatus = autoTraderStatus(fleet, identity);
+    const nowMs = Date.now();
+    const nextEvalMs = new Date((fleet.autoTrader && fleet.autoTrader.nextEvaluationAt) || 0).getTime();
+    if (autoStatus.effectiveMode === 'shadow' && nowMs >= nextEvalMs && isAdmin(identity)) {
+      try {
+        const markets = await fetchMarkets(req);
+        const regime = computeMarketRegime(markets);
+        const config = getUserConfig(fleet, identity.userId);
+        const caps = liveRiskCaps(config);
+        const readiness = liveReadiness(fleet, identity);
+        
+        const openPositionsCount = Object.values(fleet.botSessions || {}).reduce((acc, s) => acc + sessionOpenPositions(fleet, s.sessionId).length, 0);
+        
+        const autoFleetState = {
+           durable: storeInfo.durable,
+           preflightFresh: readiness.preflightFresh,
+           workerOnline: true, 
+           openPositions: openPositionsCount,
+           pendingIntent: false,
+           safetyLock: readiness.liveSafetyLockActive,
+           globalKill: readiness.globalKillSwitchActive,
+           sessionPaused: false,
+           dailyTradesUsed: readiness.dailyTradesUsed,
+           dailyLossUsd: readiness.dailyLossUsd,
+           freeQuote: liveFreeQuoteBalance(fleet, 'USDC').value,
+           quoteAsset: 'USDC'
+        };
+
+        const out = evaluateAutoTrader({
+          env: process.env,
+          markets,
+          regime,
+          liveAllowedSymbols: caps.allowedSymbols,
+          caps,
+          fleet: autoFleetState,
+          threshold: 1,
+        });
+
+        if (!fleet.autoTrader) fleet.autoTrader = {};
+        
+        fleet.autoTrader.lastEvaluationAt = new Date().toISOString();
+        fleet.autoTrader.nextEvaluationAt = new Date(nowMs + 60000).toISOString();
+        fleet.autoTrader.evaluationRunning = false;
+        fleet.autoTrader.shadowActive = true;
+        
+        if (out.candidate) {
+          fleet.autoTrader.candidate = {
+            symbol: out.candidate.symbol,
+            score: out.candidate.score,
+            reasons: out.candidate.reasons || [],
+            recommendedPositionUsd: out.candidate.recommendedPositionUsd,
+          };
+          fleet.autoTrader.score = out.candidate.score;
+          fleet.autoTrader.reasons = out.candidate.reasons || [];
+        } else {
+          fleet.autoTrader.candidate = null;
+          fleet.autoTrader.score = null;
+          fleet.autoTrader.reasons = out.reasons || [];
+        }
+        fleet.autoTrader.lastDecision = out.decision;
+        fleet.autoTrader.riskBlocks = out.blocks || [];
+        
+        await saveFleet(fleet);
+      } catch (err) {
+        console.error('Opportunistic shadow evaluation failed:', err);
+      }
+    }
+    // --- End Opportunistic Tick ---
+
     return json(req, {
       ok: true,
       backend,
