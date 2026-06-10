@@ -1267,6 +1267,13 @@ function autoTraderStatus(fleet) {
   const caps = liveRiskCaps();
   const daily = liveDailyCounters(fleet);
   const paperEvidence = Number(persisted.paperTradeCount) || 0;
+  const riskBlocks = Array.isArray(persisted.riskBlocks) ? persisted.riskBlocks.slice() : [];
+  if (daily.trades >= caps.maxDailyTrades) {
+    riskBlocks.push({
+      code: 'DAILY_TRADES_CAP',
+      reason: `Daily live trade cap exhausted: ${daily.trades}/${caps.maxDailyTrades} used. Raise cap explicitly or wait for next UTC day.`,
+    });
+  }
   return {
     enabled,
     mode,
@@ -1277,7 +1284,7 @@ function autoTraderStatus(fleet) {
     candidate: persisted.candidate || null,
     score: Number.isFinite(Number(persisted.score)) ? Number(persisted.score) : null,
     reasons: Array.isArray(persisted.reasons) ? persisted.reasons : [],
-    riskBlocks: Array.isArray(persisted.riskBlocks) ? persisted.riskBlocks : [],
+    riskBlocks,
     liveExecutionAllowed: gate.allowed,
     liveGateMissing: gate.missing,
     liveAllowedSymbols: caps.allowedSymbols,

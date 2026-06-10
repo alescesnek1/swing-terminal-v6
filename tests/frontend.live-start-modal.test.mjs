@@ -71,6 +71,8 @@ function loadLiveStartHarness(fetchImpl) {
           allowLive: true,
           requiresConsent: false,
           preflight: { ok: true, checkedAt: '2026-06-10T08:00:00.000Z' },
+          dailyTradesUsed: 0,
+          dailyTradesRemaining: 3,
           caps: { allowedSymbols: ['BTCUSDC'], maxPositionUsd: 5, maxDailyLossUsd: 5, maxDailyTrades: 3 },
         },
         sessions: [],
@@ -100,6 +102,7 @@ function loadLiveStartHarness(fetchImpl) {
   vm.createContext(context);
   const sources = [
     '_botConfirmList',
+    '_liveDailyCapReason',
     '_renderBotConfirmModal',
     'openBotConfirmModal',
     'toggleBotConfirmAck',
@@ -264,7 +267,27 @@ test('live start button exposes a locked reason instead of a dead disabled butto
   assert.match(terminalJs, /Live locked: confirmation required/);
   assert.match(terminalJs, /fleet-live-readiness__locked/);
   // The button enable state is driven by readiness (canStartLive), never by allowLive.
-  assert.match(terminalJs, /onclick="openStartLiveSpotModal\(\)"' \+ \(live\.canStartLive \? '' : ' disabled'\)/);
+  assert.match(terminalJs, /const liveCanStartEntry = live\.canStartLive === true && !dailyCapReason;/);
+  assert.match(terminalJs, /onclick="openStartLiveSpotModal\(\)"' \+ \(liveCanStartEntry \? '' : ' disabled'\)/);
+});
+
+test('daily cap exhausted blocks Start Live Spot before the modal opens', () => {
+  const { context, document, calls, toasts } = loadLiveStartHarness();
+  context.Fleet.data.liveReadiness.dailyTradesUsed = 4;
+  context.Fleet.data.liveReadiness.dailyTradesRemaining = 0;
+  context.Fleet.data.liveReadiness.caps.maxDailyTrades = 2;
+  context.openStartLiveSpotModal();
+  assert.equal(document.getElementById('bot-confirm-modal'), null);
+  assert.equal(calls.length, 0);
+  assert.equal(toasts[0][0], 'error');
+  assert.match(toasts[0][2], /Daily live trade cap exhausted: 4\/2 used\. Raise cap explicitly or wait for next UTC day\./);
+});
+
+test('daily cap exhausted disables or hides Start Live Spot in render branches', () => {
+  assert.match(terminalJs, /const dailyCapReason = _liveDailyCapReason\(live\);/);
+  assert.match(terminalJs, /const liveCanStartEntry = live\.canStartLive === true && !dailyCapReason;/);
+  assert.match(terminalJs, /liveLockedReason = dailyCapReason/);
+  assert.match(terminalJs, /liveCanStartEntry \? '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openStartLiveSpotModal\(\)">START LIVE SPOT<\/button>' : ''/);
 });
 
 test('live_spot stop and close labels never say testnet', () => {

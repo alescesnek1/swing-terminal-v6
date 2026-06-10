@@ -35,3 +35,9 @@ test('live auto promotion uses explicit modal phrase confirmation', () => {
   assert.match(terminalJs, /updateBotConfirmPhrase/);
   assert.match(terminalCss, /\.bot-confirm__input/);
 });
+
+test('auto trader panel shows daily cap exhaustion as a risk block and disables live promotion', () => {
+  assert.match(terminalJs, /autoBlocks\.push\(\{ code: 'DAILY_TRADES_CAP', reason: dailyCapReason \}\)/);
+  assert.match(terminalJs, /const autoCanPromoteLive = auto\.canPromoteLive === true && auto\.liveExecutionAllowed === true && !dailyCapReason;/);
+  assert.match(terminalJs, /Daily live trade cap exhausted/);
+});

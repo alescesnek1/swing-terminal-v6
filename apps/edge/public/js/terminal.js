@@ -4752,6 +4752,15 @@ const REGIME_COLORS = {
   RISK_ON: '#00ff80', NEUTRAL: '#8899aa', RISK_OFF: '#ffaa00', CRASH: '#ff4a4a',
 };
 
+function _liveDailyCapReason(live) {
+  const remaining = Number(live && live.dailyTradesRemaining);
+  if (!(Number.isFinite(remaining) && remaining <= 0)) return '';
+  const caps = (live && live.caps) || {};
+  const used = live && live.dailyTradesUsed != null ? live.dailyTradesUsed : 0;
+  const max = caps.maxDailyTrades != null ? caps.maxDailyTrades : (live && live.maxDailyTrades != null ? live.maxDailyTrades : '--');
+  return 'Daily live trade cap exhausted: ' + used + '/' + max + ' used. Raise cap explicitly or wait for next UTC day.';
+}
+
 async function _fleetFetch(method, path, body) {
   const authHeaders = await _getAuthHeaders();
   const init = { method, headers: { 'Accept': 'application/json', ...authHeaders } };
@@ -5023,6 +5032,8 @@ function startBotSession() {
 function openStartLiveSpotModal() {
   const data = Fleet.data || {};
   const live = data.liveReadiness || {};
+  const dailyCapReason = _liveDailyCapReason(live);
+  if (dailyCapReason) { try { window.Toast?.error('Live daily cap exhausted', dailyCapReason); } catch {} return; }
   const caps = live.caps || {};
   const pf = live.preflight || null;
   const preflightPassed = live.preflightPassed === true || live.preflightFresh === true;
@@ -5147,6 +5158,9 @@ function setAutoTraderMode(mode) {
 
 function openPromoteAutoLiveModal() {
   const auto = (Fleet.data && Fleet.data.autoTrader) || {};
+  const live = (Fleet.data && Fleet.data.liveReadiness) || {};
+  const dailyCapReason = _liveDailyCapReason(live);
+  if (dailyCapReason) { try { window.Toast?.error('Live daily cap exhausted', dailyCapReason); } catch {} return; }
   const phrase = auto.confirmationPhrase || 'I UNDERSTAND AUTONOMOUS LIVE SPOT USES REAL MONEY';
   openBotConfirmModal({
     title: 'Promote Auto Trader To Live Spot?',
@@ -5600,6 +5614,8 @@ function openCreateLiveMicroOrderModal() {
   const sel = _fleetSessionFromData(Fleet.selectedId);
   if (!sel || sel.mode !== 'live_spot') { try { window.Toast?.error('No live session', 'Select a live Spot session first.'); } catch {} return; }
   const live = data.liveReadiness || {};
+  const dailyCapReason = _liveDailyCapReason(live);
+  if (dailyCapReason) { try { window.Toast?.error('Live daily cap exhausted', dailyCapReason); } catch {} return; }
   const caps = live.caps || {};
   const allowed = caps.allowedSymbols || [];
   const symbol = allowed.length === 1 ? allowed[0] : (allowed[0] || 'BTCUSDC');
@@ -6175,6 +6191,8 @@ function renderFleet() {
   const live = data.liveReadiness || {};
   const auto = data.autoTrader || {};
   const liveCaps = live.caps || {};
+  const dailyCapReason = _liveDailyCapReason(live);
+  const liveCanStartEntry = live.canStartLive === true && !dailyCapReason;
   const liveState = live.state || 'TESTNET MODE';
   const globalKillActive = data.globalKillSwitchActive === true || live.globalKillSwitchActive === true;
   const liveRunning = sessions.some((s) => s.mode === 'live_spot' && _fleetWorkerOnline(s));
@@ -6196,21 +6214,21 @@ function renderFleet() {
   // Locked reason: never leave a dead disabled button without an explanation.
   // When readiness IS met but the user has not consented yet (allowLive=false),
   // the button stays ENABLED and the modal drives the atomic unlock.
-  const liveLockedReason = !live.canStartLive
+  const liveLockedReason = dailyCapReason || (!live.canStartLive
     ? (globalKillActive ? 'Live locked: global kill switch active'
       : !data.isAdmin ? 'Live locked: admin only'
       : live.state === 'LIVE PREFLIGHT REQUIRED' ? 'Live locked: run live preflight'
       : live.state === 'LIVE LOCKED' ? 'Live locked: live env gates not enabled'
       : live.durable === false ? 'Live locked: control state not durable'
       : 'Live locked: ' + (live.state || 'not ready'))
-    : (live.requiresConsent || live.allowLive === false ? 'Live locked: confirmation required' : '');
+    : (live.requiresConsent || live.allowLive === false ? 'Live locked: confirmation required' : ''));
   const adminLiveControls = data.isAdmin ? '<div class="fleet-live-readiness__confirm">'
-    + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openStartLiveSpotModal()"' + (live.canStartLive ? '' : ' disabled') + '>START LIVE SPOT</button>'
+    + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openStartLiveSpotModal()"' + (liveCanStartEntry ? '' : ' disabled') + '>START LIVE SPOT</button>'
     + '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="emergencyStopAllLiveSpot()">EMERGENCY STOP ALL LIVE SPOT</button>'
     + (globalKillActive
         ? '<button id="fleet-clear-gks-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="clearGlobalKillSwitch()">CLEAR GLOBAL KILL SWITCH</button>'
         : '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="activateGlobalKillSwitch()">ACTIVATE GLOBAL KILL SWITCH</button>')
-    + (liveLockedReason ? '<div class="fleet-live-readiness__locked">' + _esc(liveLockedReason) + (live.canStartLive ? ' — click START LIVE SPOT to confirm and enable.' : '') + '</div>' : '')
+    + (liveLockedReason ? '<div class="fleet-live-readiness__locked">' + _esc(liveLockedReason) + (liveCanStartEntry ? ' — click START LIVE SPOT to confirm and enable.' : '') + '</div>' : '')
     + '</div>' : '';
 
   // Risk regime card
@@ -6241,7 +6259,7 @@ function renderFleet() {
             // Live cockpit (spec 1): never show a generic testnet-looking START BOT.
             // START LIVE SPOT lives in the Live Readiness panel below; surface it here
             // only when live start is safe, otherwise hide it entirely.
-            ? (live.canStartLive ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openStartLiveSpotModal()">START LIVE SPOT</button>' : '')
+            ? (liveCanStartEntry ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openStartLiveSpotModal()">START LIVE SPOT</button>' : '')
             : '<button id="fleet-start-btn" type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="startBotSession()">START BOT</button>')
     + (staleSessions.length > 1 && !anyOpenPosition ? '<button type="button" class="paperbot-control-btn paperbot-control-btn--stop" onclick="clearStaleSessions()">CLEAR STALE SESSIONS</button>' : '')
     + (Fleet.retryLaunchUrl ? '<button type="button" class="paperbot-control-btn" onclick="retryOpenWorkerTerminal()">Retry Open Worker Terminal</button>' : '')
@@ -6266,6 +6284,8 @@ function renderFleet() {
     // substitute hardcoded symbol/cap defaults here — a stale BTCUSDT/$10
     // fallback misrepresents what the backend will actually enforce.
     + '<div class="fleet-live-readiness__caps">'
+    + '<div><span>Daily trades used</span><b>' + _esc((live.dailyTradesUsed != null ? live.dailyTradesUsed : 0) + '/' + (liveCaps.maxDailyTrades != null ? liveCaps.maxDailyTrades : '--')) + '</b></div>'
+    + '<div><span>Remaining</span><b>' + _esc(live.dailyTradesRemaining != null ? live.dailyTradesRemaining : '--') + '</b></div>'
     + '<div><span>Max trade</span><b>' + (liveCaps.maxPositionUsd != null ? '$' + _esc(liveCaps.maxPositionUsd) : '—') + '</b></div>'
     + '<div><span>Max daily loss</span><b>' + (liveCaps.maxDailyLossUsd != null ? '$' + _esc(liveCaps.maxDailyLossUsd) : '—') + '</b></div>'
     + '<div><span>Max daily trades</span><b>' + (liveCaps.maxDailyTrades != null ? _esc(liveCaps.maxDailyTrades) : '—') + '</b></div>'
@@ -6277,11 +6297,13 @@ function renderFleet() {
 
   const autoCandidate = auto.candidate || {};
   const autoReasons = (Array.isArray(auto.reasons) && auto.reasons.length ? auto.reasons : (autoCandidate.reasons || [])).slice(0, 4);
-  const autoBlocks = (Array.isArray(auto.riskBlocks) ? auto.riskBlocks : []).slice(0, 5);
+  const autoBlocks = (Array.isArray(auto.riskBlocks) ? auto.riskBlocks.slice() : []);
+  if (dailyCapReason && !autoBlocks.some((b) => b && b.code === 'DAILY_TRADES_CAP')) autoBlocks.push({ code: 'DAILY_TRADES_CAP', reason: dailyCapReason });
+  const autoBlocksView = autoBlocks.slice(0, 5);
   const autoNextMs = auto.nextEvaluationAt ? (new Date(auto.nextEvaluationAt).getTime() - Date.now()) : null;
   const autoNextText = Number.isFinite(autoNextMs) && autoNextMs > 0 ? Math.ceil(autoNextMs / 1000) + 's' : (auto.nextEvaluationAt ? 'due' : '--');
-  const autoCanPromoteLive = auto.canPromoteLive === true && auto.liveExecutionAllowed === true;
-  const autoPromoteTitle = autoCanPromoteLive ? 'Promote to live Spot' : ('Live auto locked: ' + ((auto.liveGateMissing || []).join(', ') || 'gates/evidence missing'));
+  const autoCanPromoteLive = auto.canPromoteLive === true && auto.liveExecutionAllowed === true && !dailyCapReason;
+  const autoPromoteTitle = autoCanPromoteLive ? 'Promote to live Spot' : (dailyCapReason || ('Live auto locked: ' + ((auto.liveGateMissing || []).join(', ') || 'gates/evidence missing')));
   html += '<div class="fleet-auto-trader">'
     + '<div class="fleet-auto-trader__head">'
     + '<div><div class="fleet-auto-trader__kicker">AUTO TRADER</div><div class="fleet-auto-trader__state">' + _esc(auto.status || 'OFF') + '</div></div>'
@@ -6300,7 +6322,7 @@ function renderFleet() {
     + '</div>'
     + '<div class="fleet-auto-trader__cols">'
     + '<div><span>Reasons</span>' + (autoReasons.length ? '<ul>' + autoReasons.map((r) => '<li>' + _esc(r) + '</li>').join('') + '</ul>' : '<p>--</p>') + '</div>'
-    + '<div><span>Risk blocks</span>' + (autoBlocks.length ? '<ul>' + autoBlocks.map((b) => '<li>' + _esc((b.code ? b.code + ': ' : '') + (b.reason || b)) + '</li>').join('') + '</ul>' : '<p>none reported</p>') + '</div>'
+    + '<div><span>Risk blocks</span>' + (autoBlocksView.length ? '<ul>' + autoBlocksView.map((b) => '<li>' + _esc((b.code ? b.code + ': ' : '') + (b.reason || b)) + '</li>').join('') + '</ul>' : '<p>none reported</p>') + '</div>'
     + '</div>'
     + (auto.liveExecutionAllowed ? '' : '<div class="fleet-auto-trader__locked">Autonomous live locked: missing ' + _esc((auto.liveGateMissing || []).join(', ') || 'required gates') + '</div>')
     + (data.isAdmin ? '<div class="fleet-live-readiness__confirm">'
@@ -6366,7 +6388,7 @@ function renderFleet() {
       html += _fleetClosedTradeCardHtml(latestClosed, _e, {
         showStartAgain: newEntriesAllowed,
         liveMode: liveModeActive,
-        canStartLive: !!(live && live.canStartLive),
+        canStartLive: !!liveCanStartEntry,
       });
     }
   }
@@ -6593,6 +6615,7 @@ function renderFleet() {
       let liveBlockedReason = '';
       if (!data.isAdmin) liveBlockedReason = 'Live order hidden: admin only.';
       else if (!newEntriesAllowed || live.durable === false) liveBlockedReason = 'Live order hidden: control state is not durable.';
+      else if (dailyCapReason) liveBlockedReason = dailyCapReason;
       else if (!preflightOk || live.state !== 'LIVE READY - MICRO CAPS') liveBlockedReason = 'Live order hidden: live readiness/preflight not met.';
       else if (!liveAllowed) liveBlockedReason = 'Live order hidden: enable live trading via START LIVE SPOT first.';
       else if (anyOpenPosition || smokeOpenCount > 0) liveBlockedReason = 'Live order hidden: close the open position first.';

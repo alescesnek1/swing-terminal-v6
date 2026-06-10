@@ -115,6 +115,12 @@ test('with 2/2 live trades today, a NEW live intent is rejected by the daily tra
   assert.match(res.json.error, /daily trade cap reached \(2\/2\)/);
 });
 
+test('auto trader status exposes the exhausted live daily cap as a risk block', async () => {
+  const fleet = await call(adminReq('GET', '/api/bot/fleet'));
+  const blocks = fleet.json.autoTrader.riskBlocks || [];
+  assert.ok(blocks.some((b) => b.code === 'DAILY_TRADES_CAP' && /Daily live trade cap exhausted: 2\/2 used/.test(b.reason)));
+});
+
 test('the counter survives a durable-store reload', async () => {
   // The fake Blobs store persists across requests; a fresh GET re-loads from it.
   const { used } = await dailyUsed();

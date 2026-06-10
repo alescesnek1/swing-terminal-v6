@@ -60,6 +60,8 @@ function loadLiveOrderHarness(fetchImpl) {
           canStartLive: true,
           preflightPassed: true,
           allowLive: true,
+          dailyTradesUsed: 0,
+          dailyTradesRemaining: 3,
           caps: { allowedSymbols: ['BTCUSDC'], maxPositionUsd: 6, minPositionUsd: 6, maxDailyLossUsd: 5, maxDailyTrades: 3 },
         },
         sessions: [{ sessionId: 'live_session_42', mode: 'live_spot', openPositions: [] }],
@@ -80,7 +82,7 @@ function loadLiveOrderHarness(fetchImpl) {
   };
   vm.createContext(context);
   const sources = [
-    '_botConfirmList', '_renderBotConfirmModal', 'openBotConfirmModal', 'toggleBotConfirmAck',
+    '_botConfirmList', '_liveDailyCapReason', '_renderBotConfirmModal', 'openBotConfirmModal', 'toggleBotConfirmAck',
     'closeBotConfirmModal', 'confirmBotConfirmModal', 'openCreateLiveMicroOrderModal',
   ].map(extractFunctionSource).join('\n');
   vm.runInContext(sources, context);
@@ -177,7 +179,7 @@ test('live button is hidden/blocked when free quote balance is below the require
 // Behavioral check: render the live action branch in a sandbox and assert that an
 // underfunded account hides the CREATE LIVE button and shows the exact insufficient
 // message, while a funded account shows the button.
-function renderLiveActionBranch({ usdc, cap = 6, min = 6 }) {
+function renderLiveActionBranch({ usdc, cap = 6, min = 6, dailyUsed = 0, dailyRemaining = 3, dailyMax = 3 }) {
   // Extract just the live-order block (from `if (selLive) {` to the matching close)
   // and evaluate it with a minimal sandbox that captures `html`.
   const marker = 'if (selLive) {';
@@ -196,6 +198,7 @@ function renderLiveActionBranch({ usdc, cap = 6, min = 6 }) {
     live: {
       caps: { allowedSymbols: ['BTCUSDC'], maxPositionUsd: cap, minPositionUsd: min },
       preflightPassed: true, durable: true, state: 'LIVE READY - MICRO CAPS', allowLive: true,
+      dailyTradesUsed: dailyUsed, dailyTradesRemaining: dailyRemaining,
       preflight: { balances: { USDC: usdc } },
     },
     sel: { stopRequested: false },
@@ -204,6 +207,9 @@ function renderLiveActionBranch({ usdc, cap = 6, min = 6 }) {
     online: true, canStop: true, globalKillActive: false, sessionPaused: false, entriesAllowed: true,
     Fleet: { liveOrderResult: null },
   };
+  ctx.dailyCapReason = dailyRemaining <= 0
+    ? `Daily live trade cap exhausted: ${dailyUsed}/${dailyMax} used. Raise cap explicitly or wait for next UTC day.`
+    : '';
   // The branch references these locals; provide them on the context.
   ctx.sel.openPositions = [];
   vm.runInNewContext(`(function(){ var smokeOpenCount = ${0}; ${branch.replace(/^if \(selLive\) \{/, '').replace(/\}$/, '')} })()`, ctx);
@@ -220,6 +226,24 @@ test('funded live account renders the CREATE LIVE button', () => {
   const html = renderLiveActionBranch({ usdc: '10' });
   assert.match(html, /CREATE LIVE BTCUSDC ORDER/);
   assert.doesNotMatch(html, /Insufficient USDC balance/);
+});
+
+test('daily cap exhausted hides CREATE LIVE order and shows the exact reason', () => {
+  const html = renderLiveActionBranch({ usdc: '10', dailyUsed: 4, dailyRemaining: 0, dailyMax: 2 });
+  assert.doesNotMatch(html, /CREATE LIVE/);
+  assert.match(html, /Daily live trade cap exhausted: 4\/2 used\. Raise cap explicitly or wait for next UTC day\./);
+});
+
+test('daily cap exhausted blocks direct Create Live modal opening', () => {
+  const { context, document, calls, toasts } = loadLiveOrderHarness();
+  context.Fleet.data.liveReadiness.dailyTradesUsed = 4;
+  context.Fleet.data.liveReadiness.dailyTradesRemaining = 0;
+  context.Fleet.data.liveReadiness.caps.maxDailyTrades = 2;
+  context.openCreateLiveMicroOrderModal();
+  assert.equal(document.getElementById('bot-confirm-modal'), null);
+  assert.equal(calls.length, 0);
+  assert.equal(toasts[0][0], 'error');
+  assert.match(toasts[0][2], /Daily live trade cap exhausted: 4\/2 used\. Raise cap explicitly or wait for next UTC day\./);
 });
 
 test('a dust-closed session shows no open position (no CLOSE REQUIRED) and a dust card', () => {
