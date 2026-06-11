@@ -1096,6 +1096,11 @@ async function executeIntent(intent, config, riskState, session = null, control 
       entryFills: Array.isArray(order.fills) ? order.fills : null,
       minQty: lot.minQty != null ? String(lot.minQty) : null,
       minNotional: (() => { const n = symbolInfo.filters.find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL'); return n && n.minNotional != null ? String(n.minNotional) : null; })(),
+      intentSource: intent.intentSource || intent.source,
+      autoMode: intent.autoMode,
+      autoStrategyVersion: intent.autoStrategyVersion,
+      autoDecisionId: intent.autoDecisionId,
+      autoIdempotencyKey: intent.autoIdempotencyKey,
     });
     console.log(`[POSITION] Open position persisted locally before backend report: ${intent.symbol} order ${order.orderId} -> ${STATE_FILE}`);
 
@@ -1104,7 +1109,7 @@ async function executeIntent(intent, config, riskState, session = null, control 
       symbol: intent.symbol, orderId: order.orderId, orderStatus: order.status, executedQty: order.executedQty,
       cummulativeQuoteQty: order.cummulativeQuoteQty, mode: workerMode, testnet: !isLiveSpot, realProductionOrder: isLiveSpot,
     });
-    await reportPosition({ symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, executedQty: order.executedQty, orderId: order.orderId, status: 'open', openedAt: new Date().toISOString(), entryAvgPrice: entryAvgPrice != null ? entryAvgPrice : null });
+    await reportPosition({ symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, executedQty: order.executedQty, orderId: order.orderId, status: 'open', openedAt: new Date().toISOString(), entryAvgPrice: entryAvgPrice != null ? entryAvgPrice : null, intentSource: intent.intentSource || intent.source, autoMode: intent.autoMode, autoStrategyVersion: intent.autoStrategyVersion, autoDecisionId: intent.autoDecisionId, autoIdempotencyKey: intent.autoIdempotencyKey });
     console.log(`[POSITION] Reported OPEN ${intent.symbol} to backend.`);
     markKeyUsed(intent.idempotencyKey);
     console.log(`[IDLE] Position open for ${intent.symbol}. Holding and refusing new BUY intents until it is closed (STOP/EMERGENCY closes it).`);
@@ -1187,6 +1192,11 @@ async function closeAllPositions(context) {
         realizedPnl: metrics.realizedPnl, realizedPnlPct: metrics.realizedPnlPct,
         feesAvailable: metrics.feesAvailable, fees: metrics.fees, feeAsset: metrics.feeAsset,
         feeAmount: metrics.feeAmount, netPnl: metrics.netPnl, pnlIsNet: metrics.pnlIsNet,
+        intentSource: pos.intentSource || pos.source,
+        autoMode: pos.autoMode,
+        autoStrategyVersion: pos.autoStrategyVersion,
+        autoDecisionId: pos.autoDecisionId,
+        autoIdempotencyKey: pos.autoIdempotencyKey,
       });
       console.log(`[${context}][CLOSE] Reported ${metrics.status} ${pos.symbol} to backend.`);
     } catch (err) {
@@ -1242,6 +1252,11 @@ async function closeLivePositionAsDust(context, pos, opts) {
     realizedPnl: null, realizedPnlPct: null,
     feesAvailable: false, fees: [], feeAsset: null, feeAmount: null, netPnl: null, pnlIsNet: false,
     closeReason: 'DUST_ONLY_CLOSE_NOT_POSSIBLE',
+    intentSource: pos.intentSource || pos.source,
+    autoMode: pos.autoMode,
+    autoStrategyVersion: pos.autoStrategyVersion,
+    autoDecisionId: pos.autoDecisionId,
+    autoIdempotencyKey: pos.autoIdempotencyKey,
   });
   console.log(`[${context}][CLOSE][DUST] Reported CLOSED_WITH_DUST (dust ${dust}) — LIVE_POSITION_DUSTED. openPositions now ${getOpenPositions().length}.`);
 }

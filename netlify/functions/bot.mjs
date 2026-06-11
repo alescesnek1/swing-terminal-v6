@@ -1285,6 +1285,7 @@ const AUTO_LIVE_CONFIRM_PHRASE = 'I UNDERSTAND AUTONOMOUS LIVE SPOT CAN PLACE RE
 // already whitelisted in _fleet-store normalize, so it survives reload).
 const AUTO_EVAL_INTERVAL_MS = Math.max(5000, Number(process.env.AUTO_EVAL_INTERVAL_MS) || 60000);
 const AUTO_BUY_SCORE_THRESHOLD = Number(process.env.AUTO_BUY_SCORE_THRESHOLD) > 0 ? Number(process.env.AUTO_BUY_SCORE_THRESHOLD) : 60;
+const AUTO_PAPER_BUY_SCORE_THRESHOLD = Number(process.env.AUTO_PAPER_BUY_SCORE_THRESHOLD) > 0 ? Number(process.env.AUTO_PAPER_BUY_SCORE_THRESHOLD) : 50;
 const AUTO_COOLDOWN_AFTER_CLOSE_MS = Number(process.env.AUTO_COOLDOWN_AFTER_CLOSE_MS) >= 0 ? Number(process.env.AUTO_COOLDOWN_AFTER_CLOSE_MS) : 300000;
 // Evidence thresholds required before live auto promotion.
 const AUTO_EVIDENCE_MIN_SHADOW_EVALUATIONS = 20;
@@ -1293,17 +1294,28 @@ function autoTraderEvidence(fleet) {
   const persisted = (fleet && fleet.autoTrader) || {};
   const events = (fleet && fleet.events) || [];
   const shadowEvaluations = Number(persisted.shadowEvaluations) || 0;
-  const paperRoundTripsFromResults = Object.entries((fleet && fleet.botSessions) || {})
+  const autoShadowEvaluations = shadowEvaluations;
+
+  const autoPaperRoundTripsFromResults = Object.entries((fleet && fleet.botSessions) || {})
     .filter(([, s]) => s && s.mode !== 'live_spot')
-    .reduce((acc, [sid]) => acc + sessionClosedTrades(fleet, sid).filter((t) => t.mode !== 'live_spot').length, 0);
-  const paperRoundTrips = Math.max(Number(persisted.paperRoundTrips) || 0, Number(persisted.paperTradeCount) || 0, paperRoundTripsFromResults);
+    .reduce((acc, [sid]) => acc + sessionClosedTrades(fleet, sid).filter((t) => t.mode !== 'live_spot' && t.intentSource === 'auto_trader' && t.autoMode === 'paper' && t.realProductionOrder !== true).length, 0);
+
+  const manualPaperRoundTripsFromResults = Object.entries((fleet && fleet.botSessions) || {})
+    .filter(([, s]) => s && s.mode !== 'live_spot')
+    .reduce((acc, [sid]) => acc + sessionClosedTrades(fleet, sid).filter((t) => t.mode !== 'live_spot' && !(t.intentSource === 'auto_trader' && t.autoMode === 'paper')).length, 0);
+
+  const autoPaperRoundTrips = Math.max(Number(persisted.autoPaperRoundTrips) || 0, autoPaperRoundTripsFromResults);
+  const manualPaperRoundTrips = manualPaperRoundTripsFromResults;
+  const rejectedEvidenceSamples = manualPaperRoundTrips;
+  const evidenceSourceVersion = 'auto-evidence-v2';
+
   const failedCloses = Math.max(Number(persisted.failedCloses) || 0, events.filter((e) => e && e.type === 'WORKER_CLOSE_FAILED').length);
   const duplicateIntentBlocks = Number(persisted.duplicateIntentBlocks) || 0;
   const safetyLockEvents = Math.max(Number(persisted.safetyLockEvents) || 0, events.filter((e) => e && e.type === 'LIVE_SAFETY_LOCK_ENGAGED').length);
   const dailyCapRespected = persisted.dailyCapRespected !== false;
   const oneOpenPositionRespected = persisted.oneOpenPositionRespected !== false;
-  const passed = shadowEvaluations >= AUTO_EVIDENCE_MIN_SHADOW_EVALUATIONS
-    && paperRoundTrips >= AUTO_EVIDENCE_MIN_PAPER_ROUND_TRIPS
+  const passed = autoShadowEvaluations >= AUTO_EVIDENCE_MIN_SHADOW_EVALUATIONS
+    && autoPaperRoundTrips >= AUTO_EVIDENCE_MIN_PAPER_ROUND_TRIPS
     && failedCloses === 0
     && duplicateIntentBlocks === 0
     && safetyLockEvents === 0
@@ -1311,7 +1323,12 @@ function autoTraderEvidence(fleet) {
     && oneOpenPositionRespected;
   return {
     shadowEvaluations,
-    paperRoundTrips,
+    autoShadowEvaluations,
+    paperRoundTrips: autoPaperRoundTrips, // alias for UI compatibility if needed, but prefer strict strict auto paper
+    autoPaperRoundTrips,
+    manualPaperRoundTrips,
+    rejectedEvidenceSamples,
+    evidenceSourceVersion,
     failedCloses,
     duplicateIntentBlocks,
     safetyLockEvents,
@@ -1611,6 +1628,13 @@ function mapClosedTrade(p) {
     netPnl: _num(p.netPnl),
     pnlIsNet: p.pnlIsNet === true,
     mode: p.mode === 'live_spot' ? 'live_spot' : 'testnet',
+    realProductionOrder: p.realProductionOrder === true,
+    source: p.source || null,
+    intentSource: p.intentSource || null,
+    autoMode: p.autoMode || null,
+    autoStrategyVersion: p.autoStrategyVersion || null,
+    autoDecisionId: p.autoDecisionId || null,
+    autoIdempotencyKey: p.autoIdempotencyKey || null,
   };
 }
 
@@ -2025,7 +2049,7 @@ function autoControlForSession(fleet, session) {
     entriesPaused: persisted.entriesPaused === true,
     cooldownUntil: persisted.cooldownUntil || null,
     evalIntervalMs: AUTO_EVAL_INTERVAL_MS,
-    buyScoreThreshold: AUTO_BUY_SCORE_THRESHOLD,
+    buyScoreThreshold: status.effectiveMode === 'paper' ? AUTO_PAPER_BUY_SCORE_THRESHOLD : AUTO_BUY_SCORE_THRESHOLD,
     liveAllowedSymbols: caps.allowedSymbols,
     caps,
     regime: fleet.lastRegime || null,
@@ -2190,6 +2214,8 @@ async function handleFleetWorker(req, base, body) {
     const mode = String(body.mode || '').toLowerCase();
     const symbol = String(body.symbol || '').toUpperCase().slice(0, 24);
     const positionUsd = Number(body.positionUsd);
+    const autoStrategyVersion = String(body.strategyVersion || body.autoStrategyVersion || '').slice(0, 80);
+    const autoDecisionId = String(body.decisionId || body.autoDecisionId || '').slice(0, 80);
     if (!sessionId || !idempotencyKey) return json(req, { ok: false, error: 'sessionId and idempotencyKey are required' }, 400);
     if (!['BUY', 'CLOSE'].includes(action)) return json(req, { ok: false, error: 'action must be BUY or CLOSE' }, 400);
     return await mutateFleet(async (fleet) => {
@@ -2255,6 +2281,10 @@ async function handleFleetWorker(req, base, body) {
           mode: 'testnet',
           autoMode: 'paper',
           source: 'auto-trader',
+          intentSource: 'auto_trader',
+          autoStrategyVersion,
+          autoDecisionId,
+          autoIdempotencyKey: idempotencyKey,
           symbol,
           side: 'BUY',
           type: 'MARKET',
@@ -2315,6 +2345,10 @@ async function handleFleetWorker(req, base, body) {
           mode: 'live_spot',
           autoMode: 'live_spot',
           source: 'auto-trader',
+          intentSource: 'auto_trader',
+          autoStrategyVersion,
+          autoDecisionId,
+          autoIdempotencyKey: idempotencyKey,
           symbol,
           side: 'BUY',
           type: 'MARKET',
@@ -2604,6 +2638,12 @@ async function handleFleetWorker(req, base, body) {
       mode: body.mode === 'live_spot' ? 'live_spot' : 'testnet',
       testnet: body.mode !== 'live_spot',
       realProductionOrder: body.realProductionOrder === true,
+      source: typeof body.source === 'string' ? body.source.slice(0, 80) : null,
+      intentSource: typeof body.intentSource === 'string' ? body.intentSource.slice(0, 80) : null,
+      autoMode: typeof body.autoMode === 'string' ? body.autoMode.slice(0, 80) : null,
+      autoStrategyVersion: typeof body.autoStrategyVersion === 'string' ? body.autoStrategyVersion.slice(0, 120) : null,
+      autoDecisionId: typeof body.autoDecisionId === 'string' ? body.autoDecisionId.slice(0, 120) : null,
+      autoIdempotencyKey: typeof body.autoIdempotencyKey === 'string' ? body.autoIdempotencyKey.slice(0, 200) : null,
       receivedAt: new Date().toISOString(),
     };
     if (!session && OPEN_POSITION_STATUSES.has(record.status)) {

@@ -6429,8 +6429,9 @@ function renderFleet() {
     + '<div><span>Risk blocks</span>' + (autoBlocksView.length ? '<ul>' + autoBlocksView.map((b) => '<li>' + _esc((b.code ? b.code + ': ' : '') + (b.reason || b)) + '</li>').join('') + '</ul>' : '<p>none reported</p>') + '</div>'
     + '<div><span>Live risk blocks</span>' + (autoLiveBlocks.length ? '<ul>' + autoLiveBlocks.map((b) => '<li>' + _esc((b.code ? b.code + ': ' : '') + (b.reason || b)) + '</li>').join('') + '</ul>' : '<p>none reported</p>') + '</div>'
     + '<div><span>Evidence state</span><ul>'
-      + '<li>Shadow evaluations: ' + _esc(autoEvidence.shadowEvaluations != null ? autoEvidence.shadowEvaluations : 0) + '/20</li>'
-      + '<li>Paper round-trips: ' + _esc(autoEvidence.paperRoundTrips != null ? autoEvidence.paperRoundTrips : 0) + '/5</li>'
+      + '<li>Shadow evaluations: ' + _esc(autoEvidence.autoShadowEvaluations != null ? autoEvidence.autoShadowEvaluations : (autoEvidence.shadowEvaluations || 0)) + '/20</li>'
+      + '<li>Auto Paper round-trips: ' + _esc(autoEvidence.autoPaperRoundTrips != null ? autoEvidence.autoPaperRoundTrips : (autoEvidence.paperRoundTrips || 0)) + '/5</li>'
+      + '<li>Manual (excluded) Paper round-trips: ' + _esc(autoEvidence.manualPaperRoundTrips != null ? autoEvidence.manualPaperRoundTrips : 0) + '</li>'
       + '<li>Failed closes: ' + _esc(autoEvidence.failedCloses != null ? autoEvidence.failedCloses : 0) + '</li>'
       + '<li>Duplicate blocks: ' + _esc(autoEvidence.duplicateIntentBlocks != null ? autoEvidence.duplicateIntentBlocks : 0) + '</li>'
       + '<li>Safety locks: ' + _esc(autoEvidence.safetyLockEvents != null ? autoEvidence.safetyLockEvents : 0) + '</li>'
@@ -6439,16 +6440,21 @@ function renderFleet() {
     + diagnosticsHtml
     + '</div>'
     + (auto.liveExecutionAllowed ? '' : '<div class="fleet-auto-trader__locked">' + (auto.effectiveMode === 'shadow' ? 'Shadow observation active. Live promotion locked: missing ' : (auto.mode === 'live_spot' ? 'Live auto locked: missing ' : 'Live promotion locked: missing ')) + _esc((auto.liveGateMissing || []).join(', ') || 'required gates') + '</div>')
-    + (data.isAdmin ? '<div class="fleet-live-readiness__confirm">'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="setAutoTraderMode(\'shadow\')"' + (auto.effectiveMode === 'shadow' ? ' disabled title="Shadow Auto is already active"' : '') + '>Enable Shadow Auto</button>'
-      + '<button type="button" class="paperbot-control-btn" onclick="setAutoTraderMode(\'off\')">Disable Auto</button>'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="setAutoTraderMode(\'paper\')">Promote to Paper</button>'
-      + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openPromoteAutoLiveModal()"' + (autoCanPromoteLive ? '' : ' disabled title="' + _esc(autoPromoteTitle) + '"') + '>Promote to Live</button>'
-      + '<button type="button" class="paperbot-control-btn" onclick="setAutoEntriesPaused(true)"' + (auto.entriesPaused ? ' disabled' : '') + '>Pause Auto Entries</button>'
-      + '<button type="button" class="paperbot-control-btn" onclick="setAutoEntriesPaused(false)"' + (!auto.entriesPaused ? ' disabled' : '') + '>Resume Auto Entries</button>'
-      + '<button type="button" class="paperbot-control-btn" onclick="forceShadowAutoTick()">Force Shadow Tick</button>'
-      + '</div>' : '')
+    + (data.isAdmin ? (() => {
+        const autoCanPromotePaper = (autoEvidence.autoShadowEvaluations != null ? autoEvidence.autoShadowEvaluations : (autoEvidence.shadowEvaluations || 0)) >= 20;
+        const paperPromoteTitle = autoCanPromotePaper ? 'Promote to Paper' : 'Requires 20 shadow evaluations before paper mode.';
+        return '<div class="fleet-live-readiness__confirm">'
+          + '<button type="button" class="paperbot-control-btn paperbot-control-btn--start" onclick="setAutoTraderMode(\'shadow\')"' + (auto.effectiveMode === 'shadow' ? ' disabled title="Shadow Auto is already active"' : '') + '>Enable Shadow Auto</button>'
+          + '<button type="button" class="paperbot-control-btn" onclick="setAutoTraderMode(\'off\')">Disable Auto</button>'
+          + '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="setAutoTraderMode(\'paper\')"' + (autoCanPromotePaper ? '' : ' disabled title="' + _esc(paperPromoteTitle) + '"') + '>Promote to Paper</button>'
+          + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openPromoteAutoLiveModal()"' + (autoCanPromoteLive ? '' : ' disabled title="' + _esc(autoPromoteTitle) + '"') + '>Promote to Live</button>'
+          + '<button type="button" class="paperbot-control-btn" onclick="setAutoEntriesPaused(true)"' + (auto.entriesPaused ? ' disabled' : '') + '>Pause Auto Entries</button>'
+          + '<button type="button" class="paperbot-control-btn" onclick="setAutoEntriesPaused(false)"' + (!auto.entriesPaused ? ' disabled' : '') + '>Resume Auto Entries</button>'
+          + '<button type="button" class="paperbot-control-btn" onclick="forceShadowAutoTick()">Force Shadow Tick</button>'
+          + '</div>';
+      })() : '')
     + '</div>';
+
 
   if (!newEntriesAllowed) {
     html += '<div class="fleet-error-panel fleet-error-panel--danger">'
