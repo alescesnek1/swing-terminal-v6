@@ -6365,7 +6365,9 @@ function renderFleet() {
     + '<div><span>Mode</span><b>' + _esc(auto.status || 'OFF') + '</b></div>'
     + '<div><span>Candidate</span><b>' + _esc(autoCandidate.symbol || '--') + '</b></div>'
     + '<div><span>Score</span><b>' + (auto.score != null ? _esc(auto.score) : (autoCandidate.score != null ? _esc(autoCandidate.score) : '--')) + '</b></div>'
-    + '<div><span>Data source</span><b>' + _esc(auto.dataSource || (auto.universeDiagnostics && auto.universeDiagnostics.dataSource) || '--') + '</b></div>'
+    + '<div><span>Decision</span><b>' + _esc(auto.decisionReason || auto.action || '--') + '</b></div>'
+    + '<div><span>Score Gap</span><b>' + (auto.scoreGap != null ? _esc(auto.scoreGap.toFixed(1)) : '--') + '</b></div>'
+    + '<div><span>Data source</span><b>' + _esc(auto.dataSource || (auto.diagnostics && auto.diagnostics.dataSource) || '--') + '</b></div>'
     + '<div><span>Snapshot age</span><b>' + _esc(autoSnapshotText) + '</b></div>'
     + '<div><span>Daily trades</span><b>' + _esc((auto.dailyTradesUsed != null ? auto.dailyTradesUsed : (live.dailyTradesUsed || 0)) + '/' + (auto.maxDailyTrades != null ? auto.maxDailyTrades : (liveCaps.maxDailyTrades || '--'))) + '</b></div>'
     + '<div><span>Remaining</span><b>' + _esc(auto.dailyTradesRemaining != null ? auto.dailyTradesRemaining : (live.dailyTradesRemaining != null ? live.dailyTradesRemaining : '--')) + '</b></div>'
@@ -6379,49 +6381,41 @@ function renderFleet() {
     + '</div>';
     
   let diagnosticsHtml = '';
-  if (auto.universeDiagnostics) {
-    const ud = auto.universeDiagnostics;
+  if (auto.diagnostics || auto.universeDiagnostics) {
+    const ud = auto.diagnostics || auto.universeDiagnostics;
     const isFallback = ud.fallbackUsed || ud.dataSource === 'fallback';
     const fetchErrorHtml = ud.fetchError ? '<li style="color:var(--rd);">Fetch Error: ' + _esc(ud.fetchError) + '</li>' : '';
 
-    // Local worker public snapshot freshness. snapshotAgeSec is shown whenever the
-    // snapshot fed the evaluation; a stale snapshot is called out explicitly.
     const snapshotAgeSec = (ud.snapshotAgeMs != null && isFinite(ud.snapshotAgeMs)) ? Math.round(ud.snapshotAgeMs / 1000) : null;
     let snapshotHtml = '';
     if (ud.dataSource === 'local_worker_binance_public' || ud.snapshotUsed) {
       snapshotHtml = '<li>Worker snapshot age: <b>' + (snapshotAgeSec != null ? snapshotAgeSec + 's' : '--') + '</b></li>';
     } else if (ud.publicFetchAttempted) {
-      // The snapshot was consulted (scanner empty) but unusable.
       snapshotHtml = snapshotAgeSec != null
         ? '<li style="color:var(--yw);">Worker snapshot stale (' + snapshotAgeSec + 's old)</li>'
         : '<li style="color:var(--yw);">Worker snapshot missing</li>';
     }
 
-    const pubFetchHtml = ud.publicFetchAttempted ? '<li style="color:var(--yw);">Public Fetch: ' + (ud.publicFetchOk ? 'OK (' + ud.publicFetchCount + ' in ' + ud.publicFetchMs + 'ms)' : 'FAILED (' + ud.publicFetchMs + 'ms)') + '</li>' : '';
-    const pubFetchErrorHtml = ud.publicFetchError ? '<li style="color:var(--rd);">Public Fetch Error: ' + _esc(ud.publicFetchError) + '</li>' : '';
     const fallbackReasonHtml = (isFallback && ud.fallbackReason) ? '<li style="color:var(--rd);">Fallback: ' + _esc(ud.fallbackReason) + '</li>' : '';
-    const rejectedSamplesHtml = (Array.isArray(ud.rejectedSamples) && ud.rejectedSamples.length)
-      ? '<li>Rejected: ' + ud.rejectedSamples.slice(0, 3).map(function (r) { return _esc((r.symbol || '?') + ' (' + (r.reason || '?') + ')'); }).join(', ') + (ud.rejectedSamples.length > 3 ? ' +' + (ud.rejectedSamples.length - 3) + ' more' : '') + '</li>'
+    const newDiagnostics = ud.scoringVersion === 'auto-scorer-v2' 
+      ? `<li>V2 Scorer (History: ${ud.historySamples || 0} samples${ud.historyWarmup ? ', warmup' : ''})</li>
+         <li>Excluded Cooldown: ${ud.excludedCooldown || 0}</li>
+         <li>Excluded Leveraged: ${ud.excludedLeveraged || 0}</li>
+         <li>Excluded Low Liquidity: ${ud.excludedLowLiquidity || 0}</li>
+         <li>Excluded Wide Spread: ${ud.excludedWideSpread || 0}</li>`
       : '';
 
     diagnosticsHtml = '<div><span>Diagnostics</span><ul>'
       + '<li>Source: <b>' + _esc(ud.dataSource) + '</b>' + (isFallback ? ' <span style="color:var(--rd);">(FALLBACK)</span>' : '') + '</li>'
       + snapshotHtml
-      + pubFetchHtml
-      + pubFetchErrorHtml
       + fetchErrorHtml
       + fallbackReasonHtml
-      + '<li>Fetched: ' + ud.fetchedSymbols + '</li>'
-      + '<li>USDC: ' + ud.usdcSymbols + '</li>'
-      + '<li>Liquid: ' + ud.liquidSymbols + '</li>'
-      + '<li>Spread OK: ' + ud.spreadPassed + '</li>'
-      + '<li>Allowlist OK: ' + ud.allowlistPassed + '</li>'
-      + rejectedSamplesHtml
+      + '<li>Fetched: ' + (ud.fetched || ud.fetchedSymbols || 0) + '</li>'
+      + '<li>USDC: ' + (ud.usdc || ud.usdcSymbols || 0) + '</li>'
+      + '<li>Liquid: ' + (ud.liquid || ud.liquidSymbols || 0) + '</li>'
+      + '<li>Spread OK: ' + (ud.spreadOk || ud.spreadPassed || 0) + '</li>'
+      + newDiagnostics
       + '</ul></div>';
-
-    if (isFallback && autoReasons.length > 0 && autoReasons[0].indexOf('no candidate') !== -1) {
-       autoReasons[0] = 'No candidate because scanner universe was fully filtered (see diagnostics).';
-    }
   }
 
   html += '<div class="fleet-auto-trader__cols">'
@@ -6438,7 +6432,27 @@ function renderFleet() {
       + '<li>Passed: ' + _esc(autoEvidence.passed ? 'yes' : 'no') + '</li>'
     + '</ul></div>'
     + diagnosticsHtml
-    + '</div>'
+    + '</div>';
+    
+  if (Array.isArray(auto.candidates) && auto.candidates.length) {
+    html += '<div class="fleet-auto-trader__leaderboard">'
+      + '<div><span>Candidate Leaderboard</span><table style="width:100%;text-align:left;font-size:0.8rem;border-collapse:collapse;"><thead>'
+      + '<tr style="border-bottom:1px solid #333;"><th>Rank</th><th>Symbol</th><th>Score</th><th>Components</th><th>Cooldown</th><th>Decision</th></tr>'
+      + '</thead><tbody>'
+      + auto.candidates.map(c => {
+          let cdTxt = c.cooldownBlocked ? (c.cooldownRemainingMs ? Math.round(c.cooldownRemainingMs/1000)+'s' : 'BLOCKED') : '--';
+          let rowColor = c.selected ? 'color: var(--gn);' : '';
+          return `<tr style="border-bottom:1px solid #222; ${rowColor}">
+            <td>${c.rank}</td>
+            <td><b>${_esc(c.symbol)}</b> ${c.selected ? '✓' : ''}</td>
+            <td>${c.score != null ? c.score : '--'}</td>
+            <td><small style="opacity:0.7">Liq:${c.liquidityScore||0} Spr:${c.spreadScore||0} Mom:${c.momentumScore||0} Vol:${c.volatilityScore||0} Trd:${c.trendScore||0} Reg:${c.regimeScore||0}</small></td>
+            <td>${cdTxt}</td>
+            <td><small>${_esc(c.decisionReason || 'NONE')}</small></td>
+          </tr>`;
+        }).join('')
+      + '</tbody></table></div></div>';
+  }
     + (auto.liveExecutionAllowed ? '' : '<div class="fleet-auto-trader__locked">' + (auto.effectiveMode === 'shadow' ? 'Shadow observation active. Live promotion locked: missing ' : (auto.mode === 'live_spot' ? 'Live auto locked: missing ' : 'Live promotion locked: missing ')) + _esc((auto.liveGateMissing || []).join(', ') || 'required gates') + '</div>')
     + (data.isAdmin ? (() => {
         const autoCanPromotePaper = (autoEvidence.autoShadowEvaluations != null ? autoEvidence.autoShadowEvaluations : (autoEvidence.shadowEvaluations || 0)) >= 20;

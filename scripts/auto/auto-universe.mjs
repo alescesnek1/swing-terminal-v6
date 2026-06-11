@@ -57,6 +57,15 @@ export function buildUniverse({
     allowlistPassed: 0,
     fallbackUsed: false,
     fallbackReason: null,
+    
+    // New granular diagnostics
+    fetched: markets.length,
+    usdc: 0,
+    liquid: 0,
+    spreadOk: 0,
+    excludedLeveraged: 0,
+    excludedLowLiquidity: 0,
+    excludedWideSpread: 0,
   };
 
   for (const m of markets) {
@@ -66,8 +75,16 @@ export function buildUniverse({
     const base = baseAssetOf(m);
     
     // Spot-only / non-leveraged.
-    if (LEVERAGE_TOKEN_RE.test(base) || LEVERAGE_TOKEN_RE.test(symbol)) { reject(symbol, 'leveraged token'); continue; }
-    if (m && (m.leveraged === true || m.isLeveraged === true)) { reject(symbol, 'leveraged token'); continue; }
+    if (LEVERAGE_TOKEN_RE.test(base) || LEVERAGE_TOKEN_RE.test(symbol)) { 
+      reject(symbol, 'leveraged token'); 
+      diagnostics.excludedLeveraged++;
+      continue; 
+    }
+    if (m && (m.leveraged === true || m.isLeveraged === true)) { 
+      reject(symbol, 'leveraged token'); 
+      diagnostics.excludedLeveraged++;
+      continue; 
+    }
     diagnostics.afterLeverageFilter++;
 
     // Delisted / not trading.
@@ -77,15 +94,26 @@ export function buildUniverse({
     // Quote asset gate (live MUST be USDC).
     if (quote !== requireQuote) { reject(symbol, `quote ${quote || '?'} != ${requireQuote}`); continue; }
     diagnostics.usdcSymbols++;
+    diagnostics.usdc++;
 
     // Liquidity / spread.
     const vol = Number(m && (m.volume24hUsd != null ? m.volume24hUsd : m.quoteVolume24h));
-    if (!(Number.isFinite(vol) && vol >= f.minVolume24hUsd)) { reject(symbol, `low volume (${Number.isFinite(vol) ? vol : 'n/a'} < ${f.minVolume24hUsd})`); continue; }
+    if (!(Number.isFinite(vol) && vol >= f.minVolume24hUsd)) { 
+      reject(symbol, `low volume (${Number.isFinite(vol) ? vol : 'n/a'} < ${f.minVolume24hUsd})`); 
+      diagnostics.excludedLowLiquidity++;
+      continue; 
+    }
     diagnostics.liquidSymbols++;
+    diagnostics.liquid++;
     
     const spread = Number(m && m.spreadPct);
-    if (Number.isFinite(spread) && spread > f.maxSpreadPct) { reject(symbol, `wide spread (${spread} > ${f.maxSpreadPct})`); continue; }
+    if (Number.isFinite(spread) && spread > f.maxSpreadPct) { 
+      reject(symbol, `wide spread (${spread} > ${f.maxSpreadPct})`); 
+      diagnostics.excludedWideSpread++;
+      continue; 
+    }
     diagnostics.spreadPassed++;
+    diagnostics.spreadOk++;
 
     // Live allowlist intersection — the hard symbol boundary for live trading.
     if (mode === 'live_spot' && !allow.has(symbol)) { reject(symbol, 'not in live allowlist'); continue; }

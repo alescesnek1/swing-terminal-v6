@@ -96,6 +96,9 @@ export function createAutoLoop({
   let lastResult = null;
   let localCooldownUntil = 0; // belt & braces: backend cooldown is authoritative
 
+  let historyBuffer = []; // { t, markets: { symbol -> { price } } }
+  let candidateCooldowns = {}; // symbol -> epoch ms
+
   const intervalMs = (() => {
     const n = Number(evalIntervalMs != null ? evalIntervalMs : env.AUTO_EVAL_INTERVAL_MS);
     return Number.isFinite(n) && n >= 5000 ? n : DEFAULT_AUTO_EVAL_INTERVAL_MS;
@@ -231,6 +234,52 @@ export function createAutoLoop({
       const markets = snapshot ? marketsFromSnapshot(snapshot) : [];
       const gates = control.gates || {};
 
+      // 1. Maintain Rolling History
+      const maxHistoryCount = Number(env.AUTO_MARKET_HISTORY_SNAPSHOTS) > 0 ? Number(env.AUTO_MARKET_HISTORY_SNAPSHOTS) : 30;
+      if (markets.length > 0) {
+        const symbolMap = {};
+        for (const m of markets) symbolMap[m.symbol] = { p: Number(m.lastPrice || m.price || m.markPrice || 0) };
+        historyBuffer.push({ t: tNow, markets: symbolMap });
+        if (historyBuffer.length > maxHistoryCount) historyBuffer.shift();
+      }
+
+      // Compute history metrics for the scorer
+      const historyMetricsMap = {};
+      const historyWarmup = historyBuffer.length < Math.min(10, maxHistoryCount); // require at least ~10 samples for non-warmup
+      
+      if (!historyWarmup && markets.length > 0) {
+        const oldest = historyBuffer[0];
+        for (const m of markets) {
+          const sym = m.symbol;
+          const currentP = Number(m.lastPrice || m.price || m.markPrice || 0);
+          if (currentP > 0 && oldest.markets[sym] && oldest.markets[sym].p > 0) {
+            const oldP = oldest.markets[sym].p;
+            const pct = (currentP - oldP) / oldP;
+            // Map trend percentage (-5% to +5% over the window) to 0-1
+            let trendScorePct = (pct * 100 + 5) / 10;
+            trendScorePct = Math.max(0, Math.min(1, trendScorePct));
+            
+            // Approximate real volatility (diff between min/max in buffer)
+            let minP = currentP, maxP = currentP;
+            for (const h of historyBuffer) {
+              const hp = h.markets[sym]?.p;
+              if (hp > 0) {
+                if (hp < minP) minP = hp;
+                if (hp > maxP) maxP = hp;
+              }
+            }
+            const volatilityPct = ((maxP - minP) / minP) * 100;
+            
+            historyMetricsMap[sym] = { trendScorePct, volatilityPct };
+          }
+        }
+      }
+
+      // Clean up old cooldowns
+      for (const sym of Object.keys(candidateCooldowns)) {
+        if (tNow >= candidateCooldowns[sym]) delete candidateCooldowns[sym];
+      }
+
       const out = evaluateAutoTrader({
         env: evalEnvFor(control),
         markets,
@@ -253,6 +302,11 @@ export function createAutoLoop({
         },
         threshold: Number(control.buyScoreThreshold) > 0 ? Number(control.buyScoreThreshold) : (Number(env.AUTO_BUY_SCORE_THRESHOLD) > 0 ? Number(env.AUTO_BUY_SCORE_THRESHOLD) : 60),
         cooldownUntil,
+        cooldowns: candidateCooldowns,
+        cooldownOverrideGap: Number(env.AUTO_SYMBOL_COOLDOWN_OVERRIDE_SCORE_GAP) > 0 ? Number(env.AUTO_SYMBOL_COOLDOWN_OVERRIDE_SCORE_GAP) : 12,
+        historyMetricsMap,
+        historyWarmup,
+        leaderboardSize: Number(env.AUTO_CANDIDATE_LEADERBOARD_SIZE) > 0 ? Number(env.AUTO_CANDIDATE_LEADERBOARD_SIZE) : 10,
         sessionId,
         now: tNow,
         dataSource: snapshot ? 'local_worker_binance_public' : 'none',
@@ -283,15 +337,19 @@ export function createAutoLoop({
         sessionId,
         action: mappedAction,
         decision: mappedAction,
+        decisionReason: out.decisionReason || 'no_candidate',
+        scoreGap: out.scoreGap,
         mode: control.mode,
         effectiveMode: mode,
         candidate: out.candidate,
+        candidates: out.candidates || [],
         score: out.candidate ? out.candidate.score : null,
         reasons: out.reasons || [],
         riskBlocks: [...(out.blocks || []), ...extraBlocks],
         liveRiskBlocks,
         positionMgmt: { state: 'flat' },
         dataSource: (out.diagnostics && out.diagnostics.dataSource) || (snapshot ? 'local_worker_binance_public' : 'none'),
+        diagnostics: out.diagnostics,
         snapshotAgeMs,
         strategyVersion: AUTO_STRATEGY_VERSION,
         cooldownUntil: cooldownUntil || null,
@@ -299,6 +357,12 @@ export function createAutoLoop({
         universeSize: out.universeSize,
       };
       const posted = await safePostDecision(decisionPayload);
+
+      // Register cooldown for the selected candidate if we decided to interact
+      if (out.candidate && out.candidate.symbol && mappedAction !== 'NONE' && mappedAction !== 'BLOCKED') {
+        const symbolCooldownMs = Number(env.AUTO_SYMBOL_COOLDOWN_MS) > 0 ? Number(env.AUTO_SYMBOL_COOLDOWN_MS) : 300000;
+        candidateCooldowns[out.candidate.symbol] = tNow + symbolCooldownMs;
+      }
 
       // Intent creation: paper/live ONLY, never shadow, never while blocked, and
       // never when the decision post itself failed (backend connectivity gate).

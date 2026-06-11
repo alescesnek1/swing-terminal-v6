@@ -7,27 +7,91 @@ import { evaluateExit } from './auto-exit-manager.mjs';
 
 export const DEFAULT_ENTRY_THRESHOLD = 60;
 
-// Decide whether to enter. Returns { action:'BUY'|'NONE', symbol, score, positionUsd, reasons }.
-// Never returns BUY when entries are disallowed (regime / flag) or the top score is
-// below threshold or the candidate carries a hard risk flag (blacklist/cooldown).
+// Decide whether to enter. Returns { action:'BUY'|'NONE', symbol, score, positionUsd, reasons, decisionReason, scoreGap }.
 export function decideEntry({
   scored = [],
   threshold = DEFAULT_ENTRY_THRESHOLD,
   regime = null,
   allowEntries = true,
+  cooldownOverrideGap = 12,
 } = {}) {
   const reasons = [];
-  if (allowEntries === false) return { action: 'NONE', reasons: ['entries disabled'] };
-  if (regime && regime.entriesAllowed === false) return { action: 'NONE', reasons: ['regime blocks entries'] };
-  const top = (scored || [])[0] || null;
-  if (!top) return { action: 'NONE', reasons: ['no candidate'] };
-  const hardFlags = (top.riskFlags || []).filter((f) => f === 'blacklisted' || f === 'cooldown' || f === 'regime risk-off');
-  if (hardFlags.length) return { action: 'NONE', symbol: top.symbol, score: top.score, reasons: [`risk flags: ${hardFlags.join(', ')}`] };
-  if (!(Number(top.score) >= Number(threshold))) {
-    return { action: 'NONE', symbol: top.symbol, score: top.score, reasons: [`score ${top.score} < threshold ${threshold}`] };
+  
+  if (allowEntries === false) {
+    return { action: 'NONE', decisionReason: 'entries_disabled', reasons: ['entries disabled'] };
   }
+  if (regime && regime.entriesAllowed === false) {
+    return { action: 'NONE', decisionReason: 'regime_risk_off', reasons: ['regime blocks entries'] };
+  }
+  if (!scored || scored.length === 0) {
+    return { action: 'NONE', decisionReason: 'no_candidate', reasons: ['no candidate'] };
+  }
+
+  // 1. Pick selected candidate from the leaderboard after applying cooldown rules
+  let top = scored[0];
+  let runnerUp = null;
+  let scoreGap = null;
+  let limitedUniverse = false;
+
+  if (scored.length === 1) {
+    limitedUniverse = true;
+  } else {
+    // Find the best non-cooldown candidate to compare against
+    for (let i = 1; i < scored.length; i++) {
+      if (!scored[i].cooldownBlocked) {
+        runnerUp = scored[i];
+        break;
+      }
+    }
+    
+    // If top is cooling down, check if it beats runner-up by more than override gap
+    if (top.cooldownBlocked) {
+      if (runnerUp) {
+        scoreGap = top.score - runnerUp.score;
+        if (scoreGap <= cooldownOverrideGap) {
+          // Top didn't beat runner up by enough, fallback to runnerUp
+          reasons.push(`Top candidate ${top.symbol} cooled down and gap (${scoreGap}) <= ${cooldownOverrideGap}. Falling back to runner-up ${runnerUp.symbol}`);
+          top = runnerUp;
+          // Runner-up's gap to its next best isn't computed here, but that's fine
+        } else {
+          reasons.push(`Top candidate ${top.symbol} cooled down but beats runner-up by ${scoreGap} > ${cooldownOverrideGap}. Overriding cooldown.`);
+        }
+      } else {
+        // No non-cooldown runner ups at all
+        reasons.push(`Top candidate ${top.symbol} cooled down but no viable runner-ups available. Keeping top.`);
+      }
+    }
+  }
+
+  if (limitedUniverse) {
+    reasons.push('limited universe (only 1 eligible symbol)');
+  }
+
+  const hardFlags = (top.riskFlags || []).filter((f) => f === 'blacklisted' || f === 'regime risk-off');
+  if (hardFlags.length) {
+    return { 
+      action: 'NONE', symbol: top.symbol, score: top.score, 
+      decisionReason: hardFlags.includes('regime risk-off') ? 'regime_risk_off' : 'blacklisted', 
+      reasons: [...reasons, `risk flags: ${hardFlags.join(', ')}`],
+      scoreGap, limitedUniverse,
+    };
+  }
+
+  if (!(Number(top.score) >= Number(threshold))) {
+    return { 
+      action: 'NONE', symbol: top.symbol, score: top.score, 
+      decisionReason: 'score_below_threshold', 
+      reasons: [...reasons, `score ${top.score} < threshold ${threshold}`],
+      scoreGap: (threshold - top.score), // gap to threshold
+      limitedUniverse,
+    };
+  }
+  
   reasons.push(`score ${top.score} >= threshold ${threshold}`, ...(top.reasons || []));
-  return { action: 'BUY', symbol: top.symbol, score: top.score, positionUsd: top.recommendedPositionUsd, reasons };
+  return { 
+    action: 'BUY', symbol: top.symbol, score: top.score, positionUsd: top.recommendedPositionUsd, 
+    decisionReason: 'BUY', reasons, scoreGap, limitedUniverse 
+  };
 }
 
 // Build a backend-shaped entry intent. In shadow mode NO intent is produced (returns
