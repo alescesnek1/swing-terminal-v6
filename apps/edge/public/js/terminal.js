@@ -6453,7 +6453,8 @@ function renderFleet() {
         }).join('')
       + '</tbody></table></div></div>';
   }
-    + (auto.liveExecutionAllowed ? '' : '<div class="fleet-auto-trader__locked">' + (auto.effectiveMode === 'shadow' ? 'Shadow observation active. Live promotion locked: missing ' : (auto.mode === 'live_spot' ? 'Live auto locked: missing ' : 'Live promotion locked: missing ')) + _esc((auto.liveGateMissing || []).join(', ') || 'required gates') + '</div>')
+  
+  html += (auto.liveExecutionAllowed ? '' : '<div class="fleet-auto-trader__locked">' + (auto.effectiveMode === 'shadow' ? 'Shadow observation active. Live promotion locked: missing ' : (auto.mode === 'live_spot' ? 'Live auto locked: missing ' : 'Live promotion locked: missing ')) + _esc((auto.liveGateMissing || []).join(', ') || 'required gates') + '</div>')
     + (data.isAdmin ? (() => {
         const autoCanPromotePaper = (autoEvidence.autoShadowEvaluations != null ? autoEvidence.autoShadowEvaluations : (autoEvidence.shadowEvaluations || 0)) >= 20;
         const paperPromoteTitle = autoCanPromotePaper ? 'Promote to Paper' : 'Requires 20 shadow evaluations before paper mode.';

@@ -78,7 +78,7 @@ test('3. shadow mode never creates any execution intent and evaluates despite da
   // Pass NO live env variables (AUTO_LIVE_TRADING_ENABLED is missing), and daily cap is exhausted
   const out = evaluateAutoTrader({ env: { AUTO_TRADER_ENABLED: 'true', AUTO_TRADER_MODE: 'shadow' }, markets, caps: CAPS, fleet: { ...HEALTHY_FLEET, dailyTradesUsed: 2 }, threshold: 1, sessionId: 'sess_1', regime: { regime: 'RISK_ON', entriesAllowed: true } });
   assert.equal(out.mode, 'shadow');
-  assert.equal(out.decision, 'SHADOW_BUY');
+  assert.equal(out.decision, 'SHADOW_BUY_SIGNAL');
   assert.equal(out.intent, null, 'shadow emits no intent');
   assert.ok(out.candidate, 'shadow candidate is evaluated even when daily cap exhausted and live gates missing');
   assert.ok(out.blocks.some(b => b.code === 'DAILY_TRADES_CAP'), 'daily cap block is recorded for shadow');
@@ -100,7 +100,7 @@ test('3b. shadow tick with empty scanner data falls back to BTCUSDC with FALLBAC
   });
   
   assert.equal(out.mode, 'shadow');
-  assert.equal(out.decision, 'SHADOW_BUY');
+  assert.equal(out.decision, 'SHADOW_BUY_SIGNAL');
   assert.ok(out.candidate, 'fallback candidate is generated');
   assert.equal(out.candidate.symbol, 'BTCUSDC', 'fallback uses allowed symbol');
   assert.ok(out.candidate.riskFlags.includes('FALLBACK_ALLOWLIST_SYMBOL'), 'fallback risk flag is set');

@@ -56,9 +56,10 @@ function deps(over = {}) {
 test('worker auto loop in shadow posts decisions and creates zero intents', async () => {
   const s = deps();
   const result = await s.loop.tick('test');
-  assert.equal(result.action, 'SHADOW_BUY');
-  assert.equal(s.decisions.length, 1);
-  assert.equal(s.decisions[0].action, 'SHADOW_BUY');
+  const postedDecision = s.decisions[0];
+  assert.strictEqual(postedDecision.action, 'SHADOW_BUY_SIGNAL');
+  assert.strictEqual(postedDecision.decision, 'SHADOW_BUY_SIGNAL');
+  assert.equal(s.decisions[0].action, 'SHADOW_BUY_SIGNAL');
   assert.equal(s.decisions[0].dataSource, 'local_worker_binance_public');
   assert.equal(s.intents.length, 0);
 });

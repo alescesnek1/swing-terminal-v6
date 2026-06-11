@@ -182,7 +182,7 @@ test('fresh local worker snapshot is used before the Netlify public fetch (shado
   assert.ok(out.diagnostics.usdcSymbols >= 2);
   assert.ok(out.candidate, 'candidate from the real USDC universe');
   assert.equal(out.intent, null, 'shadow creates zero live/testnet intents');
-  assert.equal(out.decision, 'SHADOW_BUY');
+  assert.equal(out.decision, 'SHADOW_BUY_SIGNAL');
 });
 
 // ── Spec test 6: stale snapshot is ignored ───────────────────────────────────

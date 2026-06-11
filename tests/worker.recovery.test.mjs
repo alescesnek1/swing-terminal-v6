@@ -23,12 +23,14 @@ const worker = await import('../scripts/local-binance-worker.mjs');
 const {
   workerState, getOpenPositions, hydrateOpenPositionsFromBackend, closeAllPositions,
   executeIntent, handleMissingSession, runStopSequence, STATE_FILE, LOG_FILE, _resetStoppingForTest,
-  sendHeartbeat, tick,
+  sendHeartbeat, tick, _cleanExitState,
 } = worker;
 
 function reset() { 
   workerState.positions.length = 0; 
   _resetStoppingForTest();
+  _cleanExitState.scheduled = false;
+  _cleanExitState.code = null;
 }
 
 // A Binance + control-plane fetch stub. `orderResult(side)` lets callers force
@@ -209,6 +211,8 @@ test('worker-6: STOP closes the open position via MARKET SELL before exiting (ex
   assert.ok(sells.length >= 1);
   assert.equal(getOpenPositions().length, 0);
   assert.equal(process.exitCode, 0); // clean exit after all positions closed
+  assert.equal(_cleanExitState.scheduled, true, 'scheduleCleanExit was invoked');
+  assert.equal(_cleanExitState.code, 0, 'scheduleCleanExit code was 0');
   process.exitCode = prevExit;
 });
 
@@ -235,6 +239,8 @@ test('worker-G4: a failed close keeps the command actionable (position stays ope
   try { allClosed = await closeAllPositions('EMERGENCY'); } finally { global.fetch = origFetch; }
   assert.equal(allClosed, false);
   assert.equal(getOpenPositions().length, 1); // remains so the close command stays relevant on the next poll
+  assert.notEqual(process.exitCode, 0, 'failed close must not cleanly exit');
+  assert.equal(_cleanExitState.scheduled, false, 'failed close must not schedule clean exit');
 });
 
 test('worker-9/10: importing/starting the worker creates its log file and per-session state file', () => {
@@ -257,6 +263,26 @@ test('worker-new-1: STOP sequence hydrates backend openPositions before exiting 
   }
   assert.ok(sells.length >= 1, 'Hydrated position must be sold');
   assert.equal(getOpenPositions().length, 0);
+});
+
+test('worker-new-5: flat STOP clears timers and cleanly exits via scheduleCleanExit', async () => {
+  reset();
+  const prevExit = process.exitCode;
+  process.exitCode = undefined;
+  _cleanExitState.scheduled = false;
+  _cleanExitState.code = null;
+  const origFetch = global.fetch;
+  global.fetch = makeFetchStub();
+  try {
+    await runStopSequence();
+  } finally {
+    global.fetch = origFetch;
+  }
+  assert.equal(getOpenPositions().length, 0);
+  assert.equal(process.exitCode, 0, 'process.exitCode should be 0');
+  assert.equal(_cleanExitState.scheduled, true, 'scheduleCleanExit was invoked');
+  assert.equal(_cleanExitState.code, 0, 'scheduleCleanExit code was 0');
+  process.exitCode = prevExit;
 });
 
 test('worker-new-2: handleMissingSession with 5xx keeps worker alive and does not enter 404 exit sequence', async () => {

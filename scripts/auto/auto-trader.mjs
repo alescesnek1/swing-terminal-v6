@@ -177,7 +177,7 @@ export function evaluateAutoTrader({
 
   // shadow ALWAYS resolves to a hypothetical (no intent), regardless of gates.
   if (mode === 'shadow') {
-    return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'SHADOW_BUY', decisionReason: 'SHADOW_BUY', scoreGap: entry.scoreGap, intent: null, reasons: entry.reasons, diagnostics };
+    return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'SHADOW_BUY_SIGNAL', decisionReason: entry.decisionReason || 'SHADOW_BUY_SIGNAL', scoreGap: entry.scoreGap, intent: null, reasons: entry.reasons, diagnostics };
   }
 
   if (!risk.allowed) {

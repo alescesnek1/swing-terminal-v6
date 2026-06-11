@@ -492,6 +492,21 @@ function finishWorker(code) {
   process.exitCode = code;
 }
 
+export const _cleanExitState = { scheduled: false, code: null };
+
+function scheduleCleanExit(code) {
+  _cleanExitState.scheduled = true;
+  _cleanExitState.code = code;
+  setTimeout(() => {
+    const open = getOpenPositions();
+    if (open.length > 0) {
+      console.log(`[CRITICAL] scheduleCleanExit aborted: ${open.length} positions still open.`);
+      return;
+    }
+    process.exit(code);
+  }, 350); // Allow logs to flush
+}
+
 // Friendly terminal close message. On a clean success the operator should never
 // feel the window is "stuck" — print a plain instruction. The launcher decides
 // whether to actually hold the window (WORKER_HOLD_TERMINAL_ON_EXIT), but the
@@ -1316,6 +1331,7 @@ async function runStopSequence(data) {
       await sendHeartbeat();
       terminalExitNotice(0, 'stop_requested_all_closed');
       finishWorker(0);
+      scheduleCleanExit(0);
       return;
     }
     retries++;
@@ -1376,6 +1392,7 @@ async function handleMissingSession(data) {
     await sendHeartbeat();
     terminalExitNotice(0, 'worker_session_missing_no_open_positions');
     finishWorker(0);
+    scheduleCleanExit(0);
     return;
   }
 }

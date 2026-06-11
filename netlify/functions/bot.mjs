@@ -2024,7 +2024,7 @@ function sanitizeAutoDecisionBody(body) {
   const action = String(body.action || body.decision || 'NONE').toUpperCase();
   return {
     sessionId: String(body.sessionId || '').slice(0, 100),
-    action: ['NONE', 'SHADOW_BUY', 'PAPER_BUY', 'LIVE_BUY', 'CLOSE', 'HOLD', 'SHADOW_CLOSE', 'BLOCKED'].includes(action) ? action : 'NONE',
+    action: ['NONE', 'SHADOW_BUY', 'PAPER_BUY', 'LIVE_BUY', 'CLOSE', 'HOLD', 'SHADOW_CLOSE', 'BLOCKED', 'SHADOW_BUY_SIGNAL'].includes(action) ? action : 'NONE',
     decision: String(body.decision || action).slice(0, 80),
     decisionReason: String(body.decisionReason || 'no_candidate').slice(0, 80),
     scoreGap: Number.isFinite(Number(body.scoreGap)) ? Number(body.scoreGap) : null,
@@ -2048,7 +2048,7 @@ function sanitizeAutoDecisionBody(body) {
 }
 
 function autoDecisionEventType(d) {
-  if (d.mode === 'shadow' || d.action === 'SHADOW_BUY' || d.action === 'SHADOW_CLOSE') return 'AUTO_SHADOW_DECISION';
+  if (d.mode === 'shadow' || d.action === 'SHADOW_BUY' || d.action === 'SHADOW_BUY_SIGNAL' || d.action === 'SHADOW_CLOSE') return 'AUTO_SHADOW_DECISION';
   if (d.mode === 'paper' || d.action === 'PAPER_BUY') return 'AUTO_PAPER_DECISION';
   if (d.action === 'LIVE_BUY') return 'AUTO_LIVE_DECISION_BLOCKED';
   return 'AUTO_SHADOW_DECISION';
@@ -2554,6 +2554,7 @@ async function handleFleetWorker(req, base, body) {
       autoControl: autoControlForSession(fleet, session),
       durable: fleetStoreInfo().durable,
       globalKillSwitchActive: killSwitchActive,
+      stopRequested: session.stopRequested === true,
       entryBlockedReason: entryBlock.entryBlockedReason,
       canAcceptEntryIntent: entryBlock.canAcceptEntryIntent,
       livePreflightFresh: livePreflightFresh(fleet),

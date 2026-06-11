@@ -300,7 +300,10 @@ export function createAutoLoop({
           freeQuote: gates.freeQuote != null ? Number(gates.freeQuote) : null,
           quoteAsset: gates.quoteAsset || 'USDC',
         },
-        threshold: Number(control.buyScoreThreshold) > 0 ? Number(control.buyScoreThreshold) : (Number(env.AUTO_BUY_SCORE_THRESHOLD) > 0 ? Number(env.AUTO_BUY_SCORE_THRESHOLD) : 60),
+        threshold: Number(control.buyScoreThreshold) > 0 ? Number(control.buyScoreThreshold) 
+          : (mode === 'shadow' ? (Number(env.AUTO_SHADOW_SIGNAL_THRESHOLD) > 0 ? Number(env.AUTO_SHADOW_SIGNAL_THRESHOLD) : 45)
+          : mode === 'paper' ? (Number(env.AUTO_PAPER_BUY_SCORE_THRESHOLD) > 0 ? Number(env.AUTO_PAPER_BUY_SCORE_THRESHOLD) : 50)
+          : (Number(env.AUTO_LIVE_BUY_SCORE_THRESHOLD) > 0 ? Number(env.AUTO_LIVE_BUY_SCORE_THRESHOLD) : 65)),
         cooldownUntil,
         cooldowns: candidateCooldowns,
         cooldownOverrideGap: Number(env.AUTO_SYMBOL_COOLDOWN_OVERRIDE_SCORE_GAP) > 0 ? Number(env.AUTO_SYMBOL_COOLDOWN_OVERRIDE_SCORE_GAP) : 12,
@@ -323,15 +326,27 @@ export function createAutoLoop({
       const entryBlocked = extraBlocks.length > 0;
       if (entryBlocked && (action === 'PAPER_INTENT' || action === 'LIVE_INTENT')) action = 'BLOCKED';
 
-      const mappedAction = action === 'SHADOW_BUY' ? 'SHADOW_BUY'
+      const mappedAction = action === 'SHADOW_BUY_SIGNAL' ? 'SHADOW_BUY_SIGNAL'
+        : action === 'SHADOW_BUY' ? 'SHADOW_BUY_SIGNAL'
         : action === 'PAPER_INTENT' ? 'PAPER_BUY'
         : action === 'LIVE_INTENT' ? 'LIVE_BUY'
+        : action === 'CLOSE_INTENT' ? 'CLOSE'
+        : action === 'SHADOW_CLOSE' ? 'SHADOW_CLOSE'
+        : action === 'HOLD' ? 'HOLD'
         : action === 'BLOCKED' ? 'BLOCKED'
         : 'NONE';
 
-      if (out.candidate) log(`[AUTO] candidate=${out.candidate.symbol} score=${out.candidate.score}`);
-      log(`[AUTO] decision=${mappedAction}`);
-      for (const b of [...(out.blocks || []), ...extraBlocks]) log(`[AUTO][BLOCK] reason=${b.code}: ${b.reason}`);
+      const topStr = (out.candidates || []).slice(0, 3).map(c => `${c.symbol}:${c.score}`).join(',');
+      const allBlocks = [...(out.blocks || []), ...extraBlocks];
+      const hardBlockers = allBlocks.length ? ` blockers=[${allBlocks.map(b => b.code).join(',')}]` : '';
+
+      if (out.candidate) {
+        log(`[AUTO] selected=${out.candidate.symbol} score=${out.candidate.score} threshold=${Number(control.buyScoreThreshold) > 0 ? Number(control.buyScoreThreshold) : (mode === 'shadow' ? (Number(env.AUTO_SHADOW_SIGNAL_THRESHOLD) || 45) : mode === 'paper' ? (Number(env.AUTO_PAPER_BUY_SCORE_THRESHOLD) || 50) : (Number(env.AUTO_LIVE_BUY_SCORE_THRESHOLD) || 65))} decision=${mappedAction} reason=${out.decisionReason || 'no_candidate'} top=[${topStr}]${hardBlockers}`);
+      } else {
+        log(`[AUTO] decision=${mappedAction} reason=${out.decisionReason || 'no_candidate'}${hardBlockers}`);
+      }
+      
+      for (const b of allBlocks) log(`[AUTO][BLOCK] reason=${b.code}: ${b.reason}`);
 
       const decisionPayload = {
         sessionId,
