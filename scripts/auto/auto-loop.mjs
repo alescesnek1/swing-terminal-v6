@@ -357,7 +357,14 @@ export function createAutoLoop({
         : 'NONE';
 
       const topStr = (out.candidates || []).slice(0, 3).map(c => `${c.symbol}:${c.score}`).join(',');
-      const allBlocks = [...(out.blocks || []), ...extraBlocks];
+      const allBlocksRaw = extraBlocks.concat(out.blocks || []);
+      const dedupedBlocksMap = new Map();
+      for (const b of allBlocksRaw) {
+        if (!dedupedBlocksMap.has(b.code)) {
+          dedupedBlocksMap.set(b.code, b);
+        }
+      }
+      const allBlocks = Array.from(dedupedBlocksMap.values());
       const hardBlockers = allBlocks.length ? ` blockers=[${allBlocks.map(b => b.code).join(',')}]` : '';
 
       if (out.candidate) {

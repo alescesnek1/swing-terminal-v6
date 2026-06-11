@@ -2275,10 +2275,8 @@ async function handleFleetWorker(req, base, body) {
         const queued = (fleet.commandQueue[sessionId] || []).some((c) => !c.consumedAt && c.type === 'EMERGENCY_CLOSE');
         if (queued) return json(req, { ok: true, existing: true, commandQueued: true });
         const cmd = queueCommand(fleet, sessionId, 'EMERGENCY_CLOSE', 'auto-trader');
-        session.pauseRequested = true;
         session.updatedAt = new Date().toISOString();
         if (!fleet.autoTrader) fleet.autoTrader = {};
-        fleet.autoTrader.lastIntentId = cmd.id;
         fleet.autoTrader.idempotencyKey = idempotencyKey;
         fleet.autoTrader.cooldownUntil = new Date(Date.now() + AUTO_COOLDOWN_AFTER_CLOSE_MS).toISOString();
         fevent(fleet, 'AUTO_CLOSE_INTENT_CREATED', 'warn', `Auto close command queued for ${sessionId.slice(0, 12)}.`, { sessionId, symbol });
