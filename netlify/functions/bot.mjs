@@ -2300,8 +2300,11 @@ async function handleFleetWorker(req, base, body) {
           return json(req, { ok: false, error: 'Invalid source metadata for paper auto intent.' }, 400);
         }
         const config = completeBotConfig(session.config || defaultBotConfig());
-        const size = Number.isFinite(positionUsd) && positionUsd > 0 ? positionUsd : Math.min(config.maxTradeUsd, TESTNET_MAX_TRADE_USD);
-        if (!(size >= config.minTradeUsd && size <= config.maxTradeUsd && size <= TESTNET_MAX_TRADE_USD)) {
+        const paperMin = Number(process.env.AUTO_PAPER_MIN_POSITION_USD) || 6;
+        const minUsd = autoMode === 'paper' ? paperMin : config.minTradeUsd;
+        const maxUsd = autoMode === 'paper' ? TESTNET_MAX_TRADE_USD : Math.min(config.maxTradeUsd, TESTNET_MAX_TRADE_USD);
+        const size = Number.isFinite(positionUsd) && positionUsd > 0 ? positionUsd : maxUsd;
+        if (!(size >= minUsd && size <= maxUsd)) {
           return json(req, { ok: false, error: `positionUsd ${size} violates config bounds.` }, 400);
         }
         const intentId = `auto_intent_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;

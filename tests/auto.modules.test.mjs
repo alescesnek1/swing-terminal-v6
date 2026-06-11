@@ -358,6 +358,13 @@ test('14. shadow mode ignores risk-off blocker and uses env threshold 45, wherea
   assert.ok(out3a.intent, 'intent created');
   assert.equal(out3a.intent.paperRiskOffTest, true);
   
+  // paper sizing clamping logic
+  const envPaperClamped = { AUTO_TRADER_ENABLED: 'true', AUTO_TRADER_MODE: 'paper', AUTO_PAPER_POSITION_USD: '6', AUTO_PAPER_MIN_POSITION_USD: '6', AUTO_PAPER_RISK_OFF_SIZE_MULTIPLIER: '0.1' };
+  const outClamp = evaluateAutoTrader({ env: envPaperClamped, markets: mockMarkets, caps: CAPS, fleet: HEALTHY_FLEET, threshold: 50, sessionId: 'sc', regime: { regime: 'RISK_OFF', entriesAllowed: false } });
+  assert.equal(outClamp.decision, 'PAPER_INTENT');
+  assert.equal(outClamp.intent.positionUsd, 6, 'paper risk-off size clamped to min');
+  assert.equal(outClamp.diagnostics.paperSizeClamped, true, 'paperSizeClamped flag set');
+  
   // live mode blocks on risk-off
   const envLive = { ...FULL_LIVE_ENV, AUTO_TRADER_MODE: 'live_spot' };
   const out4 = evaluateAutoTrader({ env: envLive, markets: mockMarkets, caps: CAPS, fleet: HEALTHY_FLEET, threshold: 65, sessionId: 's4', regime: { regime: 'RISK_OFF', entriesAllowed: false } });

@@ -44,6 +44,8 @@ export function readAutoEnv(env = process.env) {
     localWorkerLiveConfirm: flag(env, 'LOCAL_WORKER_LIVE_CONFIRM') === 'true',
     liveSpotAck: flag(env, 'LIVE_SPOT_ACK') === LIVE_SPOT_ACK_TEXT,
     paperAllowRiskOff: flag(env, 'AUTO_PAPER_ALLOW_RISK_OFF') !== 'false',
+    paperPositionUsd: Number(flag(env, 'AUTO_PAPER_POSITION_USD')) || 6,
+    paperMinPositionUsd: Number(flag(env, 'AUTO_PAPER_MIN_POSITION_USD')) || 6,
     paperRiskOffSizeMultiplier: Number.isFinite(Number(flag(env, 'AUTO_PAPER_RISK_OFF_SIZE_MULTIPLIER'))) ? Number(flag(env, 'AUTO_PAPER_RISK_OFF_SIZE_MULTIPLIER')) : 0.5,
   };
 }

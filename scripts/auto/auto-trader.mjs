@@ -186,9 +186,22 @@ export function evaluateAutoTrader({
     if (!risk.allowed) return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'BLOCKED', decisionReason: risk.reason, requiredThreshold: threshold, scoreGap: entry.scoreGap, intent: null, reasons: entry.reasons, diagnostics };
     
     const isRiskOff = entry.riskFlags && entry.riskFlags.includes('regime risk-off');
-    if (isRiskOff && a.paperAllowRiskOff) {
-      entry.positionUsd = Math.max(1, (entry.positionUsd || 1) * a.paperRiskOffSizeMultiplier);
-    }
+    
+    const base = a.paperPositionUsd || 6;
+    const multiplier = (isRiskOff && a.paperAllowRiskOff) ? a.paperRiskOffSizeMultiplier : 1;
+    const riskAdjusted = base * multiplier;
+    const minUsd = a.paperMinPositionUsd || 6;
+    const positionUsd = Math.max(minUsd, riskAdjusted);
+    const paperSizeClamped = riskAdjusted < minUsd;
+    
+    entry.positionUsd = positionUsd;
+    
+    diagnostics.paperPositionUsd = base;
+    diagnostics.paperRiskOffMultiplier = multiplier;
+    diagnostics.paperRiskAdjustedUsd = riskAdjusted;
+    diagnostics.paperMinPositionUsd = minUsd;
+    diagnostics.paperSizeClamped = paperSizeClamped;
+
     const intent = buildEntryIntent(entry, { sessionId, mode: 'paper' });
     if (isRiskOff && intent) {
       intent.paperRiskOffTest = true;

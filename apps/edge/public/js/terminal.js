@@ -6405,7 +6405,12 @@ function renderFleet() {
          <li>Excluded Cooldown: ${ud.excludedCooldown || 0}</li>
          <li>Excluded Leveraged: ${ud.excludedLeveraged || 0}</li>
          <li>Excluded Low Liquidity: ${ud.excludedLowLiquidity || 0}</li>
-         <li>Excluded Wide Spread: ${ud.excludedWideSpread || 0}</li>`
+         <li>Excluded Wide Spread: ${ud.excludedWideSpread || 0}</li>
+         ${ud.paperPositionUsd != null ? `<li>Paper Pos Base: $${ud.paperPositionUsd}</li>
+         <li>Paper Risk Mult: ${ud.paperRiskOffMultiplier}</li>
+         <li>Paper Adjusted: $${ud.paperRiskAdjustedUsd}</li>
+         <li>Paper Min: $${ud.paperMinPositionUsd}</li>
+         <li>Paper Clamped: ${ud.paperSizeClamped ? 'YES' : 'NO'}</li>` : ''}`
       : '';
 
     diagnosticsHtml = '<div><span>Diagnostics</span><ul>'
