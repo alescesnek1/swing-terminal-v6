@@ -1514,6 +1514,11 @@ async function tick() {
   }
 
   if (data.intent) {
+    if (handledIntentIds.has(data.intent.id)) {
+      console.log(`[INTENT][WARN] Suppressing already-handled intent ${data.intent.id}.`);
+      return;
+    }
+    handledIntentIds.add(data.intent.id);
     console.log(`[INTENT] Claimed intent ${data.intent.id} ${data.intent.symbol} ${data.intent.side} ${data.intent.type} positionUsd=${data.intent.positionUsd}`);
     await executeIntent(data.intent, config, riskState, session, data);
   }

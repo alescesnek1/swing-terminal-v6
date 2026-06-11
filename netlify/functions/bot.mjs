@@ -2517,6 +2517,19 @@ async function handleFleetWorker(req, base, body) {
     }
     expireStaleIntent(fleet, sessionId);
     let intent = fleet.executionIntents[sessionId] || null;
+
+    // Defense in depth: if the session already has an open position,
+    // or if the intent's idempotency key has already been processed, the intent is STALE.
+    if (intent) {
+      const openPositions = sessionOpenPositions(fleet, sessionId);
+      const isKeyProcessed = fleet.usedIdempotencyKeys && fleet.usedIdempotencyKeys[sessionId] && fleet.usedIdempotencyKeys[sessionId].includes(intent.idempotencyKey);
+      if (openPositions.length > 0 || isKeyProcessed) {
+        fevent(fleet, 'STALE_INTENT_SUPPRESSED', 'warn', `Suppressed stale intent ${intent.id}.`, { sessionId });
+        delete fleet.executionIntents[sessionId];
+        intent = null;
+      }
+    }
+
     const entryBlock = entryBlockState(fleet, session);
     const killSwitchActive = entryBlock.globalKillSwitchActive;
     // Claim a pending intent for this session only. Never opens entries while paused/stopping.
@@ -2693,6 +2706,9 @@ async function handleFleetWorker(req, base, body) {
     }
     if (record.status === 'open') {
       upsertOpenPositionReports(fleet, sessionId, [record]);
+      if (fleet.executionIntents && fleet.executionIntents[sessionId]) {
+        delete fleet.executionIntents[sessionId];
+      }
     } else {
       if (!fleet.positionResults[sessionId]) fleet.positionResults[sessionId] = [];
       fleet.positionResults[sessionId] = [record, ...fleet.positionResults[sessionId]].slice(0, 30);
