@@ -285,6 +285,8 @@ function hydrateOpenPositionsFromBackend(backendOpen) {
       openedAt: p.openedAt || p.receivedAt || new Date().toISOString(),
       stepSize: p.stepSize || null, // closeAllPositions re-fetches LOT_SIZE when missing
       source: 'backend-recovered',
+      testnet: p.testnet === true,
+      autoMode: p.autoMode,
     });
     added++;
   }
@@ -1041,8 +1043,10 @@ async function executeIntent(intent, config, riskState, session = null, control 
     markKeyUsed(intent.idempotencyKey);
   };
   if (isLiveSpot) {
-    const gate = validateLiveIntentGate(intent, config, riskState, session, control);
-    if (!gate.ok) return reject(`LIVE LOCKED: ${gate.reason}`);
+    if (intent.mode !== 'testnet') {
+      const gate = validateLiveIntentGate(intent, config, riskState, session, control);
+      if (!gate.ok) return reject(`LIVE LOCKED: ${gate.reason}`);
+    }
   } else if (intent.mode !== 'testnet') {
     return reject('Intent mode is not testnet');
   }
@@ -1092,9 +1096,25 @@ async function executeIntent(intent, config, riskState, session = null, control 
       }
     }
 
-    const modeLabel = isLiveSpot ? 'LIVE SPOT REAL MONEY' : 'TESTNET';
+    const modeLabel = isLiveSpot && intent.mode !== 'testnet' ? 'LIVE SPOT REAL MONEY' : 'TESTNET SIMULATION';
     console.log(`[ORDER] Submitting ${modeLabel} BUY MARKET ${qty} ${intent.symbol} (session ${sessionId.slice(0, 12)})`);
-    const order = await submitMarketOrder(intent.symbol, 'BUY', qty, precision);
+    
+    let order;
+    if (isLiveSpot && intent.mode === 'testnet') {
+      const simExecQty = qty.toFixed(precision);
+      const simQuoteQty = (qty * price).toFixed(6);
+      order = {
+        orderId: `paper-buy-${Date.now()}`,
+        status: 'FILLED',
+        executedQty: simExecQty,
+        cummulativeQuoteQty: simQuoteQty,
+        fills: [{ price: price.toFixed(6), qty: simExecQty, commission: '0', commissionAsset: 'BNB' }]
+      };
+      // small sleep to simulate network
+      await new Promise(r => setTimeout(r, 100));
+    } else {
+      order = await submitMarketOrder(intent.symbol, 'BUY', qty, precision);
+    }
     console.log(`[ORDER] Order successful. OrderID: ${order.orderId} status=${order.status} executedQty=${order.executedQty}`);
 
     // Capture entry economics now so the eventual close can compute realized PnL
@@ -1104,7 +1124,7 @@ async function executeIntent(intent, config, riskState, session = null, control 
     // PERSIST FIRST: write the open position to local state BEFORE reporting to
     // the backend, so a crash between order and report can be recovered locally.
     recordOpenPosition({
-      mode: workerMode, symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, quoteAsset, executedQty: order.executedQty,
+      mode: workerMode, testnet: intent.mode === 'testnet', symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, quoteAsset, executedQty: order.executedQty,
       orderId: order.orderId, sessionId, status: 'open', openedAt: new Date().toISOString(), stepSize: lot.stepSize,
       entryQuoteQty: order.cummulativeQuoteQty != null ? String(order.cummulativeQuoteQty) : null,
       entryAvgPrice: entryAvgPrice != null ? entryAvgPrice : null,
@@ -1122,7 +1142,7 @@ async function executeIntent(intent, config, riskState, session = null, control 
     await reportResult({
       id: intent.id, idempotencyKey: intent.idempotencyKey, status: 'submitted', exchange: 'binance_spot_testnet',
       symbol: intent.symbol, orderId: order.orderId, orderStatus: order.status, executedQty: order.executedQty,
-      cummulativeQuoteQty: order.cummulativeQuoteQty, mode: workerMode, testnet: !isLiveSpot, realProductionOrder: isLiveSpot,
+      cummulativeQuoteQty: order.cummulativeQuoteQty, mode: workerMode, testnet: intent.mode === 'testnet', realProductionOrder: isLiveSpot && intent.mode !== 'testnet',
     });
     await reportPosition({ symbol: intent.symbol, baseAsset: symbolInfo.baseAsset, executedQty: order.executedQty, orderId: order.orderId, status: 'open', openedAt: new Date().toISOString(), entryAvgPrice: entryAvgPrice != null ? entryAvgPrice : null, intentSource: intent.intentSource || intent.source, autoMode: intent.autoMode, autoStrategyVersion: intent.autoStrategyVersion, autoDecisionId: intent.autoDecisionId, autoIdempotencyKey: intent.autoIdempotencyKey });
     console.log(`[POSITION] Reported OPEN ${intent.symbol} to backend.`);
@@ -1164,7 +1184,7 @@ async function closeAllPositions(context) {
       const stepNum = parseFloat(stepSize) || 0;
       let sellQty = parseFloat(pos.executedQty);
 
-      if (isLiveSpot) {
+      if (isLiveSpot && !pos.testnet) {
         // LIVE: never sell executedQty blindly. Read the ACTUAL free base balance
         // (the BUY fee is taken in base asset) and only sell what is held and
         // clears minNotional after LOT_SIZE rounding.
@@ -1183,9 +1203,23 @@ async function closeAllPositions(context) {
         if (!(sellQty > 0)) throw new Error(`Computed sell qty not positive for ${pos.symbol}`);
       }
 
-      const modeLabel = isLiveSpot ? 'LIVE SPOT REAL MONEY' : 'TESTNET';
+      const modeLabel = isLiveSpot && !pos.testnet ? 'LIVE SPOT REAL MONEY' : 'TESTNET SIMULATION';
       console.log(`[${context}][CLOSE] Submitting ${modeLabel} SELL MARKET ${sellQty} ${pos.symbol} (close of order ${pos.orderId})...`);
-      const close = await submitMarketOrder(pos.symbol, 'SELL', sellQty, precision);
+      
+      let close;
+      if (isLiveSpot && pos.testnet) {
+        const price = await getTickerPrice(pos.symbol);
+        close = {
+          orderId: `paper-close-${Date.now()}`,
+          status: 'FILLED',
+          executedQty: sellQty.toFixed(precision),
+          cummulativeQuoteQty: (sellQty * price).toFixed(6),
+          fills: [{ price: price.toFixed(6), qty: sellQty.toFixed(precision), commission: '0', commissionAsset: 'BNB' }]
+        };
+        await new Promise(r => setTimeout(r, 100));
+      } else {
+        close = await submitMarketOrder(pos.symbol, 'SELL', sellQty, precision);
+      }
       console.log(`[${context}][CLOSE] Close result OK. ${pos.symbol} CloseOrderID: ${close.orderId} executedQty=${close.executedQty}`);
 
       // Compute the realized trade result (avg prices, PnL, residual dust) so the

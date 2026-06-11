@@ -2296,8 +2296,8 @@ async function handleFleetWorker(req, base, body) {
       if (blocked) return blocked;
 
       if (mode === 'paper') {
-        if (process.env.BINANCE_ENV !== 'testnet' || process.env.BOT_ALLOW_TESTNET_ORDERS !== 'true') {
-          return json(req, { ok: false, error: 'Paper/testnet execution is not allowed.' }, 403);
+        if (intentSource !== 'auto_trader' || autoMode !== 'paper') {
+          return json(req, { ok: false, error: 'Invalid source metadata for paper auto intent.' }, 400);
         }
         const config = completeBotConfig(session.config || defaultBotConfig());
         const size = Number.isFinite(positionUsd) && positionUsd > 0 ? positionUsd : Math.min(config.maxTradeUsd, TESTNET_MAX_TRADE_USD);

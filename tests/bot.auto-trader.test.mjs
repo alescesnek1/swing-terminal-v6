@@ -199,7 +199,7 @@ test('auto-intent-request creates paper/testnet intent only and rejects duplicat
   fleet.usedIdempotencyKeys[sessionId] = [];
   await fleetStore.saveFleet(fleet);
 
-  const body = { sessionId, mode: 'paper', action: 'BUY', side: 'BUY', symbol: 'BTCUSDC', positionUsd: 6, idempotencyKey: 'auto:paper:BTCUSDC:BUY:1' };
+  const body = { sessionId, mode: 'paper', autoMode: 'paper', intentSource: 'auto_trader', action: 'BUY', side: 'BUY', symbol: 'BTCUSDC', positionUsd: 6, idempotencyKey: 'auto:paper:BTCUSDC:BUY:1' };
   const res = await call(workerReq('/api/bot/auto-intent-request', body));
   assert.equal(res.status, 200);
   assert.equal(res.json.intent.mode, 'testnet');
