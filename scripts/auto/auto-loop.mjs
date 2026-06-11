@@ -164,13 +164,37 @@ export function createAutoLoop({
       const exitConfig = autoExitConfigFromEnv(env);
       const cooldownUntil = Math.max(Number(control.cooldownUntil) || 0, localCooldownUntil);
 
+      const snap = await ensureSnapshot();
+      const snapshot = snap && snap.snapshot ? snap.snapshot : null;
+      const snapshotAgeMs = snap && Number.isFinite(snap.ageMs) ? snap.ageMs : null;
+      const markets = snapshot ? marketsFromSnapshot(snapshot) : [];
+
       // ── Open position → exit management ONLY (no new entries) ──────────────
       if (open.length > 0) {
         const pos = open[0];
         let price = null;
-        try { price = await getPrice(pos.symbol); } catch (err) {
-          log(`[AUTO][WARN] price fetch failed for ${pos.symbol}: ${err.message}`);
+        
+        // Find current mark price from latest snapshot
+        if (markets.length > 0) {
+          const market = markets.find(m => m.symbol === pos.symbol);
+          if (market) {
+            const bid = Number(market.bidPrice);
+            const ask = Number(market.askPrice);
+            if (bid > 0 && ask > 0) {
+              price = (bid + ask) / 2;
+            } else if (Number(market.lastPrice) > 0) {
+              price = Number(market.lastPrice);
+            }
+          }
         }
+        
+        // Fallback to getPrice
+        if (price == null || !Number.isFinite(price) || price <= 0) {
+          try { price = await getPrice(pos.symbol); } catch (err) {
+            log(`[AUTO][WARN] price fetch failed for ${pos.symbol}: ${err.message}`);
+          }
+        }
+        
         if (price != null && Number.isFinite(Number(price))) {
           const newPeak = updatePeakPrice(pos, price);
           if (newPeak !== Number(pos.peakPrice)) { pos.peakPrice = newPeak; try { updatePosition(pos); } catch { /* best effort */ } }
@@ -228,10 +252,6 @@ export function createAutoLoop({
       }
 
       // ── Flat → consider an entry ────────────────────────────────────────────
-      const snap = await ensureSnapshot();
-      const snapshot = snap && snap.snapshot ? snap.snapshot : null;
-      const snapshotAgeMs = snap && Number.isFinite(snap.ageMs) ? snap.ageMs : null;
-      const markets = snapshot ? marketsFromSnapshot(snapshot) : [];
       const gates = control.gates || {};
 
       // 1. Maintain Rolling History

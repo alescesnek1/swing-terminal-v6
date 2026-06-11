@@ -25,7 +25,7 @@ function pct(from, to) {
 export function updatePeakPrice(position, price) {
   const p = Number(price);
   const peak = Number(position && position.peakPrice);
-  const entry = Number(position && position.entryPrice);
+  const entry = Number(position && (position.entryPrice != null ? position.entryPrice : position.entryAvgPrice));
   const base = Number.isFinite(peak) ? peak : (Number.isFinite(entry) ? entry : 0);
   return Number.isFinite(p) ? Math.max(base, p) : base;
 }
@@ -41,13 +41,15 @@ export function evaluateExit({
   regime = null,
 } = {}) {
   const c = { ...DEFAULT_EXIT_CONFIG, ...config };
-  const entry = Number(position && position.entryPrice);
+  const entry = Number(position && (position.entryPrice != null ? position.entryPrice : position.entryAvgPrice));
   const last = Number(price);
   const pnlPct = pct(entry, last);
   const none = (extra = {}) => ({ shouldClose: false, code: 'HOLD', reason: 'within thresholds', pnlPct, ...extra });
 
   if (emergency) return { shouldClose: true, code: 'EMERGENCY', reason: 'emergency close requested', pnlPct };
   if (stopRequested) return { shouldClose: true, code: 'STOP_REQUESTED', reason: 'manual stop requested', pnlPct };
+
+  if (!Number.isFinite(last) || last <= 0) return { shouldClose: false, code: 'HOLD', reason: 'mark_price_missing', pnlPct: null };
 
   if (Number.isFinite(pnlPct)) {
     if (c.stopLossPct > 0 && pnlPct <= -Math.abs(c.stopLossPct)) {

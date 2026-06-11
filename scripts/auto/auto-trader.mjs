@@ -229,6 +229,9 @@ export function marketsFromSnapshot(snapshot) {
       status: m.status || null,
       volume24hUsd: Number(m.quoteVolume),
       quoteVolume24h: Number(m.quoteVolume),
+      bidPrice: m.bidPrice != null ? Number(m.bidPrice) : null,
+      askPrice: m.askPrice != null ? Number(m.askPrice) : null,
+      lastPrice: m.lastPrice != null ? Number(m.lastPrice) : null,
       spreadPct: m.spreadPct != null && Number.isFinite(Number(m.spreadPct)) ? Number(m.spreadPct) : null,
       change24hPct: Number(m.priceChangePercent),
     }));

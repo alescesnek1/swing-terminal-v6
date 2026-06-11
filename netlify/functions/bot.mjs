@@ -2617,7 +2617,11 @@ async function handleFleetWorker(req, base, body) {
 
     const intent = fleet.executionIntents[sessionId];
     if (intent && body.id === intent.id) {
-      intent.status = body.status === 'failed' ? 'failed' : 'submitted';
+      if (body.status === 'failed') {
+        intent.status = 'failed';
+      } else {
+        delete fleet.executionIntents[sessionId];
+      }
     }
     if (!fleet.usedIdempotencyKeys[sessionId]) fleet.usedIdempotencyKeys[sessionId] = [];
     if (fleet.usedIdempotencyKeys[sessionId].includes(body.idempotencyKey)) {
