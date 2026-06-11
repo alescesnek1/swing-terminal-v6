@@ -40,6 +40,11 @@ function adminReq(method, path, body) {
   if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
   return new Request(`https://ctl.example${path}`, init);
 }
+function workerReq(path, body, token = process.env.BOT_WORKER_TOKEN) {
+  const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+  if (token) headers['X-BOT-WORKER-TOKEN'] = token;
+  return new Request(`https://ctl.example${path}`, { method: 'POST', headers, body: JSON.stringify(body || {}) });
+}
 async function call(req) { const res = await handler(req); const json = await res.json().catch(() => ({})); return { status: res.status, json }; }
 
 test('default auto trader is off/shadow and live locked', async () => {
@@ -72,7 +77,17 @@ test('live promotion requires the explicit phrase even when env gates and paper 
   process.env.LIVE_SPOT_ACK = 'I_UNDERSTAND_REAL_MONEY_RISK';
 
   const fleet = await fleetStore.loadFleet();
-  fleet.autoTrader = { ...(fleet.autoTrader || {}), paperTradeCount: 1 };
+  fleet.autoTrader = {
+    ...(fleet.autoTrader || {}),
+    shadowEvaluations: 20,
+    paperRoundTrips: 5,
+    failedCloses: 0,
+    duplicateIntentBlocks: 0,
+    safetyLockEvents: 0,
+    dailyCapRespected: true,
+    oneOpenPositionRespected: true,
+    passed: true,
+  };
   await fleetStore.saveFleet(fleet);
 
   const missingPhrase = await call(adminReq('POST', '/api/bot/auto-trader/mode', { mode: 'live_spot', confirmLive: true }));
@@ -81,8 +96,139 @@ test('live promotion requires the explicit phrase even when env gates and paper 
 
   const ok = await call(adminReq('POST', '/api/bot/auto-trader/mode', {
     mode: 'live_spot',
-    confirmLivePhrase: 'I UNDERSTAND AUTONOMOUS LIVE SPOT USES REAL MONEY',
+    confirmLivePhrase: 'I UNDERSTAND AUTONOMOUS LIVE SPOT CAN PLACE REAL ORDERS',
   }));
   assert.equal(ok.status, 200);
   assert.equal(ok.json.autoTrader.status, 'LIVE ACTIVE');
+});
+
+test('live promotion is blocked without passing shadow/paper evidence', async () => {
+  process.env.AUTO_TRADER_ENABLED = 'true';
+  process.env.AUTO_TRADER_MODE = 'live_spot';
+  process.env.AUTO_LIVE_TRADING_ENABLED = 'true';
+  process.env.BOT_LIVE_TRADING_ENABLED = 'true';
+  process.env.BOT_ALLOW_REAL_ORDERS = 'true';
+  process.env.LOCAL_WORKER_LIVE_CONFIRM = 'true';
+  process.env.LIVE_SPOT_ACK = 'I_UNDERSTAND_REAL_MONEY_RISK';
+
+  const fleet = await fleetStore.loadFleet();
+  fleet.autoTrader = {
+    ...(fleet.autoTrader || {}),
+    shadowEvaluations: 0,
+    paperRoundTrips: 0,
+    failedCloses: 0,
+    duplicateIntentBlocks: 0,
+    safetyLockEvents: 0,
+    dailyCapRespected: true,
+    oneOpenPositionRespected: true,
+    passed: false,
+  };
+  await fleetStore.saveFleet(fleet);
+
+  const res = await call(adminReq('POST', '/api/bot/auto-trader/mode', {
+    mode: 'live_spot',
+    confirmLivePhrase: 'I UNDERSTAND AUTONOMOUS LIVE SPOT CAN PLACE REAL ORDERS',
+  }));
+  assert.equal(res.status, 409);
+  assert.equal(res.json.error, 'Promotion to live requires passing shadow/paper evidence first.');
+});
+
+test('live promotion is blocked without evidence and when AUTO_LIVE_TRADING_ENABLED=false', async () => {
+  process.env.AUTO_TRADER_ENABLED = 'true';
+  process.env.AUTO_TRADER_MODE = 'live_spot';
+  delete process.env.AUTO_LIVE_TRADING_ENABLED;
+  process.env.BOT_LIVE_TRADING_ENABLED = 'true';
+  process.env.BOT_ALLOW_REAL_ORDERS = 'true';
+  process.env.LOCAL_WORKER_LIVE_CONFIRM = 'true';
+  process.env.LIVE_SPOT_ACK = 'I_UNDERSTAND_REAL_MONEY_RISK';
+  const fleet = await fleetStore.loadFleet();
+  fleet.autoTrader = { shadowEvaluations: 0, paperRoundTrips: 0 };
+  await fleetStore.saveFleet(fleet);
+  const res = await call(adminReq('POST', '/api/bot/auto-trader/mode', {
+    mode: 'live_spot',
+    confirmLivePhrase: 'I UNDERSTAND AUTONOMOUS LIVE SPOT CAN PLACE REAL ORDERS',
+  }));
+  assert.equal(res.status, 409);
+  assert.match(res.json.error, /gate not satisfied/i);
+  assert.ok(res.json.autoTrader.liveGateMissing.includes('AUTO_LIVE_TRADING_ENABLED'));
+});
+
+test('auto-decision stores runtime state and shadow creates zero intents', async () => {
+  process.env.AUTO_TRADER_ENABLED = 'true';
+  process.env.AUTO_TRADER_MODE = 'shadow';
+  const res = await call(workerReq('/api/bot/auto-decision', {
+    sessionId: 'session_auto_shadow',
+    mode: 'shadow',
+    effectiveMode: 'shadow',
+    action: 'SHADOW_BUY',
+    decision: 'SHADOW_BUY',
+    candidate: { symbol: 'BTCUSDC', score: 72, reasons: ['liquid'] },
+    score: 72,
+    reasons: ['score 72 >= threshold 60'],
+    riskBlocks: [],
+    liveRiskBlocks: [],
+    dataSource: 'local_worker_binance_public',
+    snapshotAgeMs: 1000,
+    strategyVersion: 'auto-loop-v1',
+  }));
+  assert.equal(res.status, 200);
+  assert.equal(res.json.autoTrader.action, 'SHADOW_BUY');
+  assert.equal(res.json.autoTrader.dataSource, 'local_worker_binance_public');
+  assert.equal(res.json.autoTrader.evidence.shadowEvaluations >= 1, true);
+  const fleet = await fleetStore.loadFleet();
+  assert.equal(Object.values(fleet.executionIntents || {}).filter(Boolean).length, 0);
+  assert.ok((fleet.events || []).some((e) => e.type === 'AUTO_SHADOW_DECISION'));
+});
+
+test('auto-intent-request creates paper/testnet intent only and rejects duplicate idempotency', async () => {
+  process.env.BINANCE_ENV = 'testnet';
+  process.env.BOT_ALLOW_TESTNET_ORDERS = 'true';
+  process.env.AUTO_TRADER_ENABLED = 'true';
+  process.env.AUTO_TRADER_MODE = 'paper';
+  delete process.env.AUTO_LIVE_TRADING_ENABLED;
+  const fleet = await fleetStore.loadFleet();
+  const sessionId = 'session_auto_paper';
+  fleet.botSessions[sessionId] = {
+    sessionId, ownerUserId: 'user-admin@example.com', ownerEmail: 'admin@example.com', orgId: 'default',
+    mode: 'testnet', status: 'running', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 600000).toISOString(), stopRequested: false, pauseRequested: false,
+    closePositionsOnStop: true, config: { minTradeUsd: 5, maxTradeUsd: 10, maxOpenPositions: 1, maxDailyLossUsd: 3, maxDailyTrades: 3, allowTestnet: true, allowLive: false },
+  };
+  fleet.workerStatuses.worker_auto_paper = { workerId: 'worker_auto_paper', sessionId, status: 'online', lastSeenAt: new Date().toISOString() };
+  fleet.executionIntents[sessionId] = null;
+  fleet.usedIdempotencyKeys[sessionId] = [];
+  await fleetStore.saveFleet(fleet);
+
+  const body = { sessionId, mode: 'paper', action: 'BUY', side: 'BUY', symbol: 'BTCUSDC', positionUsd: 6, idempotencyKey: 'auto:paper:BTCUSDC:BUY:1' };
+  const res = await call(workerReq('/api/bot/auto-intent-request', body));
+  assert.equal(res.status, 200);
+  assert.equal(res.json.intent.mode, 'testnet');
+  assert.equal(res.json.intent.testnet, true);
+  assert.equal(res.json.intent.realProductionOrder, false);
+  const dup = await call(workerReq('/api/bot/auto-intent-request', body));
+  assert.equal(dup.status, 409);
+  assert.equal(dup.json.duplicate, true);
+});
+
+test('auto live intent is blocked by default and by daily cap', async () => {
+  delete process.env.AUTO_LIVE_TRADING_ENABLED;
+  process.env.AUTO_TRADER_ENABLED = 'true';
+  process.env.AUTO_TRADER_MODE = 'live_spot';
+  const fleet = await fleetStore.loadFleet();
+  const sessionId = 'session_auto_live_blocked';
+  fleet.botSessions[sessionId] = {
+    sessionId, ownerUserId: 'user-admin@example.com', ownerEmail: 'admin@example.com', orgId: 'default',
+    mode: 'live_spot', status: 'running', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 600000).toISOString(), stopRequested: false, pauseRequested: false,
+    closePositionsOnStop: true, liveModeConfirmed: true,
+    config: { minTradeUsd: 5, maxTradeUsd: 6, maxOpenPositions: 1, maxDailyLossUsd: 3, maxDailyTrades: 0, allowTestnet: true, allowLive: true },
+  };
+  fleet.workerStatuses.worker_auto_live = { workerId: 'worker_auto_live', sessionId, status: 'online', lastSeenAt: new Date().toISOString() };
+  fleet.autoTrader = { shadowEvaluations: 20, paperRoundTrips: 5, dailyCapRespected: true, oneOpenPositionRespected: true };
+  await fleetStore.saveFleet(fleet);
+  const res = await call(workerReq('/api/bot/auto-intent-request', {
+    sessionId, mode: 'live_spot', action: 'BUY', side: 'BUY', symbol: 'BTCUSDC', positionUsd: 6, idempotencyKey: 'auto:live:BTCUSDC:BUY:1',
+  }));
+  assert.equal(res.status, 409);
+  assert.match(res.json.error, /locked|gate|missing/i);
 });
