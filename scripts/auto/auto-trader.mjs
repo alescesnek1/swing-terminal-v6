@@ -122,7 +122,8 @@ export function evaluateAutoTrader({
   }
 
   // ── Flat → consider an entry ──
-  const entry = decideEntry({ scored, threshold, regime, allowEntries: true, cooldownOverrideGap });
+  const riskMode = mode === 'shadow' ? 'flag_only' : 'block_entries';
+  const entry = decideEntry({ scored, threshold, regime, allowEntries: true, cooldownOverrideGap, riskMode });
   
   // Tag the selected candidate in the leaderboard
   let selectedCandidate = null;
@@ -144,6 +145,7 @@ export function evaluateAutoTrader({
       entry, 
       decision: 'NONE', 
       decisionReason: entry.decisionReason,
+      requiredThreshold: threshold,
       scoreGap: entry.scoreGap,
       reasons: entry.reasons, 
       diagnostics 
@@ -177,28 +179,18 @@ export function evaluateAutoTrader({
 
   // shadow ALWAYS resolves to a hypothetical (no intent), regardless of gates.
   if (mode === 'shadow') {
-    return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'SHADOW_BUY_SIGNAL', decisionReason: entry.decisionReason || 'SHADOW_BUY_SIGNAL', scoreGap: entry.scoreGap, intent: null, reasons: entry.reasons, diagnostics };
+    const shadowReason = entry.decisionReason === 'BUY' ? 'signal' : (entry.decisionReason || 'signal');
+    return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'SHADOW_BUY_SIGNAL', decisionReason: shadowReason, requiredThreshold: threshold, scoreGap: entry.scoreGap, intent: null, reasons: entry.reasons, diagnostics };
   }
-
-  if (!risk.allowed) {
-    return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'BLOCKED', decisionReason: 'BLOCKED', scoreGap: entry.scoreGap, intent: null, reasons: risk.blocks.map((b) => b.reason), diagnostics };
+  if (mode === 'paper') {
+    if (!risk.allowed) return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'BLOCKED', decisionReason: risk.reason, requiredThreshold: threshold, scoreGap: entry.scoreGap, intent: null, reasons: entry.reasons, diagnostics };
+    const intent = buildEntryIntent(entry, { sessionId, mode: 'paper' });
+    return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'PAPER_INTENT', decisionReason: 'BUY', requiredThreshold: threshold, scoreGap: entry.scoreGap, intent, reasons: entry.reasons, diagnostics };
   }
-
-  const intent = buildEntryIntent(entry, { sessionId, mode });
-  return {
-    ...baseline,
-    candidate: selectedCandidate || candidateView(topRawCandidate),
-    candidates: candidatesList,
-    universeSize: universe.length,
-    entry,
-    blocks: [],
-    decision: mode === 'live_spot' ? 'LIVE_INTENT' : 'PAPER_INTENT',
-    decisionReason: 'BUY_INTENT',
-    scoreGap: entry.scoreGap,
-    intent,
-    reasons: entry.reasons,
-    diagnostics,
-  };
+  // live_spot
+  if (!risk.allowed) return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'BLOCKED', decisionReason: risk.reason, requiredThreshold: threshold, scoreGap: entry.scoreGap, intent: null, reasons: entry.reasons, diagnostics };
+  const intent = buildEntryIntent(entry, { sessionId, mode: 'live_spot' });
+  return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'LIVE_INTENT', decisionReason: 'BUY', requiredThreshold: threshold, scoreGap: entry.scoreGap, intent, reasons: entry.reasons, diagnostics };
 }
 
 // Map a stored local-worker snapshot (sanitized public market objects) onto the

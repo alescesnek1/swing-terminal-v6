@@ -325,3 +325,34 @@ test('22. evaluateAutoTraderWithFallback attempts public fetch and captures diag
   assert.equal(res3.out.candidate.symbol, 'BTCUSDC');
   assert.ok(res3.out.candidate.riskFlags.includes('FALLBACK_ALLOWLIST_SYMBOL'));
 });
+
+// 14. Shadow threshold logic and risk flags
+test('14. shadow mode ignores risk-off blocker and uses env threshold 45, whereas live/paper block on risk-off', () => {
+  const envShadow = { AUTO_TRADER_ENABLED: 'true', AUTO_TRADER_MODE: 'shadow', AUTO_SHADOW_SIGNAL_THRESHOLD: '45' };
+  const mockMarkets = [{ symbol: 'BTCUSDC', volume24hUsd: 1000, spreadPct: 1, volatilityPct: 10 }, { symbol: 'ETHUSDC', volume24hUsd: 100000000, spreadPct: 0, volatilityPct: 2 }];
+  
+  // shadow score 70 + risk_off => SHADOW_BUY_SIGNAL
+  const out1 = evaluateAutoTrader({ env: envShadow, markets: mockMarkets, caps: CAPS, fleet: HEALTHY_FLEET, threshold: 45, sessionId: 's1', regime: { regime: 'RISK_OFF', entriesAllowed: false } });
+  assert.equal(out1.decision, 'SHADOW_BUY_SIGNAL', 'shadow mode allows risk-off to just be a flag');
+  assert.equal(out1.decisionReason, 'signal');
+  assert.equal(out1.candidate.symbol, 'ETHUSDC');
+  assert.ok(out1.candidate.riskFlags.includes('regime risk-off'));
+
+  // shadow score 40 + risk_off => NONE score_below_threshold
+  const mockMarkets2 = [{ symbol: 'BTCUSDC', volume24hUsd: 1000, spreadPct: 1, volatilityPct: 10 }];
+  const out2 = evaluateAutoTrader({ env: envShadow, markets: mockMarkets2, caps: CAPS, fleet: HEALTHY_FLEET, threshold: 45, sessionId: 's2', regime: { regime: 'RISK_OFF', entriesAllowed: false } });
+  assert.equal(out2.decision, 'NONE', 'shadow mode score < threshold returns NONE');
+  assert.equal(out2.decisionReason, 'score_below_threshold');
+
+  // paper mode blocks on risk-off
+  const envPaper = { AUTO_TRADER_ENABLED: 'true', AUTO_TRADER_MODE: 'paper' };
+  const out3 = evaluateAutoTrader({ env: envPaper, markets: mockMarkets, caps: CAPS, fleet: HEALTHY_FLEET, threshold: 50, sessionId: 's3', regime: { regime: 'RISK_OFF', entriesAllowed: false } });
+  assert.equal(out3.decision, 'NONE', 'paper mode blocks on risk-off regime via NONE');
+  assert.equal(out3.decisionReason, 'regime_risk_off');
+  
+  // live mode blocks on risk-off
+  const envLive = { ...FULL_LIVE_ENV, AUTO_TRADER_MODE: 'live_spot' };
+  const out4 = evaluateAutoTrader({ env: envLive, markets: mockMarkets, caps: CAPS, fleet: HEALTHY_FLEET, threshold: 65, sessionId: 's4', regime: { regime: 'RISK_OFF', entriesAllowed: false } });
+  assert.equal(out4.decision, 'NONE', 'live mode blocks on risk-off regime via NONE');
+  assert.equal(out4.decisionReason, 'regime_risk_off');
+});

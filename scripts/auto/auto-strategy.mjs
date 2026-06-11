@@ -7,20 +7,20 @@ import { evaluateExit } from './auto-exit-manager.mjs';
 
 export const DEFAULT_ENTRY_THRESHOLD = 60;
 
-// Decide whether to enter. Returns { action:'BUY'|'NONE', symbol, score, positionUsd, reasons, decisionReason, scoreGap }.
 export function decideEntry({
   scored = [],
   threshold = DEFAULT_ENTRY_THRESHOLD,
   regime = null,
   allowEntries = true,
   cooldownOverrideGap = 12,
+  riskMode = 'block_entries',
 } = {}) {
   const reasons = [];
   
   if (allowEntries === false) {
     return { action: 'NONE', decisionReason: 'entries_disabled', reasons: ['entries disabled'] };
   }
-  if (regime && regime.entriesAllowed === false) {
+  if (regime && regime.entriesAllowed === false && riskMode === 'block_entries') {
     return { action: 'NONE', decisionReason: 'regime_risk_off', reasons: ['regime blocks entries'] };
   }
   if (!scored || scored.length === 0) {
@@ -67,7 +67,7 @@ export function decideEntry({
     reasons.push('limited universe (only 1 eligible symbol)');
   }
 
-  const hardFlags = (top.riskFlags || []).filter((f) => f === 'blacklisted' || f === 'regime risk-off');
+  const hardFlags = (top.riskFlags || []).filter((f) => f === 'blacklisted' || (f === 'regime risk-off' && riskMode === 'block_entries'));
   if (hardFlags.length) {
     return { 
       action: 'NONE', symbol: top.symbol, score: top.score, 

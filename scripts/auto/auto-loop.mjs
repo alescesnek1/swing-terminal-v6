@@ -300,10 +300,10 @@ export function createAutoLoop({
           freeQuote: gates.freeQuote != null ? Number(gates.freeQuote) : null,
           quoteAsset: gates.quoteAsset || 'USDC',
         },
-        threshold: Number(control.buyScoreThreshold) > 0 ? Number(control.buyScoreThreshold) 
-          : (mode === 'shadow' ? (Number(env.AUTO_SHADOW_SIGNAL_THRESHOLD) > 0 ? Number(env.AUTO_SHADOW_SIGNAL_THRESHOLD) : 45)
+        threshold: mode === 'shadow' ? (Number(env.AUTO_SHADOW_SIGNAL_THRESHOLD) > 0 ? Number(env.AUTO_SHADOW_SIGNAL_THRESHOLD) : 45)
           : mode === 'paper' ? (Number(env.AUTO_PAPER_BUY_SCORE_THRESHOLD) > 0 ? Number(env.AUTO_PAPER_BUY_SCORE_THRESHOLD) : 50)
-          : (Number(env.AUTO_LIVE_BUY_SCORE_THRESHOLD) > 0 ? Number(env.AUTO_LIVE_BUY_SCORE_THRESHOLD) : 65)),
+          : mode === 'live_spot' ? (Number(env.AUTO_LIVE_BUY_SCORE_THRESHOLD) > 0 ? Number(env.AUTO_LIVE_BUY_SCORE_THRESHOLD) : (Number(control.buyScoreThreshold) > 0 ? Number(control.buyScoreThreshold) : 65))
+          : (Number(control.buyScoreThreshold) > 0 ? Number(control.buyScoreThreshold) : 65),
         cooldownUntil,
         cooldowns: candidateCooldowns,
         cooldownOverrideGap: Number(env.AUTO_SYMBOL_COOLDOWN_OVERRIDE_SCORE_GAP) > 0 ? Number(env.AUTO_SYMBOL_COOLDOWN_OVERRIDE_SCORE_GAP) : 12,
@@ -341,7 +341,7 @@ export function createAutoLoop({
       const hardBlockers = allBlocks.length ? ` blockers=[${allBlocks.map(b => b.code).join(',')}]` : '';
 
       if (out.candidate) {
-        log(`[AUTO] selected=${out.candidate.symbol} score=${out.candidate.score} threshold=${Number(control.buyScoreThreshold) > 0 ? Number(control.buyScoreThreshold) : (mode === 'shadow' ? (Number(env.AUTO_SHADOW_SIGNAL_THRESHOLD) || 45) : mode === 'paper' ? (Number(env.AUTO_PAPER_BUY_SCORE_THRESHOLD) || 50) : (Number(env.AUTO_LIVE_BUY_SCORE_THRESHOLD) || 65))} decision=${mappedAction} reason=${out.decisionReason || 'no_candidate'} top=[${topStr}]${hardBlockers}`);
+        log(`[AUTO] selected=${out.candidate.symbol} score=${out.candidate.score} threshold=${out.requiredThreshold || '--'} decision=${mappedAction} reason=${out.decisionReason || 'no_candidate'} top=[${topStr}]${hardBlockers}`);
       } else {
         log(`[AUTO] decision=${mappedAction} reason=${out.decisionReason || 'no_candidate'}${hardBlockers}`);
       }
@@ -353,6 +353,7 @@ export function createAutoLoop({
         action: mappedAction,
         decision: mappedAction,
         decisionReason: out.decisionReason || 'no_candidate',
+        requiredThreshold: out.requiredThreshold,
         scoreGap: out.scoreGap,
         mode: control.mode,
         effectiveMode: mode,
