@@ -205,9 +205,35 @@ test('auto-intent-request creates paper/testnet intent only and rejects duplicat
   assert.equal(res.json.intent.mode, 'testnet');
   assert.equal(res.json.intent.testnet, true);
   assert.equal(res.json.intent.realProductionOrder, false);
+  assert.equal(res.json.stored, true);
+
+  // Same key again while pending → returns existing intent (not 409)
   const dup = await call(workerReq('/api/bot/auto-intent-request', body));
-  assert.equal(dup.status, 409);
-  assert.equal(dup.json.duplicate, true);
+  assert.equal(dup.status, 200);
+  assert.equal(dup.json.existing, true);
+  assert.ok(dup.json.intent);
+  assert.equal(dup.json.intent.id, res.json.intent.id);
+
+  // worker-session must return hasIntent=true with the stored intent
+  const ws = await call(new Request(`https://ctl.example/api/bot/worker-session?sessionId=${sessionId}&workerId=worker_auto_paper`, {
+    method: 'GET', headers: { 'X-BOT-WORKER-TOKEN': process.env.BOT_WORKER_TOKEN, Accept: 'application/json' },
+  }));
+  assert.equal(ws.status, 200);
+  assert.ok(ws.json.intent, 'worker-session must return the pending intent');
+  assert.equal(ws.json.intent.id, res.json.intent.id);
+
+  // After claiming, simulate execution-result to consume the intent
+  const execRes = await call(workerReq('/api/bot/execution-result', {
+    sessionId, workerId: 'worker_auto_paper', id: res.json.intent.id,
+    idempotencyKey: res.json.intent.idempotencyKey, status: 'submitted',
+    symbol: 'BTCUSDC', executedQty: '0.0001', mode: 'testnet', testnet: true, realProductionOrder: false,
+  }));
+  assert.equal(execRes.status, 200);
+
+  // Now the same key must be rejected as consumed
+  const dup2 = await call(workerReq('/api/bot/auto-intent-request', body));
+  assert.equal(dup2.status, 409);
+  assert.equal(dup2.json.duplicate, true);
 });
 
 test('auto live intent is blocked by default and by daily cap', async () => {

@@ -43,6 +43,7 @@ function emptyFleet() {
     botConfigs: {},       // ownerUserId -> BotConfig
     commandQueue: {},     // sessionId -> Command[]
     usedIdempotencyKeys: {}, // sessionId -> string[]
+    autoUsedIdempotencyKeys: {}, // sessionId -> string[] (auto-intent-request creation idempotency, separate from execution-result)
     events: [],           // tagged event ring (sessionId/ownerUserId)
     liveAuditEvents: [],   // immutable live_spot action ring, no secrets
     livePreflight: null,   // sanitized latest local-worker live preflight result
@@ -63,7 +64,7 @@ function normalize(data) {
     if (data[key] !== undefined && data[key] !== null) base[key] = data[key];
   }
   // Defensive: ensure map containers are objects and arrays are arrays.
-  for (const k of ['botSessions', 'workerStatuses', 'executionIntents', 'executionResults', 'positionResults', 'botConfigs', 'commandQueue', 'usedIdempotencyKeys']) {
+  for (const k of ['botSessions', 'workerStatuses', 'executionIntents', 'executionResults', 'positionResults', 'botConfigs', 'commandQueue', 'usedIdempotencyKeys', 'autoUsedIdempotencyKeys']) {
     if (typeof base[k] !== 'object' || Array.isArray(base[k])) base[k] = {};
   }
   if (!Array.isArray(base.events)) base.events = [];

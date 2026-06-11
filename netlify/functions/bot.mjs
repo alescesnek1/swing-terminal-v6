@@ -2091,12 +2091,18 @@ function autoControlForSession(fleet, session) {
   };
 }
 
-function rememberAutoIdempotency(fleet, sessionId, key) {
-  if (!fleet.usedIdempotencyKeys[sessionId]) fleet.usedIdempotencyKeys[sessionId] = [];
-  if (fleet.usedIdempotencyKeys[sessionId].includes(key)) return false;
-  fleet.usedIdempotencyKeys[sessionId].push(key);
-  fleet.usedIdempotencyKeys[sessionId] = fleet.usedIdempotencyKeys[sessionId].slice(-200);
-  return true;
+function isAutoIdempotencyUsed(fleet, sessionId, key) {
+  if (!fleet.autoUsedIdempotencyKeys) fleet.autoUsedIdempotencyKeys = {};
+  if (!fleet.autoUsedIdempotencyKeys[sessionId]) fleet.autoUsedIdempotencyKeys[sessionId] = [];
+  return fleet.autoUsedIdempotencyKeys[sessionId].includes(key);
+}
+function recordAutoIdempotency(fleet, sessionId, key) {
+  if (!fleet.autoUsedIdempotencyKeys) fleet.autoUsedIdempotencyKeys = {};
+  if (!fleet.autoUsedIdempotencyKeys[sessionId]) fleet.autoUsedIdempotencyKeys[sessionId] = [];
+  if (!fleet.autoUsedIdempotencyKeys[sessionId].includes(key)) {
+    fleet.autoUsedIdempotencyKeys[sessionId].push(key);
+    fleet.autoUsedIdempotencyKeys[sessionId] = fleet.autoUsedIdempotencyKeys[sessionId].slice(-200);
+  }
 }
 
 // ── Worker-facing fleet routes (X-BOT-WORKER-TOKEN + sessionId required) ──────
@@ -2250,11 +2256,18 @@ async function handleFleetWorker(req, base, body) {
     if (!sessionId || !idempotencyKey) return json(req, { ok: false, error: 'sessionId and idempotencyKey are required' }, 400);
     if (!['BUY', 'CLOSE'].includes(action)) return json(req, { ok: false, error: 'action must be BUY or CLOSE' }, 400);
     return await mutateFleet(async (fleet) => {
-      if (!rememberAutoIdempotency(fleet, sessionId, idempotencyKey)) {
+      // Check idempotency BEFORE storing the intent. The key is only recorded
+      // AFTER the intent is successfully stored (see below) so that a validation
+      // failure between here and storage does not permanently burn the key.
+      const pendingIntent = autoPendingIntentForSession(fleet, sessionId);
+      if (pendingIntent) {
+        return json(req, { ok: true, existing: true, intent: fleet.executionIntents[sessionId], reason: 'pending_intent' });
+      }
+      if (isAutoIdempotencyUsed(fleet, sessionId, idempotencyKey)) {
         if (!fleet.autoTrader) fleet.autoTrader = {};
         fleet.autoTrader.duplicateIntentBlocks = (Number(fleet.autoTrader.duplicateIntentBlocks) || 0) + 1;
         fevent(fleet, 'AUTO_DUPLICATE_INTENT_BLOCKED', 'warn', 'Duplicate auto intent request blocked by idempotency key.', { sessionId });
-        return json(req, { ok: false, duplicate: true, error: 'Duplicate auto intent request.' }, 409);
+        return json(req, { ok: false, duplicate: true, error: 'Duplicate auto intent request (idempotency key consumed).', reason: 'idempotency_consumed' }, 409);
       }
 
       const session = fleet.botSessions[sessionId];
@@ -2333,11 +2346,12 @@ async function handleFleetWorker(req, base, body) {
           realProductionOrder: false,
         };
         fleet.executionIntents[sessionId] = intent;
+        recordAutoIdempotency(fleet, sessionId, idempotencyKey);
         if (!fleet.autoTrader) fleet.autoTrader = {};
         fleet.autoTrader.lastIntentId = intent.id;
         fleet.autoTrader.idempotencyKey = idempotencyKey;
-        fevent(fleet, 'AUTO_PAPER_INTENT_CREATED', 'info', `Auto paper intent ${intentId.slice(0, 14)} created for ${symbol}.`, { sessionId, ownerUserId: session.ownerUserId });
-        return json(req, { ok: true, intent, session: publicSessionView(fleet, session) });
+        fevent(fleet, 'AUTO_INTENT_CREATED', 'info', `Auto paper intent ${intentId.slice(0, 14)} created for ${symbol} stored=true.`, { sessionId, ownerUserId: session.ownerUserId });
+        return json(req, { ok: true, intent, stored: true, session: publicSessionView(fleet, session) });
       }
 
       if (mode === 'live_spot') {
@@ -2397,12 +2411,13 @@ async function handleFleetWorker(req, base, body) {
           realProductionOrder: true,
         };
         fleet.executionIntents[sessionId] = intent;
+        recordAutoIdempotency(fleet, sessionId, idempotencyKey);
         if (!fleet.autoTrader) fleet.autoTrader = {};
         fleet.autoTrader.lastIntentId = intent.id;
         fleet.autoTrader.idempotencyKey = idempotencyKey;
         liveAudit(fleet, null, 'AUTO_LIVE_INTENT_CREATED', { sessionId, symbol, positionUsd: size, result: 'pending' });
-        fevent(fleet, 'AUTO_LIVE_INTENT_CREATED', 'warn', `Auto live Spot intent ${intentId.slice(0, 16)} created for ${symbol}.`, { sessionId, ownerUserId: session.ownerUserId, mode: 'live_spot' });
-        return json(req, { ok: true, intent, session: publicSessionView(fleet, session) });
+        fevent(fleet, 'AUTO_INTENT_CREATED', 'warn', `Auto live Spot intent ${intentId.slice(0, 16)} created for ${symbol} stored=true.`, { sessionId, ownerUserId: session.ownerUserId, mode: 'live_spot' });
+        return json(req, { ok: true, intent, stored: true, session: publicSessionView(fleet, session) });
       }
 
       return json(req, { ok: false, error: 'Unsupported auto mode.' }, 400);
@@ -2518,13 +2533,15 @@ async function handleFleetWorker(req, base, body) {
     expireStaleIntent(fleet, sessionId);
     let intent = fleet.executionIntents[sessionId] || null;
 
-    // Defense in depth: if the session already has an open position,
-    // or if the intent's idempotency key has already been processed, the intent is STALE.
-    if (intent) {
+    // Defense in depth: if the session already has an open position the BUY
+    // intent is stale (the position was opened from it already). Do NOT check
+    // usedIdempotencyKeys here: the key is recorded at intent *creation* time
+    // for duplicate-request protection, so a freshly-created pending intent
+    // will always have its key present — that is expected, not stale.
+    if (intent && (intent.status === 'pending' || intent.status === 'claimed')) {
       const openPositions = sessionOpenPositions(fleet, sessionId);
-      const isKeyProcessed = fleet.usedIdempotencyKeys && fleet.usedIdempotencyKeys[sessionId] && fleet.usedIdempotencyKeys[sessionId].includes(intent.idempotencyKey);
-      if (openPositions.length > 0 || isKeyProcessed) {
-        fevent(fleet, 'STALE_INTENT_SUPPRESSED', 'warn', `Suppressed stale intent ${intent.id}.`, { sessionId });
+      if (openPositions.length > 0) {
+        fevent(fleet, 'STALE_INTENT_SUPPRESSED', 'warn', `Suppressed stale intent ${intent.id} (open position exists).`, { sessionId });
         delete fleet.executionIntents[sessionId];
         intent = null;
       }
