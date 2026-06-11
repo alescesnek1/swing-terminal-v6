@@ -5156,12 +5156,32 @@ function setAutoTraderMode(mode) {
   });
 }
 
+function setAutoEntriesPaused(paused) {
+  _fleetFetch('POST', '/api/bot/auto-trader/entries', { pause: paused === true }).then((payload) => {
+    if (Fleet.data && payload.autoTrader) Fleet.data.autoTrader = payload.autoTrader;
+    try { window.Toast?.info('Auto entries updated', paused ? 'Entries paused' : 'Entries resumed'); } catch {}
+    refreshFleet();
+  }).catch((err) => {
+    try { window.Toast?.error('Auto entries update failed', err.message); } catch {}
+  });
+}
+
+function forceShadowAutoTick() {
+  _fleetFetch('POST', '/api/bot/auto-trader/force-shadow-tick', {}).then((payload) => {
+    if (Fleet.data && payload.autoTrader) Fleet.data.autoTrader = payload.autoTrader;
+    try { window.Toast?.info('Force Shadow Tick queued', 'Refreshing auto decision state.'); } catch {}
+    refreshFleet();
+  }).catch((err) => {
+    try { window.Toast?.error('Force Shadow Tick failed', err.message); } catch {}
+  });
+}
+
 function openPromoteAutoLiveModal() {
   const auto = (Fleet.data && Fleet.data.autoTrader) || {};
   const live = (Fleet.data && Fleet.data.liveReadiness) || {};
   const dailyCapReason = _liveDailyCapReason(live);
   if (dailyCapReason) { try { window.Toast?.error('Live daily cap exhausted', dailyCapReason); } catch {} return; }
-  const phrase = auto.confirmationPhrase || 'I UNDERSTAND AUTONOMOUS LIVE SPOT USES REAL MONEY';
+  const phrase = auto.confirmationPhrase || 'I UNDERSTAND AUTONOMOUS LIVE SPOT CAN PLACE REAL ORDERS';
   openBotConfirmModal({
     title: 'Promote Auto Trader To Live Spot?',
     severity: 'danger',
@@ -6324,8 +6344,14 @@ function renderFleet() {
   const autoBlocks = (Array.isArray(auto.riskBlocks) ? auto.riskBlocks.slice() : []);
   if (dailyCapReason && !autoBlocks.some((b) => b && b.code === 'DAILY_TRADES_CAP')) autoBlocks.push({ code: 'DAILY_TRADES_CAP', reason: dailyCapReason });
   const autoBlocksView = autoBlocks.slice(0, 5);
+  const autoLiveBlocks = (Array.isArray(auto.liveRiskBlocks) ? auto.liveRiskBlocks : []).slice(0, 5);
   const autoNextMs = auto.nextEvaluationAt ? (new Date(auto.nextEvaluationAt).getTime() - Date.now()) : null;
   const autoNextText = Number.isFinite(autoNextMs) && autoNextMs > 0 ? Math.ceil(autoNextMs / 1000) + 's' : (auto.nextEvaluationAt ? 'due' : '--');
+  const autoCooldownMs = auto.cooldownUntil ? (new Date(auto.cooldownUntil).getTime() - Date.now()) : null;
+  const autoCooldownText = Number.isFinite(autoCooldownMs) && autoCooldownMs > 0 ? Math.ceil(autoCooldownMs / 1000) + 's' : (auto.cooldownUntil ? 'done' : '--');
+  const autoSnapshotText = auto.snapshotAgeMs != null && isFinite(auto.snapshotAgeMs) ? Math.round(auto.snapshotAgeMs / 1000) + 's' : '--';
+  const autoRuntimeText = anyWorkerOnline ? 'worker online' : 'worker offline';
+  const autoEvidence = auto.evidence || {};
   const autoCanPromoteLive = auto.canPromoteLive === true && auto.liveExecutionAllowed === true && !dailyCapReason;
   const autoPromoteTitle = autoCanPromoteLive ? 'Promote to live Spot' : (dailyCapReason || ('Live auto locked: ' + ((auto.liveGateMissing || []).join(', ') || 'gates/evidence missing')));
   html += '<div class="fleet-auto-trader">'
@@ -6335,13 +6361,20 @@ function renderFleet() {
     + '</div>'
     + '<div class="fleet-auto-trader__copy">Dormant by default. Shadow observes only; paper cannot create live intents; live stays locked until every live Spot gate passes.</div>'
     + '<div class="fleet-live-readiness__caps fleet-auto-trader__grid">'
+    + '<div><span>Runtime</span><b>' + _esc(autoRuntimeText) + '</b></div>'
+    + '<div><span>Mode</span><b>' + _esc(auto.status || 'OFF') + '</b></div>'
     + '<div><span>Candidate</span><b>' + _esc(autoCandidate.symbol || '--') + '</b></div>'
     + '<div><span>Score</span><b>' + (auto.score != null ? _esc(auto.score) : (autoCandidate.score != null ? _esc(autoCandidate.score) : '--')) + '</b></div>'
+    + '<div><span>Data source</span><b>' + _esc(auto.dataSource || (auto.universeDiagnostics && auto.universeDiagnostics.dataSource) || '--') + '</b></div>'
+    + '<div><span>Snapshot age</span><b>' + _esc(autoSnapshotText) + '</b></div>'
     + '<div><span>Daily trades</span><b>' + _esc((auto.dailyTradesUsed != null ? auto.dailyTradesUsed : (live.dailyTradesUsed || 0)) + '/' + (auto.maxDailyTrades != null ? auto.maxDailyTrades : (liveCaps.maxDailyTrades || '--'))) + '</b></div>'
     + '<div><span>Remaining</span><b>' + _esc(auto.dailyTradesRemaining != null ? auto.dailyTradesRemaining : (live.dailyTradesRemaining != null ? live.dailyTradesRemaining : '--')) + '</b></div>'
-    + '<div><span>Last decision</span><b>' + _esc(auto.lastDecision || '--') + '</b></div>'
+    + '<div><span>Last decision</span><b>' + _esc(auto.action || auto.lastDecision || '--') + '</b></div>'
     + '<div><span>Next eval</span><b>' + _esc(autoNextText) + '</b></div>'
-    + '<div><span>Position mgmt</span><b>' + _esc(auto.positionState || 'flat / idle') + '</b></div>'
+    + '<div><span>Strategy</span><b>' + _esc(auto.strategyVersion || '--') + '</b></div>'
+    + '<div><span>Cooldown</span><b>' + _esc(autoCooldownText) + '</b></div>'
+    + '<div><span>Position mgmt</span><b>' + _esc(auto.positionState || (auto.positionMgmt && auto.positionMgmt.state) || 'flat / idle') + '</b></div>'
+    + '<div><span>Last intent</span><b>' + _esc(auto.lastIntentId || '--') + '</b></div>'
     + '<div><span>Live lock</span><b>' + _esc(auto.liveExecutionAllowed ? 'gate passed' : 'locked') + '</b></div>'
     + '</div>';
     
@@ -6394,6 +6427,15 @@ function renderFleet() {
   html += '<div class="fleet-auto-trader__cols">'
     + '<div><span>Reasons</span>' + (autoReasons.length ? '<ul>' + autoReasons.map((r) => '<li>' + _esc(r) + '</li>').join('') + '</ul>' : '<p>--</p>') + '</div>'
     + '<div><span>Risk blocks</span>' + (autoBlocksView.length ? '<ul>' + autoBlocksView.map((b) => '<li>' + _esc((b.code ? b.code + ': ' : '') + (b.reason || b)) + '</li>').join('') + '</ul>' : '<p>none reported</p>') + '</div>'
+    + '<div><span>Live risk blocks</span>' + (autoLiveBlocks.length ? '<ul>' + autoLiveBlocks.map((b) => '<li>' + _esc((b.code ? b.code + ': ' : '') + (b.reason || b)) + '</li>').join('') + '</ul>' : '<p>none reported</p>') + '</div>'
+    + '<div><span>Evidence state</span><ul>'
+      + '<li>Shadow evaluations: ' + _esc(autoEvidence.shadowEvaluations != null ? autoEvidence.shadowEvaluations : 0) + '/20</li>'
+      + '<li>Paper round-trips: ' + _esc(autoEvidence.paperRoundTrips != null ? autoEvidence.paperRoundTrips : 0) + '/5</li>'
+      + '<li>Failed closes: ' + _esc(autoEvidence.failedCloses != null ? autoEvidence.failedCloses : 0) + '</li>'
+      + '<li>Duplicate blocks: ' + _esc(autoEvidence.duplicateIntentBlocks != null ? autoEvidence.duplicateIntentBlocks : 0) + '</li>'
+      + '<li>Safety locks: ' + _esc(autoEvidence.safetyLockEvents != null ? autoEvidence.safetyLockEvents : 0) + '</li>'
+      + '<li>Passed: ' + _esc(autoEvidence.passed ? 'yes' : 'no') + '</li>'
+    + '</ul></div>'
     + diagnosticsHtml
     + '</div>'
     + (auto.liveExecutionAllowed ? '' : '<div class="fleet-auto-trader__locked">' + (auto.effectiveMode === 'shadow' ? 'Shadow observation active. Live promotion locked: missing ' : (auto.mode === 'live_spot' ? 'Live auto locked: missing ' : 'Live promotion locked: missing ')) + _esc((auto.liveGateMissing || []).join(', ') || 'required gates') + '</div>')
@@ -6402,6 +6444,9 @@ function renderFleet() {
       + '<button type="button" class="paperbot-control-btn" onclick="setAutoTraderMode(\'off\')">Disable Auto</button>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--install" onclick="setAutoTraderMode(\'paper\')">Promote to Paper</button>'
       + '<button type="button" class="paperbot-control-btn paperbot-control-btn--live" onclick="openPromoteAutoLiveModal()"' + (autoCanPromoteLive ? '' : ' disabled title="' + _esc(autoPromoteTitle) + '"') + '>Promote to Live</button>'
+      + '<button type="button" class="paperbot-control-btn" onclick="setAutoEntriesPaused(true)"' + (auto.entriesPaused ? ' disabled' : '') + '>Pause Auto Entries</button>'
+      + '<button type="button" class="paperbot-control-btn" onclick="setAutoEntriesPaused(false)"' + (!auto.entriesPaused ? ' disabled' : '') + '>Resume Auto Entries</button>'
+      + '<button type="button" class="paperbot-control-btn" onclick="forceShadowAutoTick()">Force Shadow Tick</button>'
       + '</div>' : '')
     + '</div>';
 

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 // Shared with the Netlify auto-trader fallback; the worker is the PRIMARY source
 // because serverless egress to Binance public endpoints can be blocked (HTTP 451).
 import { fetchBinancePublicSnapshot, PUBLIC_SNAPSHOT_SOURCE } from './auto/binance-public.mjs';
+import { createAutoLoop } from './auto/auto-loop.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -471,6 +472,11 @@ let recovery404Logged = false;
 let heartbeatTimer = null;
 let pollTimer = null;
 let marketSnapshotTimer = null;
+let autoLoop = null;
+let latestAutoControl = null;
+let latestMarketSnapshot = null;
+let hydratedSinceStart = false;
+let lastBackendOkAt = 0;
 let marketSnapshotRunning = false;
 let marketSnapshotFailLogged = false;
 
@@ -478,9 +484,11 @@ function finishWorker(code) {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (pollTimer) clearInterval(pollTimer);
   if (marketSnapshotTimer) clearInterval(marketSnapshotTimer);
+  if (autoLoop) autoLoop.stop();
   heartbeatTimer = null;
   pollTimer = null;
   marketSnapshotTimer = null;
+  autoLoop = null;
   process.exitCode = code;
 }
 
@@ -564,6 +572,11 @@ async function fetchSession() {
     }
     recovery404Logged = false;
     missingSessionSince = 0;
+    lastBackendOkAt = Date.now();
+    if (payload && payload.autoControl) {
+      latestAutoControl = { ...payload.autoControl, receivedAt: lastBackendOkAt };
+    }
+    if (payload && payload.session) hydratedSinceStart = true;
     return { ...payload, is5xx: false };
   } catch (err) { 
     console.log(`[WARN] Session poll error: ${err.message}`); 
@@ -699,6 +712,7 @@ async function fetchAndPostMarketSnapshot() {
       return { ok: false, error: err.message };
     }
     marketSnapshotFailLogged = false;
+    latestMarketSnapshot = snapshot;
     try {
       const res = await postAutoMarketSnapshot({ fetchedAt: snapshot.fetchedAt, markets: snapshot.markets, diagnostics: snapshot.diagnostics });
       console.log(`[SNAPSHOT] Posted public market snapshot (${snapshot.markets.length} markets) ok=${res.ok}`);
@@ -710,6 +724,66 @@ async function fetchAndPostMarketSnapshot() {
   } finally {
     marketSnapshotRunning = false;
   }
+}
+
+async function postAutoDecision(payload) {
+  const res = await fetch(`${controlUrl}/api/bot/auto-decision`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-BOT-WORKER-TOKEN': workerToken },
+    body: JSON.stringify({ workerId, sessionId, ...payload }),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error((json && (json.error || json.reason)) || `auto-decision HTTP ${res.status}`);
+  return json;
+}
+
+async function requestAutoIntent(payload) {
+  const res = await fetch(`${controlUrl}/api/bot/auto-intent-request`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-BOT-WORKER-TOKEN': workerToken },
+    body: JSON.stringify({ workerId, sessionId, ...payload }),
+  });
+  const json = await res.json().catch(() => null);
+  return { status: res.status, json };
+}
+
+function latestSnapshotForAuto() {
+  const snap = latestMarketSnapshot;
+  if (!snap || !snap.fetchedAt) return null;
+  const ageMs = Date.now() - new Date(snap.fetchedAt).getTime();
+  return { snapshot: snap, ageMs: Number.isFinite(ageMs) ? Math.max(0, ageMs) : Infinity };
+}
+
+async function refreshSnapshotForAuto() {
+  const res = await fetchAndPostMarketSnapshot();
+  return res && latestMarketSnapshot ? latestMarketSnapshot : null;
+}
+
+function updateAutoPosition(pos) {
+  saveState();
+}
+
+function startAutoRuntime() {
+  if (autoLoop) return autoLoop;
+  autoLoop = createAutoLoop({
+    env: process.env,
+    sessionId,
+    log: (line) => console.log(line),
+    getControl: () => latestAutoControl,
+    isStopping: () => stopping || currentState === 'stopping' || currentState === 'stopped',
+    isHydrated: () => hydratedSinceStart,
+    backendHealthy: () => Date.now() - lastBackendOkAt < Math.max(45000, pollIntervalMs * 4),
+    getOpenPositions,
+    getSnapshot: latestSnapshotForAuto,
+    refreshSnapshot: refreshSnapshotForAuto,
+    getPrice: async (symbol) => getTickerPrice(symbol),
+    updatePosition: updateAutoPosition,
+    postDecision: postAutoDecision,
+    requestIntent: requestAutoIntent,
+    evalIntervalMs: Number(process.env.AUTO_EVAL_INTERVAL_MS) || undefined,
+  });
+  autoLoop.start();
+  return autoLoop;
 }
 
 function liveEnvGateSnapshot() {
@@ -1507,6 +1581,7 @@ async function main() {
   }, HEARTBEAT_INTERVAL_MS);
   pollTimer = setInterval(() => { tick().catch((err) => console.log('[ERROR] tick failed:', err.message)); }, pollIntervalMs);
   tick().catch((err) => console.log('[ERROR] tick failed:', err.message));
+  startAutoRuntime();
   // Public market snapshot feed: 60s cadence, never on the 5s heartbeat, and
   // strictly fire-and-forget so close/stop always takes priority.
   if (marketSnapshotEnabled) {
@@ -1589,4 +1664,5 @@ export {
   sendHeartbeat,
   tick,
   fetchAndPostMarketSnapshot,
+  startAutoRuntime,
 };

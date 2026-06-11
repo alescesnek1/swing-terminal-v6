@@ -22,7 +22,12 @@ test('UI exposes shadow, disable, paper and live promotion controls, and hides/d
   assert.match(terminalJs, /Disable Auto/);
   assert.match(terminalJs, /Promote to Paper/);
   assert.match(terminalJs, /Promote to Live/);
+  assert.match(terminalJs, /Pause Auto Entries/);
+  assert.match(terminalJs, /Resume Auto Entries/);
+  assert.match(terminalJs, /Force Shadow Tick/);
   assert.match(terminalJs, /function setAutoTraderMode\(mode\)/);
+  assert.match(terminalJs, /function setAutoEntriesPaused\(paused\)/);
+  assert.match(terminalJs, /function forceShadowAutoTick\(\)/);
   assert.ok(terminalJs.includes("setAutoTraderMode(\\'shadow\\')"));
   assert.ok(terminalJs.includes("setAutoTraderMode(\\'paper\\')"));
   assert.match(terminalJs, /auto\.effectiveMode === 'shadow' \? ' disabled title="Shadow Auto is already active"' : ''/);
@@ -33,7 +38,7 @@ test('UI exposes shadow, disable, paper and live promotion controls, and hides/d
 
 test('live auto promotion uses explicit modal phrase confirmation', () => {
   assert.match(terminalJs, /function openPromoteAutoLiveModal/);
-  assert.match(terminalJs, /I UNDERSTAND AUTONOMOUS LIVE SPOT USES REAL MONEY/);
+  assert.match(terminalJs, /I UNDERSTAND AUTONOMOUS LIVE SPOT CAN PLACE REAL ORDERS/);
   assert.match(terminalJs, /phraseExpected: phrase/);
   assert.match(terminalJs, /confirmLivePhrase: phrase/);
   assert.match(terminalJs, /updateBotConfirmPhrase/);

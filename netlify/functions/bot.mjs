@@ -1280,7 +1280,46 @@ const AUTO_LIVE_REQUIRED_FLAGS = [
   ['LOCAL_WORKER_LIVE_CONFIRM', 'true'],
   ['LIVE_SPOT_ACK', LIVE_SPOT_ACK_TEXT],
 ];
-const AUTO_LIVE_CONFIRM_PHRASE = 'I UNDERSTAND AUTONOMOUS LIVE SPOT USES REAL MONEY';
+const AUTO_LIVE_CONFIRM_PHRASE = 'I UNDERSTAND AUTONOMOUS LIVE SPOT CAN PLACE REAL ORDERS';
+// 24/7 worker auto loop coordination (all state lives under fleet.autoTrader —
+// already whitelisted in _fleet-store normalize, so it survives reload).
+const AUTO_EVAL_INTERVAL_MS = Math.max(5000, Number(process.env.AUTO_EVAL_INTERVAL_MS) || 60000);
+const AUTO_BUY_SCORE_THRESHOLD = Number(process.env.AUTO_BUY_SCORE_THRESHOLD) > 0 ? Number(process.env.AUTO_BUY_SCORE_THRESHOLD) : 60;
+const AUTO_COOLDOWN_AFTER_CLOSE_MS = Number(process.env.AUTO_COOLDOWN_AFTER_CLOSE_MS) >= 0 ? Number(process.env.AUTO_COOLDOWN_AFTER_CLOSE_MS) : 300000;
+// Evidence thresholds required before live auto promotion.
+const AUTO_EVIDENCE_MIN_SHADOW_EVALUATIONS = 20;
+const AUTO_EVIDENCE_MIN_PAPER_ROUND_TRIPS = 5;
+function autoTraderEvidence(fleet) {
+  const persisted = (fleet && fleet.autoTrader) || {};
+  const events = (fleet && fleet.events) || [];
+  const shadowEvaluations = Number(persisted.shadowEvaluations) || 0;
+  const paperRoundTripsFromResults = Object.entries((fleet && fleet.botSessions) || {})
+    .filter(([, s]) => s && s.mode !== 'live_spot')
+    .reduce((acc, [sid]) => acc + sessionClosedTrades(fleet, sid).filter((t) => t.mode !== 'live_spot').length, 0);
+  const paperRoundTrips = Math.max(Number(persisted.paperRoundTrips) || 0, Number(persisted.paperTradeCount) || 0, paperRoundTripsFromResults);
+  const failedCloses = Math.max(Number(persisted.failedCloses) || 0, events.filter((e) => e && e.type === 'WORKER_CLOSE_FAILED').length);
+  const duplicateIntentBlocks = Number(persisted.duplicateIntentBlocks) || 0;
+  const safetyLockEvents = Math.max(Number(persisted.safetyLockEvents) || 0, events.filter((e) => e && e.type === 'LIVE_SAFETY_LOCK_ENGAGED').length);
+  const dailyCapRespected = persisted.dailyCapRespected !== false;
+  const oneOpenPositionRespected = persisted.oneOpenPositionRespected !== false;
+  const passed = shadowEvaluations >= AUTO_EVIDENCE_MIN_SHADOW_EVALUATIONS
+    && paperRoundTrips >= AUTO_EVIDENCE_MIN_PAPER_ROUND_TRIPS
+    && failedCloses === 0
+    && duplicateIntentBlocks === 0
+    && safetyLockEvents === 0
+    && dailyCapRespected
+    && oneOpenPositionRespected;
+  return {
+    shadowEvaluations,
+    paperRoundTrips,
+    failedCloses,
+    duplicateIntentBlocks,
+    safetyLockEvents,
+    dailyCapRespected,
+    oneOpenPositionRespected,
+    passed,
+  };
+}
 function autoLiveExecutionGate() {
   const missing = AUTO_LIVE_REQUIRED_FLAGS
     .filter(([k, v]) => String(process.env[k] == null ? '' : process.env[k]) !== v)
@@ -1304,7 +1343,8 @@ function autoTraderStatus(fleet, identity = null) {
   }
   const caps = liveRiskCaps(identity && identity.userId ? getUserConfig(fleet, identity.userId) : null);
   const daily = liveDailyCounters(fleet);
-  const paperEvidence = Number(persisted.paperTradeCount) || 0;
+  const evidence = autoTraderEvidence(fleet);
+  const paperEvidence = evidence.paperRoundTrips;
   const riskBlocks = Array.isArray(persisted.riskBlocks) ? persisted.riskBlocks.slice() : [];
   if (daily.trades >= caps.maxDailyTrades) {
     riskBlocks.push({
@@ -1323,6 +1363,7 @@ function autoTraderStatus(fleet, identity = null) {
     score: Number.isFinite(Number(persisted.score)) ? Number(persisted.score) : null,
     reasons: Array.isArray(persisted.reasons) ? persisted.reasons : [],
     riskBlocks,
+    liveRiskBlocks: Array.isArray(persisted.liveRiskBlocks) ? persisted.liveRiskBlocks : [],
     liveExecutionAllowed: gate.allowed,
     liveGateMissing: gate.missing,
     liveAllowedSymbols: caps.allowedSymbols,
@@ -1332,14 +1373,27 @@ function autoTraderStatus(fleet, identity = null) {
     dailyLossUsd: daily.realizedLoss,
     maxDailyLossUsd: caps.maxDailyLossUsd,
     dailyLossRemainingUsd: Math.max(0, caps.maxDailyLossUsd - daily.realizedLoss),
-    evalIntervalSec: Number(process.env.AUTO_TRADER_EVAL_SEC) || 60,
-    lastDecision: persisted.lastDecision || null,
+    evalIntervalSec: Math.round(AUTO_EVAL_INTERVAL_MS / 1000),
+    evalIntervalMs: AUTO_EVAL_INTERVAL_MS,
+    lastDecision: persisted.lastDecision || persisted.decision || null,
+    action: persisted.action || null,
     nextEvaluationAt: persisted.nextEvaluationAt || null,
-    positionState: persisted.positionState || null,
+    lastEvaluationAt: persisted.lastEvaluationAt || null,
+    candidate: persisted.candidate || null,
+    positionState: persisted.positionState || (persisted.positionMgmt && persisted.positionMgmt.state) || null,
+    positionMgmt: persisted.positionMgmt || null,
+    dataSource: persisted.dataSource || null,
+    snapshotAgeMs: Number.isFinite(Number(persisted.snapshotAgeMs)) ? Number(persisted.snapshotAgeMs) : null,
+    strategyVersion: persisted.strategyVersion || null,
+    cooldownUntil: persisted.cooldownUntil || null,
+    lastIntentId: persisted.lastIntentId || null,
+    idempotencyKey: persisted.idempotencyKey || null,
+    evidence,
+    entriesPaused: persisted.entriesPaused === true,
     paperTradeCount: paperEvidence,
     confirmationPhrase: AUTO_LIVE_CONFIRM_PHRASE,
     // Live promotion requires the env gate to pass AND evidence (paper round-trips).
-    canPromoteLive: gate.allowed && paperEvidence > 0,
+    canPromoteLive: gate.allowed && evidence.passed,
     universeDiagnostics: persisted.universeDiagnostics || null,
   };
 }
@@ -1878,6 +1932,127 @@ function autoMarketSnapshotAgeMs(snapshot, nowMs = Date.now()) {
   return Number.isFinite(t) ? Math.max(0, nowMs - t) : Infinity;
 }
 
+function autoPendingIntentForSession(fleet, sessionId) {
+  expireStaleIntent(fleet, sessionId);
+  const intent = fleet.executionIntents && fleet.executionIntents[sessionId];
+  return !!(intent && (intent.status === 'pending' || intent.status === 'claimed'));
+}
+
+function autoOpenPositionsCount(fleet) {
+  return Object.values((fleet && fleet.botSessions) || {})
+    .reduce((acc, s) => acc + sessionOpenPositions(fleet, s.sessionId).length, 0);
+}
+
+function sanitizeAutoBlocks(input) {
+  return Array.isArray(input) ? input.slice(0, 20).map((b) => {
+    if (b && typeof b === 'object') {
+      return {
+        code: b.code != null ? String(b.code).slice(0, 80) : null,
+        reason: b.reason != null ? String(b.reason).slice(0, 240) : String(b).slice(0, 240),
+      };
+    }
+    return { code: null, reason: String(b).slice(0, 240) };
+  }) : [];
+}
+
+function sanitizeAutoCandidate(input) {
+  if (!input || typeof input !== 'object' || !input.symbol) return null;
+  return {
+    symbol: String(input.symbol).toUpperCase().slice(0, 24),
+    score: Number.isFinite(Number(input.score)) ? Number(input.score) : null,
+    reasons: Array.isArray(input.reasons) ? input.reasons.slice(0, 8).map((r) => String(r).slice(0, 180)) : [],
+    riskFlags: Array.isArray(input.riskFlags) ? input.riskFlags.slice(0, 8).map((r) => String(r).slice(0, 80)) : [],
+    recommendedPositionUsd: Number.isFinite(Number(input.recommendedPositionUsd)) ? Number(input.recommendedPositionUsd) : null,
+  };
+}
+
+function sanitizeAutoPositionMgmt(input) {
+  if (!input || typeof input !== 'object') return null;
+  return {
+    state: input.state ? String(input.state).slice(0, 40) : null,
+    symbol: input.symbol ? String(input.symbol).toUpperCase().slice(0, 24) : null,
+    entryPrice: Number.isFinite(Number(input.entryPrice)) ? Number(input.entryPrice) : null,
+    price: Number.isFinite(Number(input.price)) ? Number(input.price) : null,
+    peakPrice: Number.isFinite(Number(input.peakPrice)) ? Number(input.peakPrice) : null,
+    pnlPct: Number.isFinite(Number(input.pnlPct)) ? Number(input.pnlPct) : null,
+    exitCode: input.exitCode ? String(input.exitCode).slice(0, 60) : null,
+  };
+}
+
+function sanitizeAutoDecisionBody(body) {
+  const action = String(body.action || body.decision || 'NONE').toUpperCase();
+  return {
+    sessionId: String(body.sessionId || '').slice(0, 100),
+    action: ['NONE', 'SHADOW_BUY', 'PAPER_BUY', 'LIVE_BUY', 'CLOSE', 'HOLD', 'SHADOW_CLOSE', 'BLOCKED'].includes(action) ? action : 'NONE',
+    decision: String(body.decision || action).slice(0, 80),
+    mode: ['shadow', 'paper', 'live_spot'].includes(String(body.mode || '').toLowerCase()) ? String(body.mode).toLowerCase() : 'shadow',
+    effectiveMode: String(body.effectiveMode || '').slice(0, 40),
+    candidate: sanitizeAutoCandidate(body.candidate),
+    score: Number.isFinite(Number(body.score)) ? Number(body.score) : null,
+    reasons: Array.isArray(body.reasons) ? body.reasons.slice(0, 12).map((r) => String(r).slice(0, 200)) : [],
+    riskBlocks: sanitizeAutoBlocks(body.riskBlocks),
+    liveRiskBlocks: sanitizeAutoBlocks(body.liveRiskBlocks),
+    positionMgmt: sanitizeAutoPositionMgmt(body.positionMgmt),
+    dataSource: body.dataSource ? String(body.dataSource).slice(0, 80) : null,
+    snapshotAgeMs: Number.isFinite(Number(body.snapshotAgeMs)) ? Number(body.snapshotAgeMs) : null,
+    strategyVersion: body.strategyVersion ? String(body.strategyVersion).slice(0, 80) : 'auto-loop-v1',
+    cooldownUntil: body.cooldownUntil ? String(body.cooldownUntil).slice(0, 60) : null,
+    idempotencyKey: body.idempotencyKey ? String(body.idempotencyKey).slice(0, 160) : null,
+    evalIntervalMs: Number.isFinite(Number(body.evalIntervalMs)) ? Math.max(5000, Number(body.evalIntervalMs)) : AUTO_EVAL_INTERVAL_MS,
+  };
+}
+
+function autoDecisionEventType(d) {
+  if (d.mode === 'shadow' || d.action === 'SHADOW_BUY' || d.action === 'SHADOW_CLOSE') return 'AUTO_SHADOW_DECISION';
+  if (d.mode === 'paper' || d.action === 'PAPER_BUY') return 'AUTO_PAPER_DECISION';
+  if (d.action === 'LIVE_BUY') return 'AUTO_LIVE_DECISION_BLOCKED';
+  return 'AUTO_SHADOW_DECISION';
+}
+
+function autoControlForSession(fleet, session) {
+  const persisted = (fleet && fleet.autoTrader) || {};
+  const status = autoTraderStatus(fleet, null);
+  const config = completeBotConfig((session && session.config) || defaultBotConfig());
+  const caps = liveRiskCaps(config);
+  const daily = liveDailyCounters(fleet);
+  const quoteAsset = 'USDC';
+  const freeQuote = liveFreeQuoteBalance(fleet, quoteAsset);
+  const openPositions = autoOpenPositionsCount(fleet);
+  return {
+    enabled: status.enabled,
+    mode: status.mode,
+    effectiveMode: status.effectiveMode,
+    entriesPaused: persisted.entriesPaused === true,
+    cooldownUntil: persisted.cooldownUntil || null,
+    evalIntervalMs: AUTO_EVAL_INTERVAL_MS,
+    buyScoreThreshold: AUTO_BUY_SCORE_THRESHOLD,
+    liveAllowedSymbols: caps.allowedSymbols,
+    caps,
+    regime: fleet.lastRegime || null,
+    gates: {
+      durable: isDurableEnough(),
+      preflightFresh: livePreflightFresh(fleet),
+      openPositions,
+      pendingIntent: session ? autoPendingIntentForSession(fleet, session.sessionId) : false,
+      safetyLock: liveSafetyLockActive(fleet),
+      globalKill: fleetGlobalKillSwitchActive(fleet),
+      sessionPaused: session && session.pauseRequested === true,
+      dailyTradesUsed: daily.trades,
+      dailyLossUsd: daily.realizedLoss,
+      freeQuote: freeQuote.value,
+      quoteAsset,
+    },
+  };
+}
+
+function rememberAutoIdempotency(fleet, sessionId, key) {
+  if (!fleet.usedIdempotencyKeys[sessionId]) fleet.usedIdempotencyKeys[sessionId] = [];
+  if (fleet.usedIdempotencyKeys[sessionId].includes(key)) return false;
+  fleet.usedIdempotencyKeys[sessionId].push(key);
+  fleet.usedIdempotencyKeys[sessionId] = fleet.usedIdempotencyKeys[sessionId].slice(-200);
+  return true;
+}
+
 // ── Worker-facing fleet routes (X-BOT-WORKER-TOKEN + sessionId required) ──────
 async function handleFleetWorker(req, base, body) {
   if (base === 'live-preflight-result') {
@@ -1957,6 +2132,215 @@ async function handleFleetWorker(req, base, body) {
     });
   }
 
+  if (base === 'auto-decision') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    const d = sanitizeAutoDecisionBody(body);
+    const nowMs = Date.now();
+    const eventType = autoDecisionEventType(d);
+    return await mutateFleet(async (fleet) => {
+      const prev = fleet.autoTrader || {};
+      const nextEvaluationAt = new Date(nowMs + d.evalIntervalMs).toISOString();
+      const next = {
+        ...prev,
+        lastEvaluationAt: new Date(nowMs).toISOString(),
+        nextEvaluationAt,
+        candidate: d.candidate,
+        score: d.score,
+        reasons: d.reasons,
+        riskBlocks: d.riskBlocks,
+        liveRiskBlocks: d.liveRiskBlocks,
+        decision: d.decision,
+        lastDecision: d.decision,
+        action: d.action,
+        positionMgmt: d.positionMgmt,
+        positionState: d.positionMgmt && d.positionMgmt.state ? d.positionMgmt.state : (d.action === 'HOLD' ? 'managing' : 'flat'),
+        dataSource: d.dataSource,
+        snapshotAgeMs: d.snapshotAgeMs,
+        strategyVersion: d.strategyVersion,
+        cooldownUntil: d.cooldownUntil || prev.cooldownUntil || null,
+        idempotencyKey: d.idempotencyKey || prev.idempotencyKey || null,
+        evaluationRunning: false,
+        workerRuntime: {
+          online: true,
+          sessionId: d.sessionId || null,
+          lastDecisionAt: new Date(nowMs).toISOString(),
+        },
+      };
+      if (d.mode === 'shadow') next.shadowEvaluations = (Number(prev.shadowEvaluations) || 0) + 1;
+      if (d.riskBlocks.some((b) => b.code === 'DAILY_TRADES_CAP')) next.dailyCapRespected = true;
+      if (autoOpenPositionsCount(fleet) <= 1) next.oneOpenPositionRespected = prev.oneOpenPositionRespected !== false;
+      else next.oneOpenPositionRespected = false;
+      if (fleet.liveSafetyLock && fleet.liveSafetyLock.active === true) {
+        next.safetyLockEvents = Math.max(Number(prev.safetyLockEvents) || 0, 1);
+      }
+      fleet.autoTrader = next;
+      fevent(fleet, eventType, eventType === 'AUTO_LIVE_DECISION_BLOCKED' ? 'warn' : 'info',
+        `Auto trader ${d.mode} decision: ${d.action}.`,
+        { sessionId: d.sessionId || null, candidate: d.candidate, strategyVersion: d.strategyVersion });
+      return json(req, { ok: true, autoTrader: autoTraderStatus(fleet, null) });
+    });
+  }
+
+  if (base === 'auto-intent-request') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    const sessionId = String(body.sessionId || '').slice(0, 100);
+    const idempotencyKey = String(body.idempotencyKey || '').slice(0, 160);
+    const action = String(body.action || '').toUpperCase();
+    const side = String(body.side || '').toUpperCase();
+    const mode = String(body.mode || '').toLowerCase();
+    const symbol = String(body.symbol || '').toUpperCase().slice(0, 24);
+    const positionUsd = Number(body.positionUsd);
+    if (!sessionId || !idempotencyKey) return json(req, { ok: false, error: 'sessionId and idempotencyKey are required' }, 400);
+    if (!['BUY', 'CLOSE'].includes(action)) return json(req, { ok: false, error: 'action must be BUY or CLOSE' }, 400);
+    return await mutateFleet(async (fleet) => {
+      if (!rememberAutoIdempotency(fleet, sessionId, idempotencyKey)) {
+        if (!fleet.autoTrader) fleet.autoTrader = {};
+        fleet.autoTrader.duplicateIntentBlocks = (Number(fleet.autoTrader.duplicateIntentBlocks) || 0) + 1;
+        fevent(fleet, 'AUTO_DUPLICATE_INTENT_BLOCKED', 'warn', 'Duplicate auto intent request blocked by idempotency key.', { sessionId });
+        return json(req, { ok: false, duplicate: true, error: 'Duplicate auto intent request.' }, 409);
+      }
+
+      const session = fleet.botSessions[sessionId];
+      if (!session) return json(req, { ok: false, error: 'Session not found' }, 404);
+      const status = autoTraderStatus(fleet, null);
+      const effectiveMode = status.effectiveMode;
+      if (effectiveMode === 'off' || status.enabled === false) return json(req, { ok: false, error: 'Auto trader is off.' }, 409);
+      if (mode === 'shadow' || effectiveMode === 'shadow') return json(req, { ok: false, error: 'Shadow auto cannot create intents.' }, 409);
+      if (mode === 'paper' && effectiveMode !== 'paper') return json(req, { ok: false, error: 'Paper auto is not active.' }, 409);
+      if (mode === 'live_spot' && effectiveMode !== 'live_spot') {
+        fevent(fleet, 'AUTO_LIVE_DECISION_BLOCKED', 'warn', 'Auto live intent blocked: live mode is locked.', { sessionId, symbol });
+        return json(req, { ok: false, error: 'Live auto is locked.' }, 409);
+      }
+
+      if (action === 'CLOSE') {
+        const open = sessionOpenPositions(fleet, sessionId);
+        if (open.length === 0) return json(req, { ok: false, error: 'No open position to close.' }, 409);
+        const queued = (fleet.commandQueue[sessionId] || []).some((c) => !c.consumedAt && c.type === 'EMERGENCY_CLOSE');
+        if (queued) return json(req, { ok: true, existing: true, commandQueued: true });
+        const cmd = queueCommand(fleet, sessionId, 'EMERGENCY_CLOSE', 'auto-trader');
+        session.pauseRequested = true;
+        session.updatedAt = new Date().toISOString();
+        if (!fleet.autoTrader) fleet.autoTrader = {};
+        fleet.autoTrader.lastIntentId = cmd.id;
+        fleet.autoTrader.idempotencyKey = idempotencyKey;
+        fleet.autoTrader.cooldownUntil = new Date(Date.now() + AUTO_COOLDOWN_AFTER_CLOSE_MS).toISOString();
+        fevent(fleet, 'AUTO_CLOSE_INTENT_CREATED', 'warn', `Auto close command queued for ${sessionId.slice(0, 12)}.`, { sessionId, symbol });
+        return json(req, { ok: true, command: cmd, commandQueued: true });
+      }
+
+      if (!symbol || side !== 'BUY') return json(req, { ok: false, error: 'BUY requires symbol and side=BUY.' }, 400);
+      const openCount = autoOpenPositionsCount(fleet);
+      if (openCount > 0) return json(req, { ok: false, error: 'One-open-position rule: an open position already exists.' }, 409);
+      if (autoPendingIntentForSession(fleet, sessionId)) return json(req, { ok: true, existing: true, intent: fleet.executionIntents[sessionId] });
+      const sessWorker = sessionWorkerStatus(fleet, session);
+      if (!workerIsOnline(sessWorker)) return json(req, { ok: false, error: 'Worker not online for session.' }, 409);
+      const entryBlock = entryBlockState(fleet, session);
+      const blocked = entryBlockedResponse(req, entryBlock);
+      if (blocked) return blocked;
+
+      if (mode === 'paper') {
+        if (process.env.BINANCE_ENV !== 'testnet' || process.env.BOT_ALLOW_TESTNET_ORDERS !== 'true') {
+          return json(req, { ok: false, error: 'Paper/testnet execution is not allowed.' }, 403);
+        }
+        const config = completeBotConfig(session.config || defaultBotConfig());
+        const size = Number.isFinite(positionUsd) && positionUsd > 0 ? positionUsd : Math.min(config.maxTradeUsd, TESTNET_MAX_TRADE_USD);
+        if (!(size >= config.minTradeUsd && size <= config.maxTradeUsd && size <= TESTNET_MAX_TRADE_USD)) {
+          return json(req, { ok: false, error: `positionUsd ${size} violates config bounds.` }, 400);
+        }
+        const intentId = `auto_intent_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const intent = {
+          id: intentId,
+          idempotencyKey,
+          sessionId,
+          mode: 'testnet',
+          autoMode: 'paper',
+          source: 'auto-trader',
+          symbol,
+          side: 'BUY',
+          type: 'MARKET',
+          positionUsd: size,
+          quoteAsset: symbol.endsWith('USDC') ? 'USDC' : 'USDT',
+          configSnapshot: { minTradeUsd: config.minTradeUsd, maxTradeUsd: config.maxTradeUsd, maxOpenPositions: config.maxOpenPositions },
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + INTENT_TTL_MS).toISOString(),
+          status: 'pending',
+          realOrderSubmitted: false,
+          testnet: true,
+          realProductionOrder: false,
+        };
+        fleet.executionIntents[sessionId] = intent;
+        if (!fleet.autoTrader) fleet.autoTrader = {};
+        fleet.autoTrader.lastIntentId = intent.id;
+        fleet.autoTrader.idempotencyKey = idempotencyKey;
+        fevent(fleet, 'AUTO_PAPER_INTENT_CREATED', 'info', `Auto paper intent ${intentId.slice(0, 14)} created for ${symbol}.`, { sessionId, ownerUserId: session.ownerUserId });
+        return json(req, { ok: true, intent, session: publicSessionView(fleet, session) });
+      }
+
+      if (mode === 'live_spot') {
+        const gate = autoLiveExecutionGate();
+        const evidence = autoTraderEvidence(fleet);
+        const config = completeBotConfig({ ...(session.config || {}), ...getUserConfig(fleet, session.ownerUserId) });
+        const caps = liveRiskCaps(config);
+        const daily = liveDailyCounters(fleet);
+        const quoteAsset = symbol.endsWith('USDC') ? 'USDC' : 'USDT';
+        const freeQuote = liveFreeQuoteBalance(fleet, quoteAsset);
+        const size = Number.isFinite(positionUsd) && positionUsd > 0 ? positionUsd : Math.min(config.maxTradeUsd, caps.maxPositionUsd);
+        const checks = [
+          { ok: gate.allowed, reason: `auto live env gate missing ${gate.missing.join(', ')}` },
+          { ok: evidence.passed, reason: 'auto live evidence gate has not passed' },
+          { ok: session.mode === 'live_spot', reason: 'session must be live_spot' },
+          { ok: config.allowLive === true, reason: 'user config allowLive=true is required' },
+          { ok: session.liveModeConfirmed === true, reason: 'session liveModeConfirmed=true is required' },
+          { ok: isDurableEnough(), reason: 'durable store is required' },
+          { ok: livePreflightFresh(fleet), reason: 'fresh live preflight is required' },
+          { ok: quoteAsset === 'USDC', reason: 'live auto quote asset must be USDC' },
+          { ok: caps.allowedSymbols.includes(symbol), reason: 'symbol is not allowlisted' },
+          { ok: size >= caps.minPositionUsd, reason: `positionUsd ${size} below live minimum ${caps.minPositionUsd}` },
+          { ok: size > 0 && size <= Math.min(config.maxTradeUsd, caps.maxPositionUsd), reason: `positionUsd exceeds live cap ${Math.min(config.maxTradeUsd, caps.maxPositionUsd)}` },
+          { ok: freeQuote.value == null || freeQuote.value >= size, reason: `Insufficient ${quoteAsset} balance. Required ${size}, available ${freeQuote.raw}.` },
+          { ok: !liveSafetyLockActive(fleet), reason: 'live safety lock active' },
+          { ok: daily.realizedLoss < caps.maxDailyLossUsd, reason: `daily realized loss cap reached (${daily.realizedLoss}/${caps.maxDailyLossUsd})` },
+          { ok: daily.trades < caps.maxDailyTrades, reason: `daily trade cap reached (${daily.trades}/${caps.maxDailyTrades})` },
+        ];
+        const failed = checks.find((x) => !x.ok);
+        if (failed) {
+          fevent(fleet, 'AUTO_LIVE_DECISION_BLOCKED', 'warn', `Auto live intent blocked: ${failed.reason}.`, { sessionId, symbol });
+          return json(req, { ok: false, error: failed.reason, autoTrader: autoTraderStatus(fleet, null) }, 409);
+        }
+        const intentId = `auto_live_intent_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const intent = {
+          id: intentId,
+          idempotencyKey,
+          sessionId,
+          mode: 'live_spot',
+          autoMode: 'live_spot',
+          source: 'auto-trader',
+          symbol,
+          side: 'BUY',
+          type: 'MARKET',
+          positionUsd: size,
+          quoteAsset,
+          configSnapshot: { maxTradeUsd: Math.min(config.maxTradeUsd, caps.maxPositionUsd), maxOpenPositions: caps.maxOpenPositions, maxDailyLossUsd: caps.maxDailyLossUsd, maxDailyTrades: caps.maxDailyTrades, allowedSymbols: caps.allowedSymbols },
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + INTENT_TTL_MS).toISOString(),
+          status: 'pending',
+          realOrderSubmitted: false,
+          testnet: false,
+          realProductionOrder: true,
+        };
+        fleet.executionIntents[sessionId] = intent;
+        if (!fleet.autoTrader) fleet.autoTrader = {};
+        fleet.autoTrader.lastIntentId = intent.id;
+        fleet.autoTrader.idempotencyKey = idempotencyKey;
+        liveAudit(fleet, null, 'AUTO_LIVE_INTENT_CREATED', { sessionId, symbol, positionUsd: size, result: 'pending' });
+        fevent(fleet, 'AUTO_LIVE_INTENT_CREATED', 'warn', `Auto live Spot intent ${intentId.slice(0, 16)} created for ${symbol}.`, { sessionId, ownerUserId: session.ownerUserId, mode: 'live_spot' });
+        return json(req, { ok: true, intent, session: publicSessionView(fleet, session) });
+      }
+
+      return json(req, { ok: false, error: 'Unsupported auto mode.' }, 400);
+    });
+  }
+
   const sessionId = bodySessionId(req, body);
   if (!sessionId) {
     return json(req, { ok: false, error: 'sessionId is required for worker endpoints' }, 400);
@@ -1990,7 +2374,7 @@ async function handleFleetWorker(req, base, body) {
       hostname: typeof body.hostname === 'string' ? body.hostname.slice(0, 120) : null,
       status: body.status === 'offline' ? 'offline' : 'online',
       lastSeenAt: nowIso,
-      mode: 'testnet',
+      mode: body.mode === 'live_spot' ? 'live_spot' : 'testnet',
       currentState: typeof body.currentState === 'string' ? body.currentState.slice(0, 60) : null,
       pid: Number.isFinite(Number(body.pid)) ? Number(body.pid) : null,
       openPositions: reportedOpenPositions,
@@ -2108,6 +2492,7 @@ async function handleFleetWorker(req, base, body) {
         liveModeConfirmed: session.liveModeConfirmed === true,
       },
       config: completeBotConfig(session.config),
+      autoControl: autoControlForSession(fleet, session),
       durable: fleetStoreInfo().durable,
       globalKillSwitchActive: killSwitchActive,
       entryBlockedReason: entryBlock.entryBlockedReason,
@@ -2486,9 +2871,31 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
   // confirm flag — and even then, no order is placed by this endpoint.
   if (base === 'auto-trader') {
     const action = segments[1] || '';
-    if (action !== 'mode') return json(req, { ok: false, error: 'Not found' }, 404);
+    if (!['mode', 'entries', 'force-shadow-tick'].includes(action)) return json(req, { ok: false, error: 'Not found' }, 404);
     if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
     if (!isAdmin(identity) || identity.verified !== true) return json(req, { ok: false, error: 'Admin verification required.' }, 403);
+    if (action === 'entries') {
+      const pause = body && body.pause === true;
+      const fleet = await loadFleet();
+      fleet.autoTrader = { ...(fleet.autoTrader || {}), entriesPaused: pause, entriesPausedAt: new Date().toISOString(), entriesPausedBy: identity.email || identity.userId };
+      liveAudit(fleet, identity, pause ? 'AUTO_ENTRIES_PAUSED' : 'AUTO_ENTRIES_RESUMED', {});
+      fevent(fleet, pause ? 'AUTO_ENTRIES_PAUSED' : 'AUTO_ENTRIES_RESUMED', pause ? 'warn' : 'info',
+        `Auto entries ${pause ? 'paused' : 'resumed'} by ${identity.email || identity.userId}.`, { ownerUserId: identity.userId });
+      await saveFleet(fleet);
+      return json(req, { ok: true, autoTrader: autoTraderStatus(fleet, identity) });
+    }
+    if (action === 'force-shadow-tick') {
+      const fleet = await loadFleet();
+      fleet.autoTrader = {
+        ...(fleet.autoTrader || {}),
+        requestedMode: 'shadow',
+        forceShadowTickAt: new Date().toISOString(),
+        nextEvaluationAt: new Date(Date.now() - 1).toISOString(),
+      };
+      fevent(fleet, 'AUTO_FORCE_SHADOW_TICK_REQUESTED', 'info', `Force Shadow Tick requested by ${identity.email || identity.userId}.`, { ownerUserId: identity.userId });
+      await saveFleet(fleet);
+      return json(req, { ok: true, autoTrader: autoTraderStatus(fleet, identity) });
+    }
     const requested = String((body && body.mode) || '').toLowerCase();
     if (!['off', 'shadow', 'paper', 'live_spot'].includes(requested)) {
       return json(req, { ok: false, error: 'mode must be off|shadow|paper|live_spot' }, 400);
@@ -2496,9 +2903,9 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     const fleet = await loadFleet();
     if (requested === 'live_spot') {
       const gate = autoLiveExecutionGate();
-      const evidence = Number((fleet.autoTrader || {}).paperTradeCount) || 0;
+      const evidence = autoTraderEvidence(fleet);
       if (!gate.allowed) return json(req, { ok: false, error: `Live auto-trading gate not satisfied: missing ${gate.missing.join(', ')}`, autoTrader: autoTraderStatus(fleet, identity) }, 409);
-      if (evidence <= 0) return json(req, { ok: false, error: 'Promotion to live requires paper-trading evidence first.', autoTrader: autoTraderStatus(fleet, identity) }, 409);
+      if (!evidence.passed) return json(req, { ok: false, error: 'Promotion to live requires passing shadow/paper evidence first.', evidence, autoTrader: autoTraderStatus(fleet, identity) }, 409);
       if (String(body.confirmLivePhrase || '') !== AUTO_LIVE_CONFIRM_PHRASE) {
         return json(req, { ok: false, error: 'Explicit autonomous live confirmation phrase required.', requiredPhrase: AUTO_LIVE_CONFIRM_PHRASE, autoTrader: autoTraderStatus(fleet, identity) }, 409);
       }
@@ -3366,7 +3773,7 @@ async function handleWorkerPair(req) {
   });
 }
 
-const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot']);
+const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot', 'auto-decision', 'auto-intent-request']);
 const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'start-live-session', 'live-emergency-stop', 'global-kill-switch', 'auto-trader', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-live-execution-intent', 'create-worker-pairing-code']);
 
 function isWorkerRoute(route) {
