@@ -146,6 +146,31 @@ export function evaluateAutoTrader({
   };
 }
 
+// Map a stored local-worker snapshot (sanitized public market objects) onto the
+// market shape buildUniverse expects. Pure; tolerates a missing/malformed snapshot.
+export function marketsFromSnapshot(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.markets)) return [];
+  return snapshot.markets
+    .filter((m) => m && m.symbol)
+    .map((m) => ({
+      symbol: m.symbol,
+      baseAsset: m.baseAsset || null,
+      quoteAsset: m.quoteAsset || null,
+      status: m.status || null,
+      volume24hUsd: Number(m.quoteVolume),
+      quoteVolume24h: Number(m.quoteVolume),
+      spreadPct: m.spreadPct != null && Number.isFinite(Number(m.spreadPct)) ? Number(m.spreadPct) : null,
+      change24hPct: Number(m.priceChangePercent),
+    }));
+}
+
+export const SNAPSHOT_FRESH_MS_DEFAULT = 120000;
+
+// Data-source priority when the scanner universe is empty/fully filtered:
+//   a) scanner markets (already evaluated by the caller-provided args)
+//   b) fresh local-worker public snapshot (args.localSnapshot, age <= snapshotFreshMs)
+//   c) Netlify-side Binance public fetch — ONLY when the snapshot is missing/stale
+//   d) shadow-only allowlist fallback (inside buildUniverse)
 export async function evaluateAutoTraderWithFallback(args, fetchPublicFn) {
   let out = evaluateAutoTrader(args);
   const effectiveMode = effectiveAutoMode(args.env);
@@ -155,29 +180,48 @@ export async function evaluateAutoTraderWithFallback(args, fetchPublicFn) {
   let publicFetchCount = 0;
   let publicFetchMs = 0;
   let fetchError = null;
+  let snapshotUsed = false;
+  let snapshotAgeMs = null;
   const events = [];
 
   if (effectiveMode === 'shadow' && (!out.candidate || out.diagnostics.fallbackUsed)) {
-    publicFetchAttempted = true;
-    events.push({ type: 'AUTO_PUBLIC_FETCH_ATTEMPT', severity: 'info', message: 'Scanner universe empty or fully filtered. Attempting Binance public fetch...' });
-    const start = Date.now();
-    try {
-      const publicMarkets = await fetchPublicFn();
-      publicFetchCount = publicMarkets ? publicMarkets.length : 0;
-      publicFetchOk = true;
-      publicFetchMs = Date.now() - start;
-      events.push({ type: 'AUTO_PUBLIC_FETCH_OK', severity: 'info', message: `Binance public fetch succeeded with ${publicFetchCount} markets in ${publicFetchMs}ms.` });
+    const now = args.now || Date.now();
+    const snapshot = args.localSnapshot || null;
+    const freshMs = Number(args.snapshotFreshMs) > 0 ? Number(args.snapshotFreshMs) : SNAPSHOT_FRESH_MS_DEFAULT;
+    const fetchedAtMs = snapshot && snapshot.fetchedAt ? new Date(snapshot.fetchedAt).getTime() : NaN;
+    snapshotAgeMs = Number.isFinite(fetchedAtMs) ? Math.max(0, now - fetchedAtMs) : null;
+    const snapshotFresh = snapshotAgeMs != null && snapshotAgeMs <= freshMs;
+    const snapshotMarkets = snapshotFresh ? marketsFromSnapshot(snapshot) : [];
 
-      if (publicMarkets && publicMarkets.length > 0) {
-        const newArgs = { ...args, markets: publicMarkets, dataSource: 'binance_public', fetchError: null };
-        if (args.computeRegime) newArgs.regime = args.computeRegime(publicMarkets);
-        out = evaluateAutoTrader(newArgs);
+    if (snapshotFresh && snapshotMarkets.length > 0) {
+      // b) Fresh local-worker snapshot — use it and do NOT hit Binance from here.
+      snapshotUsed = true;
+      const newArgs = { ...args, markets: snapshotMarkets, dataSource: 'local_worker_binance_public', fetchError: null };
+      if (args.computeRegime) newArgs.regime = args.computeRegime(snapshotMarkets);
+      out = evaluateAutoTrader(newArgs);
+    } else {
+      // c) Snapshot missing/stale → Netlify-side public fetch.
+      publicFetchAttempted = true;
+      events.push({ type: 'AUTO_PUBLIC_FETCH_ATTEMPT', severity: 'info', message: 'Scanner universe empty/filtered and local worker snapshot missing or stale. Attempting Binance public fetch...' });
+      const start = Date.now();
+      try {
+        const publicMarkets = await fetchPublicFn();
+        publicFetchCount = publicMarkets ? publicMarkets.length : 0;
+        publicFetchOk = true;
+        publicFetchMs = Date.now() - start;
+        events.push({ type: 'AUTO_PUBLIC_FETCH_OK', severity: 'info', message: `Binance public fetch succeeded with ${publicFetchCount} markets in ${publicFetchMs}ms.` });
+
+        if (publicMarkets && publicMarkets.length > 0) {
+          const newArgs = { ...args, markets: publicMarkets, dataSource: 'binance_public', fetchError: null };
+          if (args.computeRegime) newArgs.regime = args.computeRegime(publicMarkets);
+          out = evaluateAutoTrader(newArgs);
+        }
+      } catch (err) {
+        publicFetchMs = Date.now() - start;
+        fetchError = err.message;
+        events.push({ type: 'AUTO_PUBLIC_FETCH_FAILED', severity: 'warning', message: `Binance public fetch failed after ${publicFetchMs}ms: ${fetchError}` });
+        out.diagnostics.fetchError = fetchError;
       }
-    } catch (err) {
-      publicFetchMs = Date.now() - start;
-      fetchError = err.message;
-      events.push({ type: 'AUTO_PUBLIC_FETCH_FAILED', severity: 'warning', message: `Binance public fetch failed after ${publicFetchMs}ms: ${fetchError}` });
-      out.diagnostics.fetchError = fetchError;
     }
   }
 
@@ -186,6 +230,9 @@ export async function evaluateAutoTraderWithFallback(args, fetchPublicFn) {
     out.diagnostics.publicFetchOk = publicFetchOk;
     out.diagnostics.publicFetchCount = publicFetchCount;
     out.diagnostics.publicFetchMs = publicFetchMs;
+    out.diagnostics.publicFetchError = fetchError;
+    out.diagnostics.snapshotUsed = snapshotUsed;
+    out.diagnostics.snapshotAgeMs = snapshotAgeMs;
   }
 
   return { out, events };

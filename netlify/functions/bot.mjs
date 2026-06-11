@@ -1845,6 +1845,39 @@ function bodyWorkerId(req, body) {
   return url.searchParams.get('workerId') || (body && body.workerId) || '';
 }
 
+// ── Local-worker public market snapshot (auto-trader shadow data feed) ───────
+// The snapshot holds PUBLIC spot market data only (no keys, no balances, no
+// orders). Bounds keep the single-document fleet store small.
+const AUTO_MARKET_SNAPSHOT_SOURCE = 'local_worker_binance_public';
+const AUTO_MARKET_SNAPSHOT_MAX_ACCEPTED = 1000; // hard reject above this
+const AUTO_MARKET_SNAPSHOT_MAX_STORED = 400;    // stored markets cap
+const AUTO_MARKET_SNAPSHOT_FRESH_MS = 120000;   // snapshot usable for evaluation when younger than this
+
+function sanitizeSnapshotMarket(m) {
+  if (!m || typeof m !== 'object' || !m.symbol) return null;
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+  return {
+    symbol: String(m.symbol).toUpperCase().slice(0, 24),
+    baseAsset: m.baseAsset ? String(m.baseAsset).toUpperCase().slice(0, 16) : null,
+    quoteAsset: m.quoteAsset ? String(m.quoteAsset).toUpperCase().slice(0, 16) : null,
+    status: m.status ? String(m.status).toUpperCase().slice(0, 16) : null,
+    quoteVolume: num(m.quoteVolume),
+    volume: num(m.volume),
+    bidPrice: num(m.bidPrice),
+    askPrice: num(m.askPrice),
+    spreadPct: num(m.spreadPct),
+    priceChangePercent: num(m.priceChangePercent),
+    source: AUTO_MARKET_SNAPSHOT_SOURCE,
+  };
+}
+
+// Age of the stored snapshot in ms (Infinity when missing/unparsable).
+function autoMarketSnapshotAgeMs(snapshot, nowMs = Date.now()) {
+  if (!snapshot || !snapshot.fetchedAt) return Infinity;
+  const t = new Date(snapshot.fetchedAt).getTime();
+  return Number.isFinite(t) ? Math.max(0, nowMs - t) : Infinity;
+}
+
 // ── Worker-facing fleet routes (X-BOT-WORKER-TOKEN + sessionId required) ──────
 async function handleFleetWorker(req, base, body) {
   if (base === 'live-preflight-result') {
@@ -1872,6 +1905,58 @@ async function handleFleetWorker(req, base, body) {
       return json(req, { ok: true, livePreflight: sanitized });
     });
   }
+  // auto-market-snapshot: a local worker posts a sanitized PUBLIC spot market
+  // snapshot (exchangeInfo + 24hr ticker + bookTicker — no keys, no orders) so the
+  // auto-trader shadow evaluation has real market data even when Netlify's own
+  // egress to Binance public endpoints is blocked (HTTP 451).
+  if (base === 'auto-market-snapshot') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    if (String(body.source || '') !== AUTO_MARKET_SNAPSHOT_SOURCE) {
+      return json(req, { ok: false, error: `source must be ${AUTO_MARKET_SNAPSHOT_SOURCE}` }, 400);
+    }
+    const workerId = bodyWorkerId(req, body);
+    if (!workerId) return json(req, { ok: false, error: 'workerId is required' }, 400);
+    if (body.markets !== undefined && !Array.isArray(body.markets)) {
+      return json(req, { ok: false, error: 'markets must be an array' }, 400);
+    }
+    const rawMarkets = Array.isArray(body.markets) ? body.markets : [];
+    if (rawMarkets.length > AUTO_MARKET_SNAPSHOT_MAX_ACCEPTED) {
+      return json(req, { ok: false, error: `markets array too large (max ${AUTO_MARKET_SNAPSHOT_MAX_ACCEPTED})` }, 400);
+    }
+    const markets = rawMarkets.slice(0, AUTO_MARKET_SNAPSHOT_MAX_STORED).map(sanitizeSnapshotMarket).filter(Boolean);
+    const diagRaw = body.diagnostics && typeof body.diagnostics === 'object' ? body.diagnostics : {};
+    const diagnostics = {
+      error: typeof diagRaw.error === 'string' ? diagRaw.error.slice(0, 240) : null,
+      fetchedSymbols: Number.isFinite(Number(diagRaw.fetchedSymbols)) ? Number(diagRaw.fetchedSymbols) : null,
+      eligibleSymbols: Number.isFinite(Number(diagRaw.eligibleSymbols)) ? Number(diagRaw.eligibleSymbols) : null,
+      postedSymbols: Number.isFinite(Number(diagRaw.postedSymbols)) ? Number(diagRaw.postedSymbols) : null,
+      baseUrl: typeof diagRaw.baseUrl === 'string' ? diagRaw.baseUrl.slice(0, 120) : null,
+    };
+    return await mutateFleet(async (fleet) => {
+      const prev = fleet.autoMarketSnapshot;
+      const prevFailed = !prev || !Array.isArray(prev.markets) || prev.markets.length === 0;
+      const failed = markets.length === 0;
+      fleet.autoMarketSnapshot = {
+        source: AUTO_MARKET_SNAPSHOT_SOURCE,
+        fetchedAt: typeof body.fetchedAt === 'string' ? body.fetchedAt.slice(0, 40) : new Date().toISOString(),
+        receivedAt: new Date().toISOString(),
+        workerId: workerId.slice(0, 80),
+        sessionId: typeof body.sessionId === 'string' ? body.sessionId.slice(0, 80) : null,
+        markets,
+        diagnostics,
+      };
+      // Anti-spam: a snapshot lands every ~60s; only state TRANSITIONS are events.
+      if (failed && (!prevFailed || !prev || (prev.diagnostics && prev.diagnostics.error) !== diagnostics.error)) {
+        fevent(fleet, 'AUTO_MARKET_SNAPSHOT_FAILED', 'warn',
+          `Local worker public market snapshot failed: ${diagnostics.error || 'no markets'}.`, {});
+      } else if (!failed && prevFailed) {
+        fevent(fleet, 'AUTO_MARKET_SNAPSHOT_UPDATED', 'info',
+          `Local worker posted public market snapshot (${markets.length} markets).`, {});
+      }
+      return json(req, { ok: true, stored: markets.length, failed });
+    });
+  }
+
   const sessionId = bodySessionId(req, body);
   if (!sessionId) {
     return json(req, { ok: false, error: 'sessionId is required for worker endpoints' }, 400);
@@ -2294,16 +2379,38 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
           dataSource,
           fetchError,
           computeRegime: computeMarketRegime,
+          // b) latest local-worker public snapshot (used before any Netlify fetch
+          // when fresh — Netlify egress to Binance public endpoints can be 451-blocked).
+          localSnapshot: fleet.autoMarketSnapshot || null,
+          snapshotFreshMs: AUTO_MARKET_SNAPSHOT_FRESH_MS,
         }, fetchBinancePublicUniverse);
 
-        for (const e of events) {
+        if (!fleet.autoTrader) fleet.autoTrader = {};
+
+        // Anti-spam: a recurring public-fetch failure (e.g. persistent HTTP 451)
+        // is logged once per 10 minutes per distinct error, not on every poll.
+        // The diagnostics (publicFetchError) stay current regardless.
+        let eventsToLog = events;
+        const failEvent = events.find((e) => e.type === 'AUTO_PUBLIC_FETCH_FAILED');
+        if (failEvent) {
+          // Key on the underlying error (e.g. "HTTP 451"), not the full message,
+          // which embeds a variable elapsed-ms value.
+          const errKey = String((out.diagnostics && out.diagnostics.publicFetchError) || failEvent.message).slice(0, 240);
+          const last = fleet.autoTrader.lastPublicFetchFailure || null;
+          const lastAt = last && last.emittedAt ? new Date(last.emittedAt).getTime() : 0;
+          const suppress = last && last.message === errKey && (nowMs - lastAt) < 10 * 60 * 1000;
+          if (suppress) {
+            eventsToLog = events.filter((e) => e.type !== 'AUTO_PUBLIC_FETCH_FAILED' && e.type !== 'AUTO_PUBLIC_FETCH_ATTEMPT');
+          } else {
+            fleet.autoTrader.lastPublicFetchFailure = { message: errKey, emittedAt: new Date(nowMs).toISOString() };
+          }
+        }
+        for (const e of eventsToLog) {
           e.ts = new Date().toISOString();
           fleet.events.unshift(e);
         }
         fleet.events = fleet.events.slice(0, 100);
 
-        if (!fleet.autoTrader) fleet.autoTrader = {};
-        
         fleet.autoTrader.lastEvaluationAt = new Date().toISOString();
         fleet.autoTrader.nextEvaluationAt = new Date(nowMs + 60000).toISOString();
         fleet.autoTrader.evaluationRunning = false;
@@ -3259,7 +3366,7 @@ async function handleWorkerPair(req) {
   });
 }
 
-const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result']);
+const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot']);
 const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'start-live-session', 'live-emergency-stop', 'global-kill-switch', 'auto-trader', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-live-execution-intent', 'create-worker-pairing-code']);
 
 function isWorkerRoute(route) {

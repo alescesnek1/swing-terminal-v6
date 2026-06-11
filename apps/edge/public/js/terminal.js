@@ -6350,20 +6350,42 @@ function renderFleet() {
     const ud = auto.universeDiagnostics;
     const isFallback = ud.fallbackUsed || ud.dataSource === 'fallback';
     const fetchErrorHtml = ud.fetchError ? '<li style="color:var(--rd);">Fetch Error: ' + _esc(ud.fetchError) + '</li>' : '';
-    
+
+    // Local worker public snapshot freshness. snapshotAgeSec is shown whenever the
+    // snapshot fed the evaluation; a stale snapshot is called out explicitly.
+    const snapshotAgeSec = (ud.snapshotAgeMs != null && isFinite(ud.snapshotAgeMs)) ? Math.round(ud.snapshotAgeMs / 1000) : null;
+    let snapshotHtml = '';
+    if (ud.dataSource === 'local_worker_binance_public' || ud.snapshotUsed) {
+      snapshotHtml = '<li>Worker snapshot age: <b>' + (snapshotAgeSec != null ? snapshotAgeSec + 's' : '--') + '</b></li>';
+    } else if (ud.publicFetchAttempted) {
+      // The snapshot was consulted (scanner empty) but unusable.
+      snapshotHtml = snapshotAgeSec != null
+        ? '<li style="color:var(--yw);">Worker snapshot stale (' + snapshotAgeSec + 's old)</li>'
+        : '<li style="color:var(--yw);">Worker snapshot missing</li>';
+    }
+
     const pubFetchHtml = ud.publicFetchAttempted ? '<li style="color:var(--yw);">Public Fetch: ' + (ud.publicFetchOk ? 'OK (' + ud.publicFetchCount + ' in ' + ud.publicFetchMs + 'ms)' : 'FAILED (' + ud.publicFetchMs + 'ms)') + '</li>' : '';
-    
+    const pubFetchErrorHtml = ud.publicFetchError ? '<li style="color:var(--rd);">Public Fetch Error: ' + _esc(ud.publicFetchError) + '</li>' : '';
+    const fallbackReasonHtml = (isFallback && ud.fallbackReason) ? '<li style="color:var(--rd);">Fallback: ' + _esc(ud.fallbackReason) + '</li>' : '';
+    const rejectedSamplesHtml = (Array.isArray(ud.rejectedSamples) && ud.rejectedSamples.length)
+      ? '<li>Rejected: ' + ud.rejectedSamples.slice(0, 3).map(function (r) { return _esc((r.symbol || '?') + ' (' + (r.reason || '?') + ')'); }).join(', ') + (ud.rejectedSamples.length > 3 ? ' +' + (ud.rejectedSamples.length - 3) + ' more' : '') + '</li>'
+      : '';
+
     diagnosticsHtml = '<div><span>Diagnostics</span><ul>'
       + '<li>Source: <b>' + _esc(ud.dataSource) + '</b>' + (isFallback ? ' <span style="color:var(--rd);">(FALLBACK)</span>' : '') + '</li>'
+      + snapshotHtml
       + pubFetchHtml
+      + pubFetchErrorHtml
       + fetchErrorHtml
+      + fallbackReasonHtml
       + '<li>Fetched: ' + ud.fetchedSymbols + '</li>'
       + '<li>USDC: ' + ud.usdcSymbols + '</li>'
       + '<li>Liquid: ' + ud.liquidSymbols + '</li>'
       + '<li>Spread OK: ' + ud.spreadPassed + '</li>'
       + '<li>Allowlist OK: ' + ud.allowlistPassed + '</li>'
+      + rejectedSamplesHtml
       + '</ul></div>';
-      
+
     if (isFallback && autoReasons.length > 0 && autoReasons[0].indexOf('no candidate') !== -1) {
        autoReasons[0] = 'No candidate because scanner universe was fully filtered (see diagnostics).';
     }

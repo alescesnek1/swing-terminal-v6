@@ -3,6 +3,10 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+// Public spot market snapshot fetcher (no API keys, no signed/order endpoints).
+// Shared with the Netlify auto-trader fallback; the worker is the PRIMARY source
+// because serverless egress to Binance public endpoints can be blocked (HTTP 451).
+import { fetchBinancePublicSnapshot, PUBLIC_SNAPSHOT_SOURCE } from './auto/binance-public.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -85,6 +89,11 @@ const BINANCE_ENVS = new Set(['testnet', 'live_spot']);
 const isLiveSpot = workerMode === 'live_spot' || binanceEnv === 'live_spot';
 
 const HEARTBEAT_INTERVAL_MS = 5000;
+// Public market snapshot cadence. Deliberately 60s (NOT the 5s heartbeat) so the
+// worker never spams Binance public endpoints. Disable with
+// WORKER_MARKET_SNAPSHOT_ENABLED=false.
+const MARKET_SNAPSHOT_INTERVAL_MS = Number(process.env.WORKER_MARKET_SNAPSHOT_INTERVAL_MS) || 60000;
+const marketSnapshotEnabled = process.env.WORKER_MARKET_SNAPSHOT_ENABLED !== 'false';
 const MAX_CLOSE_RETRIES = 5;
 const TESTNET_MAX_TRADE_USD = 10;
 const MISSING_SESSION_EXIT_MS = 60000;
@@ -461,12 +470,17 @@ let missingSessionSince = 0;
 let recovery404Logged = false;
 let heartbeatTimer = null;
 let pollTimer = null;
+let marketSnapshotTimer = null;
+let marketSnapshotRunning = false;
+let marketSnapshotFailLogged = false;
 
 function finishWorker(code) {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (pollTimer) clearInterval(pollTimer);
+  if (marketSnapshotTimer) clearInterval(marketSnapshotTimer);
   heartbeatTimer = null;
   pollTimer = null;
+  marketSnapshotTimer = null;
   process.exitCode = code;
 }
 
@@ -648,6 +662,53 @@ async function reportOpenPositions(reason) {
   console.log(`[RECOVER] Reporting ${open.length} open position(s) to backend (${reason}).`);
   for (const pos of open) {
     await reportPosition({ symbol: pos.symbol, baseAsset: pos.baseAsset, executedQty: pos.executedQty, orderId: pos.orderId, status: 'open' });
+  }
+}
+
+// ── Public market snapshot (auto-trader shadow data feed) ───────────────────
+// PUBLIC DATA ONLY: no API key, no signature, no order/futures/margin endpoints
+// (enforced inside binance-public.mjs). Runs on its own 60s timer, fully
+// fire-and-forget: any failure is swallowed and reported as diagnostics, so the
+// close/stop flow is NEVER blocked or delayed by market data.
+async function postAutoMarketSnapshot(payload) {
+  const res = await fetch(`${controlUrl}/api/bot/auto-market-snapshot`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-BOT-WORKER-TOKEN': workerToken },
+    body: JSON.stringify({ workerId, sessionId, source: PUBLIC_SNAPSHOT_SOURCE, ...payload }),
+  });
+  return res;
+}
+
+async function fetchAndPostMarketSnapshot() {
+  if (!marketSnapshotEnabled || stopping || marketSnapshotRunning) return { skipped: true };
+  marketSnapshotRunning = true;
+  try {
+    let snapshot;
+    try {
+      snapshot = await fetchBinancePublicSnapshot({ baseUrl: process.env.BINANCE_BASE_URL });
+    } catch (err) {
+      // Fetch failed: post diagnostics only so the control plane can surface why
+      // the snapshot is missing. Never throws past this function.
+      if (!marketSnapshotFailLogged) {
+        console.log(`[SNAPSHOT][WARN] Public market snapshot fetch failed: ${err.message}`);
+        marketSnapshotFailLogged = true;
+      }
+      try {
+        await postAutoMarketSnapshot({ fetchedAt: new Date().toISOString(), markets: [], diagnostics: { error: String(err.message || err).slice(0, 240) } });
+      } catch { /* diagnostics post is best-effort */ }
+      return { ok: false, error: err.message };
+    }
+    marketSnapshotFailLogged = false;
+    try {
+      const res = await postAutoMarketSnapshot({ fetchedAt: snapshot.fetchedAt, markets: snapshot.markets, diagnostics: snapshot.diagnostics });
+      console.log(`[SNAPSHOT] Posted public market snapshot (${snapshot.markets.length} markets) ok=${res.ok}`);
+      return { ok: res.ok, count: snapshot.markets.length };
+    } catch (err) {
+      console.log(`[SNAPSHOT][WARN] Snapshot post failed: ${err.message}`);
+      return { ok: false, error: err.message };
+    }
+  } finally {
+    marketSnapshotRunning = false;
   }
 }
 
@@ -1446,6 +1507,15 @@ async function main() {
   }, HEARTBEAT_INTERVAL_MS);
   pollTimer = setInterval(() => { tick().catch((err) => console.log('[ERROR] tick failed:', err.message)); }, pollIntervalMs);
   tick().catch((err) => console.log('[ERROR] tick failed:', err.message));
+  // Public market snapshot feed: 60s cadence, never on the 5s heartbeat, and
+  // strictly fire-and-forget so close/stop always takes priority.
+  if (marketSnapshotEnabled) {
+    console.log(`[SNAPSHOT] Public market snapshot feed enabled (every ${Math.round(MARKET_SNAPSHOT_INTERVAL_MS / 1000)}s, public endpoints only).`);
+    marketSnapshotTimer = setInterval(() => {
+      fetchAndPostMarketSnapshot().catch((err) => console.log(`[SNAPSHOT][WARN] snapshot tick failed: ${err.message}`));
+    }, MARKET_SNAPSHOT_INTERVAL_MS);
+    fetchAndPostMarketSnapshot().catch((err) => console.log(`[SNAPSHOT][WARN] snapshot tick failed: ${err.message}`));
+  }
 }
 
 // Only run the worker when executed directly (`node scripts/local-binance-worker.mjs`).
@@ -1518,4 +1588,5 @@ export {
   _resetStoppingForTest,
   sendHeartbeat,
   tick,
+  fetchAndPostMarketSnapshot,
 };
