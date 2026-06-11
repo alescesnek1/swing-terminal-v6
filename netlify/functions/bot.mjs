@@ -2243,6 +2243,10 @@ async function handleFleetWorker(req, base, body) {
     const positionUsd = Number(body.positionUsd);
     const autoStrategyVersion = String(body.strategyVersion || body.autoStrategyVersion || '').slice(0, 80);
     const autoDecisionId = String(body.decisionId || body.autoDecisionId || '').slice(0, 80);
+    const intentSource = String(body.intentSource || '').slice(0, 80);
+    const autoMode = String(body.autoMode || '').slice(0, 40);
+    const riskFlags = Array.isArray(body.riskFlags) ? body.riskFlags.slice(0, 10).map(String) : [];
+    const paperRiskOffTest = Boolean(body.paperRiskOffTest);
     if (!sessionId || !idempotencyKey) return json(req, { ok: false, error: 'sessionId and idempotencyKey are required' }, 400);
     if (!['BUY', 'CLOSE'].includes(action)) return json(req, { ok: false, error: 'action must be BUY or CLOSE' }, 400);
     return await mutateFleet(async (fleet) => {
@@ -2306,9 +2310,11 @@ async function handleFleetWorker(req, base, body) {
           idempotencyKey,
           sessionId,
           mode: 'testnet',
-          autoMode: 'paper',
+          autoMode: autoMode || 'paper',
           source: 'auto-trader',
-          intentSource: 'auto_trader',
+          intentSource: intentSource || 'auto_trader',
+          riskFlags,
+          paperRiskOffTest,
           autoStrategyVersion,
           autoDecisionId,
           autoIdempotencyKey: idempotencyKey,

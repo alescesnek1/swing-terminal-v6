@@ -89,8 +89,15 @@ export function decideEntry({
   
   reasons.push(`score ${top.score} >= threshold ${threshold}`, ...(top.reasons || []));
   return { 
-    action: 'BUY', symbol: top.symbol, score: top.score, positionUsd: top.recommendedPositionUsd, 
-    decisionReason: 'BUY', reasons, scoreGap, limitedUniverse 
+    action: 'BUY', 
+    symbol: top.symbol, 
+    score: top.score, 
+    positionUsd: top.recommendedPositionUsd, 
+    decisionReason: 'BUY', 
+    reasons, 
+    scoreGap, 
+    limitedUniverse,
+    riskFlags: top.riskFlags || []
   };
 }
 

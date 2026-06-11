@@ -397,6 +397,10 @@ export function createAutoLoop({
             score: out.candidate ? out.candidate.score : null,
             reasons: (out.reasons || []).slice(0, 6),
             strategyVersion: AUTO_STRATEGY_VERSION,
+            intentSource: 'auto_trader',
+            autoMode: control.mode,
+            riskFlags: out.intent.riskFlags || [],
+            paperRiskOffTest: out.intent.paperRiskOffTest || false,
           });
           if (res && res.status >= 200 && res.status < 300 && res.json && res.json.ok) {
             log(`[AUTO][INTENT] created ${res.json.intent ? res.json.intent.id : '(existing)'} ${out.intent.symbol} positionUsd=${out.intent.positionUsd}`);

@@ -43,6 +43,8 @@ export function readAutoEnv(env = process.env) {
     allowRealOrders: flag(env, 'BOT_ALLOW_REAL_ORDERS') === 'true',
     localWorkerLiveConfirm: flag(env, 'LOCAL_WORKER_LIVE_CONFIRM') === 'true',
     liveSpotAck: flag(env, 'LIVE_SPOT_ACK') === LIVE_SPOT_ACK_TEXT,
+    paperAllowRiskOff: flag(env, 'AUTO_PAPER_ALLOW_RISK_OFF') !== 'false',
+    paperRiskOffSizeMultiplier: Number.isFinite(Number(flag(env, 'AUTO_PAPER_RISK_OFF_SIZE_MULTIPLIER'))) ? Number(flag(env, 'AUTO_PAPER_RISK_OFF_SIZE_MULTIPLIER')) : 0.5,
   };
 }
 

@@ -344,11 +344,19 @@ test('14. shadow mode ignores risk-off blocker and uses env threshold 45, wherea
   assert.equal(out2.decision, 'NONE', 'shadow mode score < threshold returns NONE');
   assert.equal(out2.decisionReason, 'score_below_threshold');
 
-  // paper mode blocks on risk-off
-  const envPaper = { AUTO_TRADER_ENABLED: 'true', AUTO_TRADER_MODE: 'paper' };
-  const out3 = evaluateAutoTrader({ env: envPaper, markets: mockMarkets, caps: CAPS, fleet: HEALTHY_FLEET, threshold: 50, sessionId: 's3', regime: { regime: 'RISK_OFF', entriesAllowed: false } });
-  assert.equal(out3.decision, 'NONE', 'paper mode blocks on risk-off regime via NONE');
+  // paper mode blocks on risk-off when explicitly disabled
+  const envPaperDisabled = { AUTO_TRADER_ENABLED: 'true', AUTO_TRADER_MODE: 'paper', AUTO_PAPER_ALLOW_RISK_OFF: 'false' };
+  const out3 = evaluateAutoTrader({ env: envPaperDisabled, markets: mockMarkets, caps: CAPS, fleet: HEALTHY_FLEET, threshold: 50, sessionId: 's3', regime: { regime: 'RISK_OFF', entriesAllowed: false } });
+  assert.equal(out3.decision, 'NONE', 'paper mode blocks on risk-off regime via NONE when explicitly disabled');
   assert.equal(out3.decisionReason, 'regime_risk_off');
+  
+  // paper mode allows test intents on risk-off by default
+  const envPaper = { AUTO_TRADER_ENABLED: 'true', AUTO_TRADER_MODE: 'paper' };
+  const out3a = evaluateAutoTrader({ env: envPaper, markets: mockMarkets, caps: CAPS, fleet: HEALTHY_FLEET, threshold: 50, sessionId: 's3a', regime: { regime: 'RISK_OFF', entriesAllowed: false } });
+  assert.equal(out3a.decision, 'PAPER_INTENT', 'paper mode allows risk-off test by default');
+  assert.equal(out3a.decisionReason, 'paper_signal_risk_off');
+  assert.ok(out3a.intent, 'intent created');
+  assert.equal(out3a.intent.paperRiskOffTest, true);
   
   // live mode blocks on risk-off
   const envLive = { ...FULL_LIVE_ENV, AUTO_TRADER_MODE: 'live_spot' };

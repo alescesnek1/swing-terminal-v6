@@ -122,7 +122,7 @@ export function evaluateAutoTrader({
   }
 
   // ── Flat → consider an entry ──
-  const riskMode = mode === 'shadow' ? 'flag_only' : 'block_entries';
+  const riskMode = (mode === 'shadow' || (mode === 'paper' && a.paperAllowRiskOff)) ? 'flag_only' : 'block_entries';
   const entry = decideEntry({ scored, threshold, regime, allowEntries: true, cooldownOverrideGap, riskMode });
   
   // Tag the selected candidate in the leaderboard
@@ -184,8 +184,18 @@ export function evaluateAutoTrader({
   }
   if (mode === 'paper') {
     if (!risk.allowed) return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'BLOCKED', decisionReason: risk.reason, requiredThreshold: threshold, scoreGap: entry.scoreGap, intent: null, reasons: entry.reasons, diagnostics };
+    
+    const isRiskOff = entry.riskFlags && entry.riskFlags.includes('regime risk-off');
+    if (isRiskOff && a.paperAllowRiskOff) {
+      entry.positionUsd = Math.max(1, (entry.positionUsd || 1) * a.paperRiskOffSizeMultiplier);
+    }
     const intent = buildEntryIntent(entry, { sessionId, mode: 'paper' });
-    return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'PAPER_INTENT', decisionReason: 'BUY', requiredThreshold: threshold, scoreGap: entry.scoreGap, intent, reasons: entry.reasons, diagnostics };
+    if (isRiskOff && intent) {
+      intent.paperRiskOffTest = true;
+      intent.riskFlags = entry.riskFlags || [];
+    }
+    const decisionReason = isRiskOff ? 'paper_signal_risk_off' : (entry.decisionReason === 'BUY' ? 'signal' : (entry.decisionReason || 'signal'));
+    return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'PAPER_INTENT', decisionReason, requiredThreshold: threshold, scoreGap: entry.scoreGap, intent, reasons: entry.reasons, diagnostics };
   }
   // live_spot
   if (!risk.allowed) return { ...baseline, candidate: selectedCandidate || candidateView(topRawCandidate), candidates: candidatesList, universeSize: universe.length, entry, blocks: risk.blocks, decision: 'BLOCKED', decisionReason: risk.reason, requiredThreshold: threshold, scoreGap: entry.scoreGap, intent: null, reasons: entry.reasons, diagnostics };
