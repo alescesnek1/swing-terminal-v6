@@ -52,6 +52,7 @@ function emptyFleet() {
 
     autoTrader: null,      // operator-requested autonomous mode/status; no secrets, no order execution
     autoMarketSnapshot: null, // latest sanitized PUBLIC market snapshot posted by a local worker (no secrets, no orders)
+    tradingRadar: null,    // read-only advisory panel state; no orders, no intents, no gates
     lastRegime: null,     // { regime, entriesAllowed, reason[], metrics, updatedAt }
     updatedAt: null,
   };

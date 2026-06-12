@@ -5937,6 +5937,119 @@ function _fleetOpenPositionCount(s) {
   return Array.isArray(s && s.openPositions) ? s.openPositions.length : 0;
 }
 
+function _fleetFmtRadarAge(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n)) return '--';
+  if (n < 1000) return 'fresh';
+  if (n < 60000) return Math.round(n / 1000) + 's';
+  return Math.round(n / 60000) + 'm';
+}
+
+function _fleetRadarScoreClass(score) {
+  const n = Number(score);
+  if (!Number.isFinite(n)) return 'radar-score--muted';
+  if (n >= 75) return 'radar-score--good';
+  if (n >= 55) return 'radar-score--ok';
+  if (n >= 35) return 'radar-score--warn';
+  return 'radar-score--bad';
+}
+
+function _renderTradingRadar(radar, esc) {
+  radar = radar || {};
+  const candidates = Array.isArray(radar.candidates) ? radar.candidates.slice(0, 10) : [];
+  const selected = radar.selected || candidates[0] || null;
+  const entryReady = Array.isArray(radar.entryReady) ? radar.entryReady : [];
+  const watchlist = Array.isArray(radar.watchlist) ? radar.watchlist : [];
+  const diag = radar.universeDiagnostics || {};
+  const regime = radar.marketRegime || {};
+  const exit = radar.exitGuidance || {};
+  const missing = Array.isArray(radar.missingSignals) ? radar.missingSignals.slice(0, 8) : [];
+  const stale = Number(radar.dataFreshnessMs) > 120000;
+  const status = radar.lastError ? 'ERROR' : (entryReady.length ? 'ENTRY READY' : (watchlist.length ? 'WATCHING' : 'SCANNING'));
+  const source = radar.source || 'no_public_snapshot';
+  const completeness = radar.dataCompleteness != null ? radar.dataCompleteness + '%' : '--';
+  const rowHtml = candidates.length ? candidates.map((c) => {
+    const flags = Array.isArray(c.riskFlags) && c.riskFlags.length ? c.riskFlags.slice(0, 2).join(', ') : 'none';
+    const reason = Array.isArray(c.reasons) && c.reasons.length ? c.reasons[0] : '--';
+    return '<tr>'
+      + '<td><b>' + esc(c.symbol || '--') + '</b></td>'
+      + '<td>' + esc(c.stage || '--') + '</td>'
+      + '<td><span class="radar-score ' + _fleetRadarScoreClass(c.setupQualityScore) + '">' + esc(c.setupQualityScore != null ? c.setupQualityScore : '--') + '</span></td>'
+      + '<td>' + esc(c.confidence != null ? c.confidence : '--') + '</td>'
+      + '<td>' + esc(reason) + '</td>'
+      + '<td>' + esc(flags) + '</td>'
+      + '</tr>';
+  }).join('') : '<tr><td colspan="6" class="fleet-empty">No RADAR setup has passed the advisory filters.</td></tr>';
+
+  const detailReasons = selected && Array.isArray(selected.reasons) ? selected.reasons : [];
+  const detailFlags = selected && Array.isArray(selected.riskFlags) ? selected.riskFlags : [];
+  const dz = selected && selected.entryZone;
+  const tps = selected && Array.isArray(selected.takeProfitCheckpoints) ? selected.takeProfitCheckpoints : [];
+  let html = '<div class="trading-radar">'
+    + '<div class="trading-radar__head">'
+    + '<div><div class="trading-radar__kicker">TRADING RADAR</div><div class="trading-radar__state">' + esc(status) + '</div></div>'
+    + '<div class="trading-radar__badge">ADVISORY ONLY</div>'
+    + '</div>'
+    + '<div class="trading-radar__copy">Read-only mean-reversion scanner. It never creates orders, execution intents, or live trading gate changes.</div>'
+    + (stale ? '<div class="trading-radar__warn">PUBLIC SNAPSHOT STALE</div>' : '')
+    + (radar.lastError ? '<div class="trading-radar__warn">' + esc(radar.lastError) + '</div>' : '')
+    + '<div class="fleet-live-readiness__caps trading-radar__grid">'
+    + '<div><span>Status</span><b>' + esc(status) + '</b></div>'
+    + '<div><span>Freshness</span><b>' + esc(_fleetFmtRadarAge(radar.dataFreshnessMs)) + '</b></div>'
+    + '<div><span>Source</span><b>' + esc(source) + '</b></div>'
+    + '<div><span>Universe</span><b>' + esc(diag.liquid || 0) + '/' + esc(diag.fetched || 0) + '</b></div>'
+    + '<div><span>Watch</span><b>' + esc(watchlist.length) + '</b></div>'
+    + '<div><span>Entry ready</span><b>' + esc(entryReady.length) + '</b></div>'
+    + '<div><span>Regime</span><b>' + esc(regime.status || 'UNKNOWN') + '</b></div>'
+    + '<div><span>Data complete</span><b>' + esc(completeness) + '</b></div>'
+    + '</div>'
+    + '<div class="trading-radar__leaderboard"><div class="fleet-section-title">Candidate Leaderboard</div>'
+    + '<table class="fleet-table trading-radar__table"><thead><tr><th>Symbol</th><th>Stage</th><th>Setup</th><th>Conf</th><th>Reason</th><th>Risk</th></tr></thead><tbody>'
+    + rowHtml
+    + '</tbody></table></div>';
+
+  html += '<div class="trading-radar__cols">';
+  html += '<div><span>Selected Candidate</span>';
+  if (selected) {
+    html += '<div class="trading-radar__selected">'
+      + '<b>' + esc(selected.symbol || '--') + '</b> <em>' + esc(selected.stage || '--') + '</em>'
+      + '<p>Entry: ' + esc(selected.entryType || '--') + (dz ? ' ' + esc(dz.low) + ' - ' + esc(dz.high) : '') + '</p>'
+      + '<p>Invalidation: ' + esc(selected.invalidationLevel || '--') + ' | Stop: ' + esc(selected.suggestedStop || '--') + '</p>'
+      + (tps.length ? '<p>TP checkpoints: ' + tps.map((tp) => esc(tp.label + ' ' + tp.level)).join(' / ') + '</p>' : '')
+      + '</div>'
+      + (detailReasons.length ? '<ul>' + detailReasons.map((r) => '<li>' + esc(r) + '</li>').join('') + '</ul>' : '<p>--</p>');
+  } else {
+    html += '<p>No selected setup.</p>';
+  }
+  html += '</div>';
+
+  html += '<div><span>Exit Guidance</span>'
+    + '<ul>'
+    + '<li>STATUS: <b>' + esc(exit.STATUS || 'NO_ACTION') + '</b></li>'
+    + '<li>ACTION: ' + esc(exit.ACTION || '--') + '</li>'
+    + '<li>MODE: ' + esc(exit.MODE || '--') + '</li>'
+    + '<li>EXIT_QUALITY_SCORE: ' + esc(exit.EXIT_QUALITY_SCORE != null ? exit.EXIT_QUALITY_SCORE : '--') + '</li>'
+    + '<li>STOP_LOSS_LEVEL: ' + esc(exit.STOP_LOSS_LEVEL != null ? exit.STOP_LOSS_LEVEL : '--') + '</li>'
+    + '<li>TIME_VALIDITY: ' + esc(exit.TIME_VALIDITY || '--') + '</li>'
+    + '</ul></div>';
+
+  html += '<div><span>BTC/ETH Regime</span>'
+    + '<ul>'
+    + '<li>Score: ' + esc(regime.score != null ? regime.score : '--') + '</li>'
+    + '<li>Breadth: ' + esc(regime.breadthPct != null ? regime.breadthPct + '%' : '--') + '</li>'
+    + ((regime.reasons || []).slice(0, 4).map((r) => '<li>' + esc(r) + '</li>').join('') || '<li>--</li>')
+    + '</ul></div>';
+
+  html += '<div><span>Diagnostics</span>'
+    + '<ul>'
+    + '<li>Rejected: ' + esc(Object.entries(diag.rejected || {}).slice(0, 4).map(([k, v]) => k + ':' + v).join(', ') || 'none') + '</li>'
+    + '<li>Missing: ' + esc(missing.join(', ') || 'none') + '</li>'
+    + (detailFlags.length ? detailFlags.slice(0, 4).map((f) => '<li>Flag: ' + esc(f) + '</li>').join('') : '<li>Flags: none</li>')
+    + '</ul></div>';
+  html += '</div></div>';
+  return html;
+}
+
 // Position rows to render, with stale/duplicate "open" rows removed (spec 3). A
 // position result is treated as closed when it has a closeOrderId or a closed/dust/
 // close-failed status. An "open" row is suppressed when (a) a closed record exists
@@ -6478,6 +6591,7 @@ function renderFleet() {
       })() : '')
     + '</div>';
 
+  html += _renderTradingRadar(data.tradingRadar, _e);
 
   if (!newEntriesAllowed) {
     html += '<div class="fleet-error-panel fleet-error-panel--danger">'

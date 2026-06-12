@@ -169,6 +169,7 @@ export async function fetchBinancePublicSnapshot({ baseUrl, quoteAssets = ['USDC
       volume: Number(t.volume),
       bidPrice: b ? Number(b.bidPrice) : null,
       askPrice: b ? Number(b.askPrice) : null,
+      lastPrice: Number(t.lastPrice),
       spreadPct: spreadPctFromBook(b),
       priceChangePercent: Number(t.priceChangePercent),
       source: PUBLIC_SNAPSHOT_SOURCE,

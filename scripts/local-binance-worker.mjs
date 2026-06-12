@@ -180,6 +180,7 @@ const LEGACY_STATE_FILE = path.join(REPO_ROOT, `.paperbot-worker-state-session_$
 
 // --- State ---
 let workerState = { usedKeys: [], positions: [], pendingReports: [] };
+const handledIntentIds = new Set();
 try {
   if (fs.existsSync(STATE_FILE)) {
     const loaded = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));

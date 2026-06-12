@@ -2,8 +2,9 @@ import crypto from 'node:crypto';
 import { getIdentity, isAdmin, canControlSession } from './_auth.mjs';
 import { loadFleet, saveFleet, mutateFleet, fleetBackend, fleetStoreInfo } from './_fleet-store.mjs';
 import { computeMarketRegime } from './_market-regime.mjs';
-import { evaluateAutoTrader, evaluateAutoTraderWithFallback } from '../../scripts/auto/auto-trader.mjs';
+import { evaluateAutoTrader, evaluateAutoTraderWithFallback, marketsFromSnapshot } from '../../scripts/auto/auto-trader.mjs';
 import { fetchBinancePublicUniverse } from '../../scripts/auto/binance-public.mjs';
+import { evaluateTradingRadar, defaultTradingRadarState } from '../../scripts/radar/trading-radar.mjs';
 
 const DEFAULT_STATE = {
   status: 'safety',
@@ -1943,6 +1944,7 @@ function sanitizeSnapshotMarket(m) {
     volume: num(m.volume),
     bidPrice: num(m.bidPrice),
     askPrice: num(m.askPrice),
+    lastPrice: num(m.lastPrice),
     spreadPct: num(m.spreadPct),
     priceChangePercent: num(m.priceChangePercent),
     source: AUTO_MARKET_SNAPSHOT_SOURCE,
@@ -1954,6 +1956,56 @@ function autoMarketSnapshotAgeMs(snapshot, nowMs = Date.now()) {
   if (!snapshot || !snapshot.fetchedAt) return Infinity;
   const t = new Date(snapshot.fetchedAt).getTime();
   return Number.isFinite(t) ? Math.max(0, nowMs - t) : Infinity;
+}
+
+function radarPositionContexts(fleet) {
+  const out = [];
+  for (const s of Object.values((fleet && fleet.botSessions) || {})) {
+    for (const p of sessionOpenPositions(fleet, s.sessionId)) {
+      out.push({
+        symbol: String(p.symbol || '').toUpperCase(),
+        entryPrice: Number.isFinite(Number(p.entryPrice ?? p.entry)) ? Number(p.entryPrice ?? p.entry) : null,
+        currentPrice: Number.isFinite(Number(p.currentPrice ?? p.price)) ? Number(p.currentPrice ?? p.price) : null,
+        openedAt: p.openedAt || p.createdAt || s.createdAt || null,
+        pnlPct: Number.isFinite(Number(p.pnlPct)) ? Number(p.pnlPct) : null,
+        mfePct: Number.isFinite(Number(p.mfePct)) ? Number(p.mfePct) : null,
+        sessionId: s.sessionId,
+        mode: s.mode || p.mode || null,
+      });
+    }
+  }
+  return out.filter((p) => p.symbol);
+}
+
+function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
+  const snapshot = fleet && fleet.autoMarketSnapshot;
+  const markets = snapshot ? marketsFromSnapshot(snapshot) : [];
+  const radar = evaluateTradingRadar({
+    markets,
+    source: snapshot && snapshot.source ? snapshot.source : 'no_public_snapshot',
+    fetchedAt: snapshot && snapshot.fetchedAt,
+    receivedAt: snapshot && snapshot.receivedAt,
+    now: nowMs,
+    positions: radarPositionContexts(fleet),
+    selectedSymbol: fleet && fleet.tradingRadar && fleet.tradingRadar.selected && fleet.tradingRadar.selected.symbol,
+  });
+  if (!snapshot || !Array.isArray(snapshot.markets) || snapshot.markets.length === 0) {
+    radar.missingSignals = Array.from(new Set([...(radar.missingSignals || []), 'public market snapshot'])).sort();
+    radar.dataCompleteness = Math.min(Number(radar.dataCompleteness) || 0, 20);
+  }
+  radar.sourceFetchedAt = snapshot && snapshot.fetchedAt ? snapshot.fetchedAt : null;
+  fleet.tradingRadar = radar || defaultTradingRadarState(new Date(nowMs).toISOString());
+  return fleet.tradingRadar;
+}
+
+function shouldRefreshTradingRadar(fleet, nowMs = Date.now()) {
+  const prev = fleet && fleet.tradingRadar;
+  if (!prev || !prev.updatedAt) return true;
+  const prevAt = new Date(prev.updatedAt).getTime();
+  if (!Number.isFinite(prevAt) || nowMs - prevAt > 60000) return true;
+  const prevSourceAt = prev.sourceFetchedAt || null;
+  const currentSourceAt = fleet && fleet.autoMarketSnapshot && fleet.autoMarketSnapshot.fetchedAt;
+  return Boolean(currentSourceAt && currentSourceAt !== prevSourceAt);
 }
 
 function autoPendingIntentForSession(fleet, sessionId) {
@@ -2172,6 +2224,7 @@ async function handleFleetWorker(req, base, body) {
         markets,
         diagnostics,
       };
+      refreshTradingRadarFromFleet(fleet);
       // Anti-spam: a snapshot lands every ~60s; only state TRANSITIONS are events.
       if (failed && (!prevFailed || !prev || (prev.diagnostics && prev.diagnostics.error) !== diagnostics.error)) {
         fevent(fleet, 'AUTO_MARKET_SNAPSHOT_FAILED', 'warn',
@@ -2945,6 +2998,10 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     }
     // --- End Opportunistic Tick ---
 
+    const tradingRadarView = shouldRefreshTradingRadar(fleet, nowMs)
+      ? refreshTradingRadarFromFleet(fleet, nowMs)
+      : (fleet.tradingRadar || defaultTradingRadarState(new Date(nowMs).toISOString()));
+
     return json(req, {
       ok: true,
       backend,
@@ -2962,6 +3019,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
       sessions,
       liveReadiness: liveReadiness(fleet, identity),
       autoTrader: autoTraderStatus(fleet, identity),
+      tradingRadar: tradingRadarView,
       liveAuditEvents: (fleet.liveAuditEvents || []).filter((e) => isAdmin(identity) || e.who === identity.email || e.who === identity.userId).slice(0, 50),
       globalKillSwitchActive: process.env.BOT_GLOBAL_KILL_SWITCH === 'true' || fleet.globalKillSwitch === true,
       // Echo the open-position session ids so the client can preserve them across
